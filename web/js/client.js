@@ -114,12 +114,13 @@ export class ChatClient {
       let stage = "hello";
       ws.onopen = () => this.send({ type: "hello", user: this.name, code: this.code, email, identity_key: b64e(this.identity.publicKey) });
       ws.onerror = () => { if (stage === "hello" || stage === "auth") reject(new ClientError("no se pudo conectar con el servidor", "down")); };
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
         if (stage === "hello" || stage === "auth") reject(new ClientError("el servidor cerró la conexión", "down"));
         for (const p of [...this.pending.values(), ...this.requests.values()]) p.reject(new ClientError("conexión cerrada"));
         this.pending.clear();
         this.requests.clear();
-        if (stage === "ready") this.emit("disconnected");
+        // 4000 = el servidor nos echa porque la cuenta se ha abierto en otro sitio
+        if (stage === "ready" && this.ws === ws) this.emit("disconnected", "", ev.code === 4000 ? "replaced" : "");
       };
       ws.onmessage = async (ev) => {
         let msg;

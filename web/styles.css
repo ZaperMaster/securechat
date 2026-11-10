@@ -602,3 +602,6 @@ dialog { max-height: min(88vh, 900px); overflow-y: auto; }
           var(--wall-image, none) center / cover no-repeat;
   background-attachment: local, local;
 }
+
+.offline-banner.replaced { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
+.offline-banner.replaced[hidden] { display: none; }

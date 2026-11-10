@@ -23,6 +23,7 @@ let client = null;
 let history = null;     // historial cifrado en este dispositivo
 let active = null;      // conversación abierta
 let connected = false;
+let replaced = false;   // la cuenta se abrió en otra pestaña o dispositivo
 const chats = new Map(); // peer -> {messages: [], online: bool|null}
 let reconnectTimer = null;
 let serverConfig = { code_required: false, email_required: false };
@@ -165,6 +166,8 @@ async function reconnect() {
 }
 
 function onConnected() {
+  replaced = false;
+  $("replaced-banner").hidden = true;
   setConn(true);
   showDown(false);
   renderHeader();
@@ -179,7 +182,14 @@ function scheduleReconnect(ms = 3000) {
 
 /** En móvil la conexión se corta al pasar la app a segundo plano: al volver, reconectamos ya. */
 function wakeUp() {
-  if (client && !connected) scheduleReconnect(50);
+  if (client && !connected && !replaced) scheduleReconnect(50);
+}
+
+/** "Usar aquí": recupera la cuenta en este dispositivo (la otra pestaña quedará en pausa). */
+function useHere() {
+  replaced = false;
+  $("replaced-banner").hidden = true;
+  reconnect();
 }
 
 // ---------------------------------------------------- servicio caído
@@ -237,6 +247,8 @@ async function logout({ keepSession = false } = {}) {
   $("messages").replaceChildren();
   $("contacts").replaceChildren();
   $("picker").hidden = true;
+  $("replaced-banner").hidden = true;
+  replaced = false;
   $("app").hidden = true;
   $("app").classList.remove("in-chat");
   $("login").hidden = false;
@@ -349,12 +361,21 @@ function onEvent(ev) {
       if (ev.peer && !/no está conectado|sesión caducada/.test(ev.text)) addMsg(ev.peer, { sys: ev.text, warn: true });
       break;
     case "disconnected":
-      if (client) {
-        connected = false;
+      if (!client) break;
+      connected = false;
+      if (ev.text === "replaced") {
+        // Otra pestaña o dispositivo ha abierto la misma cuenta: no peleamos por la conexión
+        replaced = true;
+        clearTimeout(reconnectTimer);
         setConn(false);
-        scheduleReconnect(document.hidden ? 3000 : 800);
-        probe().then((ok) => { if (!ok) showDown(true); });
+        $("conn").textContent = "Abierta en otro sitio";
+        $("offline-banner").hidden = true;
+        $("replaced-banner").hidden = false;
+        break;
       }
+      setConn(false);
+      scheduleReconnect(document.hidden ? 3000 : 800);
+      probe().then((ok) => { if (!ok) showDown(true); });
       break;
   }
 }
@@ -1095,6 +1116,7 @@ async function main() {
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () =>
     window.applyTheme(document.documentElement.dataset.theme));
   $("login-code").value = store.get("sc:code") || "";
+  $("use-here-btn").onclick = useHere;
   $("down-retry").onclick = async () => { if (await probe()) { showDown(false); if (client) reconnect(); } };
   const up = await probe();
   updateLoginMode();
