@@ -101,3 +101,20 @@ def test_python_sends_image_to_web():
         assert json.loads(out) == {"t": "image", "mime": "image/gif", "len": len(data)}
         await alice.close(); srv.close()
     run(main())
+
+
+def test_sealed_messages_between_web_and_python():
+    async def main():
+        srv, url, _ = await start_server()
+        alice = await new_client(url, "alice")
+        # La web envía un sobre sellado (como si Alice estuviera desconectada)
+        web = await _spawn("sealed", url, "webcarol", "alice")
+        assert (await next_event(alice, "message", timeout=15)).text == "sobre desde la web"
+        await asyncio.wait_for(web.wait(), 15)
+        # Python envía un sobre sellado a la web
+        web = await _spawn("listen", url, "webdave")
+        await alice._send_sealed(await alice.resolve("webdave"), json.dumps({"t": "text", "body": "sobre desde python"}))
+        assert (await next_event(alice, "message", timeout=15)).text == "eco: sobre desde python"
+        await asyncio.wait_for(web.wait(), 15)
+        await alice.close(); srv.close()
+    run(main())

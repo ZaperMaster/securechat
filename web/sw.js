@@ -1,6 +1,6 @@
 // Service worker: permite instalar SecureChat como app y abrirla sin red
 // (la interfaz carga; para enviar mensajes hace falta el servidor).
-const CACHE = "securechat-v3";
+const CACHE = "securechat-v4";
 const SHELL = [
   "./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg", "lock.svg", "icon-192.png", "icon-512.png",
   "js/theme.js", "js/app.js", "js/emoji.js", "js/client.js", "js/protocol.js",
@@ -19,7 +19,10 @@ self.addEventListener("activate", (e) => {
 
 // Red primero (para recibir siempre la última versión del código) y caché como respaldo.
 self.addEventListener("fetch", (e) => {
-  if (e.request.method !== "GET" || new URL(e.request.url).origin !== location.origin) return;
+  const url = new URL(e.request.url);
+  if (e.request.method !== "GET" || url.origin !== location.origin) return;
+  // config.json dice si el servidor está vivo: nunca desde la caché
+  if (url.pathname.endsWith("/config.json")) return;
   e.respondWith(
     fetch(e.request)
       .then((res) => {

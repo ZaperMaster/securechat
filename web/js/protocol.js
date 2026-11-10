@@ -222,3 +222,128 @@ export class Session {
     return new TextDecoder("utf-8", { fatal: true }).decode(pt);
   }
 }
+
+// ------------------------------------------- mensajes en diferido (sealed.py)
+
+const SPK_LIFETIME = 7 * 24 * 3600;
+const SPK_KEEP = 3;
+
+function u64be(n) { return u64(n); }
+
+export function spkMessage(user, spk, created) {
+  return encodeFields(PROTOCOL, utf8("spk"), utf8(user), spk, u64be(created));
+}
+
+/** Comprueba la prekey firmada de un contacto. Devuelve {ident, spk}. */
+export function verifyBundle(user, identityKeyB64, prekey, pinned) {
+  const ident = b64d(identityKeyB64), spk = b64d(prekey.spk);
+  if (pinned && !equal(pinned, ident)) throw new IdentityMismatch(user, pinned, ident);
+  if (spk.length !== 32) throw new CryptoError("prekey con longitud inválida");
+  verifySignature(ident, spkMessage(user, spk, prekey.created), b64d(prekey.sig));
+  return { ident, spk };
+}
+
+function sealedTranscript(sender, recipient, idS, idR, spk, eph, msgId) {
+  return S.crypto_generichash(32, encodeFields(PROTOCOL, utf8("sealed"), utf8(sender), utf8(recipient),
+    idS, idR, spk, eph, msgId), null);
+}
+
+function dh(priv, pub) {
+  let shared;
+  try { shared = S.crypto_scalarmult(priv, pub); } catch { throw new CryptoError("clave inválida"); }
+  if (S.is_zero(shared)) throw new CryptoError("clave inválida");
+  return shared;
+}
+
+export function seal(me, identity, peer, peerIdentity, spk, plaintext) {
+  const ephPriv = S.randombytes_buf(32);
+  const eph = S.crypto_scalarmult_base(ephPriv);
+  const msgId = S.randombytes_buf(16);
+  const th = sealedTranscript(me, peer, identity.publicKey, peerIdentity, spk, eph, msgId);
+  const key = kdf(dh(ephPriv, spk), "sc-sealed", th);
+  S.memzero(ephPriv);
+  const nonce = S.randombytes_buf(24);
+  const ct = S.crypto_aead_xchacha20poly1305_ietf_encrypt(utf8(plaintext), th, null, nonce, key);
+  return {
+    kind: "sealed", identity_key: b64e(identity.publicKey), spk: b64e(spk), eph: b64e(eph),
+    id: b64e(msgId), sig: b64e(S.crypto_sign_detached(th, identity.privateKey)),
+    nonce: b64e(nonce), ct: b64e(ct),
+  };
+}
+
+/** Abre un sobre sellado. Devuelve {text, ident}. */
+export function openSealed(me, identity, sender, p, prekeys, pinned) {
+  const idS = b64d(p.identity_key);
+  if (pinned && !equal(pinned, idS)) throw new IdentityMismatch(sender, pinned, idS);
+  const spk = b64d(p.spk), eph = b64d(p.eph), msgId = b64d(p.id);
+  const spkPriv = prekeys.privateFor(spk);
+  if (!spkPriv) throw new CryptoError("mensaje para una prekey que ya no existe");
+  const th = sealedTranscript(sender, me, idS, identity.publicKey, spk, eph, msgId);
+  verifySignature(idS, th, b64d(p.sig));
+  if (!prekeys.firstTime(p.id)) throw new CryptoError("mensaje repetido");
+  const key = kdf(dh(spkPriv, eph), "sc-sealed", th);
+  let pt;
+  try { pt = S.crypto_aead_xchacha20poly1305_ietf_decrypt(null, b64d(p.ct), th, b64d(p.nonce), key); }
+  catch { throw new CryptoError("mensaje manipulado"); }
+  return { text: new TextDecoder("utf-8", { fatal: true }).decode(pt), ident: idS };
+}
+
+/**
+ * Mis prekeys firmadas. Las privadas se guardan cifradas con una clave derivada
+ * de mi identidad (que solo está en memoria tras escribir la contraseña).
+ * `data` es lo guardado ({keys, seen}); `save` recibe lo que hay que guardar.
+ */
+export class PrekeyStore {
+  constructor(user, identity, data, save = () => {}) {
+    this.user = user;
+    this.identity = identity;
+    this.box = kdf(identity.seed, "sc-storage");
+    this.save = save;
+    this.keys = (data?.keys || []).map((k) => {
+      const raw = b64d(k.priv);
+      return { pub: b64d(k.pub), created: k.created,
+        priv: S.crypto_secretbox_open_easy(raw.subarray(24), raw.subarray(0, 24), this.box) };
+    });
+    this.seen = new Set(data?.seen || []);
+  }
+
+  current() {
+    const now = Math.floor(Date.now() / 1000);
+    if (!this.keys.length || now - this.keys.at(-1).created > SPK_LIFETIME) {
+      const priv = S.randombytes_buf(32);
+      this.keys.push({ priv, pub: S.crypto_scalarmult_base(priv), created: now });
+      this.keys = this.keys.slice(-SPK_KEEP);
+      this.persist();
+    }
+    return this.keys.at(-1);
+  }
+
+  bundle() {
+    const k = this.current();
+    const sig = S.crypto_sign_detached(spkMessage(this.user, k.pub, k.created), this.identity.privateKey);
+    return { spk: b64e(k.pub), sig: b64e(sig), created: k.created };
+  }
+
+  privateFor(pub) { return this.keys.find((k) => equal(k.pub, pub))?.priv || null; }
+
+  firstTime(id) {
+    if (this.seen.has(id)) return false;
+    this.seen.add(id);
+    if (this.seen.size > 2000) this.seen = new Set([...this.seen].slice(-1500));
+    this.persist();
+    return true;
+  }
+
+  persist() {
+    this.save({
+      keys: this.keys.map((k) => {
+        const nonce = S.randombytes_buf(24);
+        const ct = S.crypto_secretbox_easy(k.priv, nonce, this.box);
+        const all = new Uint8Array(24 + ct.length);
+        all.set(nonce); all.set(ct, 24);
+        return { pub: b64e(k.pub), created: k.created, priv: b64e(all) };
+      }),
+      seen: [...this.seen],
+    });
+  }
+}

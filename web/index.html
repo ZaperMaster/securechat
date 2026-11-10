@@ -43,6 +43,10 @@
           <span>Repite la contraseña</span>
           <input id="login-pass2" type="password" minlength="8" autocomplete="new-password">
         </label>
+        <label id="login-code-wrap" class="field" hidden>
+          <span>Código de acceso del servidor</span>
+          <input id="login-code" placeholder="ABCD-1234" autocapitalize="characters" spellcheck="false" maxlength="20">
+        </label>
         <p id="login-hint" class="hint"></p>
         <button id="login-btn" class="primary" type="submit">Entrar</button>
         <p id="login-error" class="error" role="alert"></p>
@@ -55,6 +59,18 @@
       <p class="disclaimer">Proyecto educativo, no auditado. No lo uses para información sensible real.</p>
     </div>
   </main>
+
+  <!-- Servicio caído -->
+  <div id="down" class="down" hidden role="alertdialog" aria-labelledby="down-title">
+    <div class="down-card">
+      <div class="down-icon" aria-hidden="true">🔌</div>
+      <h2 id="down-title">Servicio no disponible</h2>
+      <p>No se puede conectar con el servidor de SecureChat. Probablemente está apagado:
+         <strong>quien lo gestiona tiene que ponerlo en marcha</strong>.</p>
+      <p class="muted">Lo seguimos intentando cada pocos segundos. Tus mensajes y tu cuenta siguen guardados en este dispositivo.</p>
+      <button id="down-retry" class="primary" type="button">Reintentar ahora</button>
+    </div>
+  </div>
 
   <!-- Aplicación -->
   <div id="app" class="screen app" hidden>
@@ -87,6 +103,7 @@
     </aside>
 
     <section id="chat" class="chat">
+      <div id="offline-banner" class="offline-banner" hidden>Sin conexión con el servidor. Reintentando…</div>
       <header class="chat-head">
         <button id="back-btn" class="icon-btn back" type="button" aria-label="Volver">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>

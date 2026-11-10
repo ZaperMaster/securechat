@@ -34,7 +34,7 @@ if (mode === "keystore") {
   out(P.safetyNumber(args[0], P.b64d(args[1]), args[2], P.b64d(args[3])) + "\n" + P.fingerprint(P.b64d(args[1])));
 } else if (mode === "kdf") {
   out(P.b64e(P.kdf(P.b64d(args[0]), args[1], P.b64d(args[2]))));
-} else if (mode === "chat" || mode === "listen") {
+} else if (mode === "chat" || mode === "listen" || mode === "sealed") {
   const [url, name, peer] = args;
   const seed = P.newIdentitySeed();
   const kp = globalThis.sodium.crypto_sign_seed_keypair(seed);
@@ -51,4 +51,8 @@ if (mode === "keystore") {
   await client.connect(url);
   process.stderr.write("ready\n");
   if (mode === "chat") await client.sendText(peer, "hola desde la web ñ😀");
+  if (mode === "sealed") {
+    await client.sendSealed(await client.resolve(peer), JSON.stringify({ t: "text", body: "sobre desde la web" }));
+    finish(0);
+  }
 }

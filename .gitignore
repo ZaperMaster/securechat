@@ -5,3 +5,8 @@ __pycache__/
 server_users.json
 *.tmp
 certs/
+server_queue/
+privado/
+build/
+dist/
+*.spec

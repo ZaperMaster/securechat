@@ -52,6 +52,7 @@ async function onLogin(ev) {
       blob = { ...P.saveIdentity(P.newIdentitySeed(), pass), username: name };
     }
     identity = P.loadIdentity(blob, pass);
+    if (serverConfig.code_required) store.set("sc:code", $("login-code").value.trim());
     await startApp(blob.username || name);
     // Solo guardamos la cuenta nueva si el servidor aceptó el nombre
     if (isNew) store.set(idKey(me), { ...blob, username: me });
@@ -59,8 +60,10 @@ async function onLogin(ev) {
     $("login-pass").value = $("login-pass2").value = "";
   } catch (e) {
     identity = null;
+    if (e.code === "down") return showDown(true);
     $("login-error").textContent = e instanceof P.CryptoError && /contraseña/.test(e.message) ? "Contraseña incorrecta."
-      : /en uso/.test(e.message) ? `El usuario @${name} ya existe. Elige otro nombre.` : e.message;
+      : /en uso/.test(e.message) ? `El usuario @${name} ya existe. Elige otro nombre.`
+      : e.code === "bad_code" ? "Código de acceso incorrecto. Pídeselo a quien gestiona el servidor." : e.message;
   } finally {
     $("login-btn").disabled = false;
     updateLoginMode();
@@ -73,7 +76,9 @@ async function startApp(username) {
     renderContacts();
     renderHeader();
   });
-  client = new ChatClient(username, identity, contacts, onEvent);
+  const prekeys = new P.PrekeyStore(username, identity, store.get(`sc:prekeys:${username.toLowerCase()}`),
+    (data) => store.set(`sc:prekeys:${(me || username).toLowerCase()}`, data));
+  client = new ChatClient(username, identity, contacts, onEvent, { prekeys, code: store.get("sc:code") });
   try { await client.connect(wsUrl()); }
   catch (e) { client = null; throw e; }
   me = client.name;
@@ -94,9 +99,49 @@ async function reconnect() {
   try {
     await client.connect(wsUrl());
     setConn(true);
-  } catch {
+    renderHeader();
+  } catch (e) {
     setConn(false);
+    if (e.code === "bad_code" || e.code === "name_taken") {
+      // El servidor cambió de código (o de dueño): volver a la pantalla de acceso
+      logout();
+      $("login-error").textContent = e.code === "bad_code"
+        ? "El servidor ha cambiado su código de acceso. Pide el nuevo a quien lo gestiona."
+        : e.message;
+      return;
+    }
+    if (e.code === "down") probe().then((ok) => { if (!ok) showDown(true); });
     scheduleReconnect();
+  }
+}
+
+// ---------------------------------------------------- servicio caído
+
+let serverConfig = { code_required: false };
+let downTimer = null;
+
+/** Comprueba si el servidor responde. Devuelve true/false. */
+async function probe() {
+  try {
+    const r = await fetch(`config.json?t=${Date.now()}`, { cache: "no-store" });
+    if (!r.ok) return false;
+    serverConfig = await r.json();
+    $("login-code-wrap").hidden = !serverConfig.code_required;
+    $("login-code").required = serverConfig.code_required;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function showDown(down) {
+  $("down").hidden = !down;
+  clearTimeout(downTimer);
+  if (down) {
+    downTimer = setTimeout(async () => {
+      if (await probe()) { showDown(false); if (client) reconnect(); }
+      else showDown(true);
+    }, 4000);
   }
 }
 
@@ -108,6 +153,7 @@ function scheduleReconnect() {
 function setConn(on) {
   $("conn").textContent = on ? "En línea" : "Sin conexión, reintentando…";
   $("conn").className = `conn ${on ? "on" : "off"}`;
+  $("offline-banner").hidden = on;
 }
 
 function logout() {
@@ -119,6 +165,7 @@ function logout() {
   identity = null; me = null; active = null; profile = null;
   chats.clear();
   $("messages").replaceChildren();
+  $("contacts").replaceChildren();
   $("picker").hidden = true;
   $("app").hidden = true;
   $("login").hidden = false;
@@ -171,7 +218,7 @@ function onEvent(ev) {
     case "message": {
       const content = ev.content;
       if (content.t === "unsupported") return addMsg(ev.peer, { sys: `${displayName(ev.peer)} envió un contenido que esta versión no puede mostrar.` });
-      const entry = { from: "them", content };
+      const entry = { from: "them", content, ...(ev.queuedAt ? { time: new Date(ev.queuedAt * 1000) } : {}) };
       if (content.t === "image" || content.t === "video") {
         entry.url = URL.createObjectURL(new Blob([sodium.from_base64(content.data, sodium.base64_variants.ORIGINAL)], { type: content.mime }));
         delete content.data; // no guardamos dos copias en memoria
@@ -184,6 +231,10 @@ function onEvent(ev) {
       client.contacts.setProfile(ev.peer, ev.content);
       if (ev.peer === active) renderChat();
       break;
+    case "presence":
+      chat(ev.peer).online = ev.text === "online";
+      if (ev.peer === active) renderHeader();
+      break;
     case "session":
       chat(ev.peer).online = true;
       if (ev.text === "sesión iniciada" && !chat(ev.peer).messages.some((m) => m.sys)) {
@@ -195,13 +246,14 @@ function onEvent(ev) {
       addMsg(ev.peer, { sys: `⚠️ La clave de seguridad de @${ev.peer} ha cambiado. Si no ha cambiado de dispositivo, alguien podría estar suplantándole. Confírmalo con esa persona por otro medio.`, warn: true });
       break;
     case "warning":
-      if (ev.peer) {
-        if (/no está conectado/.test(ev.text)) { chat(ev.peer).online = false; renderHeader(); }
-        addMsg(ev.peer, { sys: ev.text, warn: true });
-      }
+      if (ev.peer && !/no está conectado/.test(ev.text)) addMsg(ev.peer, { sys: ev.text, warn: true });
       break;
     case "disconnected":
-      if (client) { setConn(false); scheduleReconnect(); }
+      if (client) {
+        setConn(false);
+        scheduleReconnect();
+        probe().then((ok) => { if (!ok) showDown(true); });
+      }
       break;
   }
 }
@@ -252,14 +304,13 @@ async function openChat(peer) {
   renderChat();
   updateTitle();
   $("text").focus();
-  if (!client.sessions.has(peer)) {
-    try { await client.openSession(peer); }
+  // Si está conectado, preparamos ya la sesión en vivo; si no, los mensajes irán en diferido.
+  if (!client.sessions.has(peer) && chat(peer).online !== false) {
+    try { await client.openSession(peer, 5000); }
     catch (e) {
-      const offline = /no está conectado|no respondió/.test(e.message);
-      chat(peer).online = offline ? false : chat(peer).online;
+      if (e instanceof P.IdentityMismatch) return;
+      chat(peer).online = false;
       renderHeader();
-      if (offline) addMsg(peer, { sys: `${displayName(peer)} no está conectado ahora. Podrás escribirle cuando se conecte.` });
-      else addMsg(peer, { sys: e.message, warn: true });
     }
   }
 }
@@ -267,19 +318,32 @@ async function openChat(peer) {
 async function send(content, local = {}) {
   const peer = active;
   if (!peer) return;
+  // El mensaje aparece al momento con ⏳ y se actualiza a ✓ (entregado) o 🕓 (en espera)
+  const m = addMsg(peer, { from: "me", content: { ...content, data: undefined }, ...local, status: "sending" });
   try {
-    await client.sendContent(peer, content);
-    if (content.t === "image" || content.t === "video") delete content.data;
-    addMsg(peer, { from: "me", content, ...local });
+    const { status } = await client.sendContent(peer, content);
+    setStatus(m, status);
+    if (status === "queued" && !chat(peer).queuedNotice) {
+      chat(peer).queuedNotice = true;
+      chat(peer).online = false;
+      renderHeader();
+      addMsg(peer, { sys: `🕓 ${displayName(peer)} no está conectado. Tus mensajes le llegarán cifrados en cuanto se conecte.` });
+    }
     askNotifications();
     return true;
   } catch (e) {
-    if (local.url) URL.revokeObjectURL(local.url);
-    const offline = /no está conectado|no respondió|conexión cerrada/.test(e.message);
-    if (offline) { chat(peer).online = false; renderHeader(); }
-    addMsg(peer, { sys: offline ? `No se pudo enviar: ${displayName(peer)} no está conectado.` : `No se pudo enviar: ${e.message}`, warn: true });
+    setStatus(m, "failed");
+    addMsg(peer, { sys: e instanceof P.IdentityMismatch ? e.message : `No se pudo enviar: ${e.message}`, warn: true });
     return false;
   }
+}
+
+const STATUS = { sending: ["⏳", "Enviando…"], delivered: ["✓", "Entregado"], queued: ["🕓", "En espera: se entregará cuando se conecte"], failed: ["⚠️", "No enviado"] };
+
+function setStatus(m, status) {
+  m.status = status;
+  const el = m.el?.querySelector(".tick");
+  if (el) { el.textContent = STATUS[status][0]; el.title = STATUS[status][1]; }
 }
 
 async function onSend(ev) {
@@ -288,7 +352,7 @@ async function onSend(ev) {
   if (!text.trim()) return;
   $("text").value = "";
   closePicker();
-  if (!await send({ t: "text", body: text })) $("text").value = text;
+  await send({ t: "text", body: text });
 }
 
 async function sendFile(file) {
@@ -507,8 +571,8 @@ function renderHeader() {
     const online = client.sessions.has(active) || chat(active).online;
     const status = $("peer-status");
     status.replaceChildren(text(`@${active}`, "span"), text("·", "span"),
-      client.sessions.has(active) ? text("🔒 cifrado", "span", "lock")
-        : text(online === false ? "desconectado" : "conectando…", "span"));
+      client.sessions.has(active) ? text("🟢 en línea · 🔒 cifrado", "span", "lock")
+        : text(online === false ? "desconectado · le llegará al conectarse" : "🔒 cifrado", "span"));
   }
   for (const id of ["text", "send-btn", "emoji-btn", "attach-btn"]) $(id).disabled = !has;
   $("chat").classList.toggle("is-empty", !has);
@@ -560,7 +624,14 @@ function appendMessage(m) {
       el.src = m.url;
       li.append(el);
     }
-    li.append(text(hhmm(m.time), "time"));
+    const t = text(hhmm(m.time), "time");
+    if (m.from === "me" && m.status) {
+      const tick = text(STATUS[m.status][0], "span", "tick");
+      tick.title = STATUS[m.status][1];
+      t.append(" ", tick);
+    }
+    li.append(t);
+    m.el = li;
   }
   $("messages").append(li);
   li.scrollIntoView({ block: "end" });
@@ -672,7 +743,10 @@ async function main() {
   });
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () =>
     window.applyTheme(document.documentElement.dataset.theme));
+  $("login-code").value = store.get("sc:code") || "";
+  $("down-retry").onclick = async () => { if (await probe()) { showDown(false); if (client) reconnect(); } };
   updateLoginMode();
+  if (!await probe()) showDown(true);
   if ($("login-name").value) $("login-pass").focus(); else $("login-name").focus();
   if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js");
 }

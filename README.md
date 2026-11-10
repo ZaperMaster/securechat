@@ -8,6 +8,10 @@ Mensajería 1 a 1 con cifrado extremo a extremo (E2E) sobre
 
 El servidor solo reenvía bytes cifrados: nunca ve el texto ni tiene claves para descifrarlo.
 
+Esta versión está pensada para **uso local**: el servidor escucha solo en tu equipo
+(o en tu red Wi-Fi con `--lan`) y pide un **código de acceso** que genera al
+arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede entrar.
+
 > ⚠️ **Proyecto educativo. No está auditado.** No lo uses para información sensible
 > real. Si necesitas mensajería segura de verdad, usa [Signal](https://signal.org).
 
@@ -33,6 +37,14 @@ El servidor solo reenvía bytes cifrados: nunca ve el texto ni tiene claves para
   fijada; si cambia, el cliente muestra un aviso y rechaza la sesión.
 - **Números de seguridad** (60 dígitos) en *Perfil → Seguridad avanzada*, para quien
   quiera descartar del todo que el propio servidor suplante a un contacto.
+- **Mensajes en diferido**: puedes escribir a alguien desconectado. El mensaje se
+  cifra con su *prekey* firmada (al estilo X3DH de Signal) y el servidor lo guarda
+  cifrado hasta que se conecta. Cada mensaje muestra ⏳ enviando, ✓ entregado o
+  🕓 en espera.
+- **Presencia**: ves si tu contacto está en línea, y la sesión se renueva sola
+  cuando alguien recarga la página.
+- **Servicio caído**: si el servidor está apagado, la app lo dice ("quien lo gestiona
+  tiene que ponerlo en marcha") y se reconecta sola cuando vuelve.
 - Protección contra **repetición, reflexión, manipulación** y claves de orden bajo.
 
 ## Uso rápido
@@ -49,10 +61,20 @@ Arranca el servidor (sirve la web y el relay en el mismo puerto):
 python -m securechat.server
 ```
 
+Al arrancar muestra la dirección y el **código de acceso** (por ejemplo `K7P2-9QXM`).
+Opciones útiles:
+
+- `--lan`: acepta conexiones de otros dispositivos de tu Wi-Fi (muestra tu IP local).
+- `--code MI-CODIGO`: usa un código fijo en vez de uno nuevo en cada arranque.
+- `--no-code`: sin código (solo para pruebas en tu equipo).
+
+Los datos del servidor (usuarios y mensajes en espera, siempre cifrados) se guardan
+en `server_users.json` y `server_queue/`.
+
 ### Web
 
 Abre <http://localhost:8765> en dos pestañas o navegadores y crea una cuenta en
-cada una (por ejemplo `Alice` y `bob`). Escribe el @usuario del otro en "Nuevo chat":
+cada una (por ejemplo `Alice` y `bob`) con el código de acceso del servidor. Escribe el @usuario del otro en "Nuevo chat":
 si no existe te lo dice y no se crea el chat. Pulsa sobre tu nombre para poner
 tu nombre visible y tu foto.
 
@@ -78,7 +100,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 (cambia `192.168.1.19` por la IP de tu PC: `ipconfig` en Windows). Luego:
 
 ```bash
-python -m securechat.server --host 0.0.0.0 --cert certs/cert.pem --key certs/key.pem
+python -m securechat.server --lan --cert certs/cert.pem --key certs/key.pem
 ```
 
 Abre `https://192.168.1.19:8765` en el móvil, acepta el aviso del certificado
@@ -88,16 +110,17 @@ red; no lo es para un despliegue real.
 
 ### Terminal
 
-Dos usuarios en dos terminales (pueden hablar también con usuarios de la web):
+Dos usuarios en dos terminales (pueden hablar también con usuarios de la web).
+Añade `--code` con el código del servidor a `chat`:
 
 ```bash
 python -m securechat init --name alice
-python -m securechat chat --name alice
+python -m securechat chat --name alice --code K7P2-9QXM
 ```
 
 ```bash
 python -m securechat init --name bob
-python -m securechat chat --name bob
+python -m securechat chat --name bob --code K7P2-9QXM
 ```
 
 Dentro del chat de Alice:
@@ -120,6 +143,7 @@ pytest -q
 ```
 securechat/
   crypto.py    almacén de claves, KDF, huellas y números de seguridad
+  sealed.py    mensajes en diferido: prekeys firmadas y sobres sellados
   content.py   formato del contenido cifrado (texto, foto, vídeo, sticker, perfil)
   session.py   handshake + cifrado de mensajes (sin E/S, fácil de testear)
   contacts.py  claves fijadas (TOFU) y estado de verificación
@@ -181,6 +205,27 @@ ct       = XChaCha20-Poly1305(mk_n, nonce aleatorio de 24 bytes, aad = th | emis
 El receptor rechaza contadores ya vistos (repeticiones) y saltos de más de 1000.
 Si falta un mensaje (destruido o manipulado), la sesión sigue y se avisa al usuario.
 
+Las sesiones solo viven mientras los dos siguen conectados. El servidor avisa
+(`presence`) cuando un contacto entra o sale y ambos lados descartan la sesión; la
+siguiente se negocia de nuevo. Así recargar la página nunca deja sesiones a medias.
+
+**Mensajes en diferido** (`sealed.py`, inspirado en X3DH sin *one-time prekeys*)
+
+Cada usuario publica una *signed prekey* que se renueva cada 7 días:
+
+```
+bundle(B) = { idB, SPK_B, Sig_B("spk" | B | SPK_B | fecha) }
+
+th  = BLAKE2b("sealed" | A | B | idA | idB | SPK_B | eph | id_mensaje)
+sig = Sig_A(th)
+k   = KDF(X25519(eph, SPK_B), th)
+ct  = XChaCha20-Poly1305(k, nonce, aad = th)
+```
+
+El servidor guarda el sobre (cifrado) y lo entrega cuando B se conecta. B comprueba
+la firma de A, rechaza identificadores de mensaje repetidos y descifra con la parte
+privada de su SPK, que guarda cifrada con una clave derivada de su identidad.
+
 ## Modelo de amenazas
 
 **Atacante considerado:** controla la red y/o el servidor relay. Puede leer, borrar,
@@ -218,7 +263,15 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **Secreto hacia atrás (post-compromise security)**: si alguien roba el estado de
   una sesión activa, puede leer el resto de esa sesión. Signal lo resuelve con el
   ratchet Diffie-Hellman de Double Ratchet; aquí solo hay ratchet simétrico.
-- **Mensajes sin conexión**: ambos usuarios deben estar conectados (no hay prekeys).
+- **Mensajes en diferido**: tienen un secreto hacia adelante más débil que las
+  sesiones en vivo. Quien robe la SPK privada de Bob (válida 7 días, y se guardan las
+  3 últimas) podría leer los sobres dirigidos a ella. Signal lo mitiga con
+  *one-time prekeys* y Double Ratchet.
+- **Un dispositivo por cuenta**: las prekeys viven en el navegador donde creaste la
+  cuenta. Si entras desde otro, los mensajes en espera para el primero no se podrán abrir.
+- **Presencia**: el servidor sabe cuándo te conectas y se lo dice a quien ha hablado contigo.
+- **Código de acceso**: unos 40 bits, con un máximo de 10 intentos fallidos por IP y
+  minuto. Es un filtro para que no entre cualquiera, no una medida de cifrado.
 - **Código servido por el propio servidor (web)**: en la versión web, el servidor
   entrega el JavaScript que cifra. Un servidor malicioso podría servir código
   modificado que filtre tus claves. Es el problema clásico del E2E en navegador;
@@ -236,7 +289,8 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - [x] Fase 2 – Huellas, números de seguridad y contactos verificados
 - [x] Fase 3 – Claves efímeras por sesión (secreto hacia adelante)
 - [x] Fase 4 – Interfaz web instalable (PWA), temas, perfiles y multimedia cifrada
-- [ ] Fase 5 – Mensajes sin conexión (prekeys firmadas, al estilo X3DH) y grupos
+- [x] Fase 5a – Mensajes en diferido con prekeys firmadas, presencia y código de acceso
+- [ ] Fase 5b – Grupos y *one-time prekeys*
 - [ ] Double Ratchet completo, TLS en el relay, historial local cifrado
 
 ## Referencias

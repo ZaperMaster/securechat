@@ -145,7 +145,8 @@ async def _repl(client: ChatClient) -> None:
 
 async def _chat(args, identity: SigningKey) -> None:
     contacts = Contacts(profile_dir(args) / "contacts.json")
-    client = ChatClient(args.name, identity, contacts)
+    client = ChatClient(args.name, identity, contacts,
+                        prekeys_path=profile_dir(args) / "prekeys.json", code=args.code)
     await client.connect(args.server)
     print(f"Conectado a {args.server} como {args.name}.")
     events = asyncio.create_task(_show_events(client))
@@ -181,6 +182,7 @@ def main() -> None:
     pc = sub.add_parser("chat", help="conecta al relay y chatea")
     pc.add_argument("--name", required=True)
     pc.add_argument("--server", default="ws://127.0.0.1:8765")
+    pc.add_argument("--code", help="código de acceso del servidor (si lo pide)")
     args = p.parse_args()
     if not USERNAME_RE.match(args.name):
         sys.exit(f"Nombre inválido: {USERNAME_HELP}.")
