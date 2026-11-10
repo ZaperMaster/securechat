@@ -47,6 +47,9 @@ arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede ent
   solos al reconectar. La app se reconecta en cuanto vuelves a ella.
 - **Sesión recordada e historial**: entras una vez y el dispositivo te recuerda. El
   historial (también fotos y vídeos) se guarda cifrado en el dispositivo.
+- **Iniciar sesión desde cualquier dispositivo**: pantallas separadas de "Iniciar
+  sesión" y "Crear cuenta". El servidor guarda una copia de tu clave **cifrada con tu
+  contraseña** (Argon2id), así que basta con usuario y contraseña en otro equipo.
 - **Verificación por correo** opcional al crear cuenta, para frenar bots.
 - **Personalización**: 9 temas, color propio, fondos de chat (o tu foto), tamaño de
   letra, forma de las burbujas, estado en el perfil y apodos para tus contactos.
@@ -286,6 +289,10 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **Sesión recordada**: la semilla de tu identidad queda cifrada con una clave
   WebCrypto no exportable. Nadie puede copiarla a otro equipo, pero quien use tu
   navegador sí podría abrir la app. "Cerrar sesión" la borra del dispositivo.
+- **Copia de la clave en el servidor**: está cifrada con tu contraseña y el servidor
+  no puede abrirla, pero quien la descargue podría intentar adivinar la contraseña sin
+  conexión. Por eso la descarga está limitada (10 por minuto e IP), exige el código de
+  acceso si lo hay, y Argon2id hace cada intento lento. Usa una contraseña larga.
 - **Historial local**: va cifrado con una clave derivada de tu identidad. Protege
   frente a quien copie los ficheros del navegador sin tu sesión, no frente a malware.
 - **Correo**: el servidor lo ve al crear la cuenta para enviarte el código, pero solo

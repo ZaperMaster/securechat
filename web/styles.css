@@ -605,3 +605,12 @@ dialog { max-height: min(88vh, 900px); overflow-y: auto; }
 
 .offline-banner.replaced { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
 .offline-banner.replaced[hidden] { display: none; }
+
+/* Iniciar sesión / Registrarte */
+.auth-title { margin: 0; font-size: 20px; }
+.auth-sub { margin: -8px 0 0; font-size: 13px; color: var(--muted); }
+#login-form[data-mode="login"] .register-only { display: none !important; }
+#login-form[data-mode="register"] .login-only { display: none !important; }
+.auth-switch { text-align: center; font-size: 14px; color: var(--muted); margin: 0; }
+button.link-strong { color: var(--accent); font-weight: 700; padding: 2px 4px; background: none; }
+button.link-strong:hover { text-decoration: underline; }

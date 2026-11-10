@@ -28,22 +28,24 @@
         <h1>SecureChat</h1>
         <p class="muted">Mensajes cifrados de extremo a extremo.<br>El servidor nunca ve lo que escribes.</p>
       </div>
-      <form id="login-form" autocomplete="off">
+      <form id="login-form" autocomplete="off" data-mode="login">
+        <h2 id="auth-title" class="auth-title">Iniciar sesión</h2>
+        <p id="auth-sub" class="auth-sub">Entra con tu usuario y contraseña desde cualquier dispositivo.</p>
         <label class="field">
           <span>Nombre de usuario</span>
           <input id="login-name" required pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{1,30}[A-Za-z0-9_]" placeholder="Alejandro_99"
-                 autocapitalize="none" spellcheck="false" maxlength="32"
+                 autocapitalize="none" spellcheck="false" maxlength="32" autocomplete="username"
                  title="3-32 caracteres: letras, números, '_', '.' o '-'">
         </label>
         <label class="field">
           <span>Contraseña</span>
           <input id="login-pass" type="password" required minlength="8" autocomplete="current-password">
         </label>
-        <label id="login-pass2-wrap" class="field" hidden>
+        <label id="login-pass2-wrap" class="field register-only">
           <span>Repite la contraseña</span>
           <input id="login-pass2" type="password" minlength="8" autocomplete="new-password">
         </label>
-        <label id="login-email-wrap" class="field" hidden>
+        <label id="login-email-wrap" class="field register-only" hidden>
           <span>Correo electrónico</span>
           <input id="login-email" type="email" maxlength="254" autocomplete="email" placeholder="tu@correo.com">
           <small class="hint">Te enviaremos un código para comprobar que eres una persona. No se muestra a nadie.</small>
@@ -59,6 +61,8 @@
         <p id="login-hint" class="hint"></p>
         <button id="login-btn" class="primary" type="submit">Entrar</button>
         <p id="login-error" class="error" role="alert"></p>
+        <p class="auth-switch login-only">¿No tienes cuenta? <button id="to-register" class="link-strong" type="button">Regístrate</button></p>
+        <p class="auth-switch register-only">¿Ya tienes cuenta? <button id="to-login" class="link-strong" type="button">Inicia sesión</button></p>
       </form>
       <div id="verify-step" class="verify-step" hidden>
         <div class="verify-icon" aria-hidden="true">📬</div>

@@ -143,3 +143,34 @@ def test_email_verification_for_new_accounts(tmp_path):
             await other.connect(url, email="persona.real@example.com", on_verify=on_verify)
         srv.close()
     run(main())
+
+
+def test_keystore_backup_allows_login_from_another_device(tmp_path):
+    async def main():
+        import nacl.pwhash
+        from securechat.crypto import load_identity, save_identity
+        srv, url = await start(RelayServer(tmp_path / "u.json", None, "CODE-1234"))
+        key = SigningKey.generate()
+        save_identity(tmp_path / "id.json", key, "contraseña larga", opslimit=2, memlimit=64 * 1024 * 1024)
+        blob = json.loads((tmp_path / "id.json").read_text(encoding="utf-8"))
+        c = await client(url, "Movil", key, tmp_path, code="CODE-1234")
+        await c._send(type="keystore", blob={**blob, "username": "Movil"})
+        await c._send(type="keystore", blob={**blob, "public_key": blob["salt"]})  # ajena: se rechaza
+        await asyncio.sleep(0.2)
+        assert c.ws.state.name == "OPEN"  # una copia mala no corta la conexión
+        await c.close()
+
+        assert (await http_get(url, "/keystore?user=movil"))[0] == 403  # sin código de acceso
+        status, _, body = await http_get(url, "/keystore?user=movil&code=CODE-1234")
+        assert status == 200
+        got = json.loads(body)
+        assert got["user"] == "Movil" and got["blob"]["public_key"] == blob["public_key"]
+        # Otro dispositivo: con la copia y la contraseña recupera la misma identidad
+        (tmp_path / "otro.json").write_text(json.dumps(got["blob"]), encoding="utf-8")
+        assert bytes(load_identity(tmp_path / "otro.json", "contraseña larga")) == bytes(key)
+        assert (await http_get(url, "/keystore?user=nadie&code=CODE-1234"))[0] == 404
+        for _ in range(12):
+            last = (await http_get(url, "/keystore?user=movil&code=CODE-1234"))[0]
+        assert last == 429  # límite de descargas por minuto
+        srv.close()
+    run(main())

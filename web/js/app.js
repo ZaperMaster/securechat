@@ -31,46 +31,77 @@ const prefs = () => window.SC_PREFS();
 
 // ---------------------------------------------------------------- acceso
 
+// Pantalla de acceso con dos modos: "login" (principal) y "register"
+let authMode = "login";
+
+function setAuthMode(mode) {
+  authMode = mode;
+  $("login-form").dataset.mode = mode;
+  $("login-error").textContent = "";
+  updateLoginMode();
+  $("login-name").focus();
+}
+
 function updateLoginMode() {
+  const reg = authMode === "register";
   const name = $("login-name").value.trim();
-  const blob = NAME_RE.test(name) && store.get(idKey(name));
-  const creating = !blob && NAME_RE.test(name);
-  $("login-pass2-wrap").hidden = !creating;
-  $("login-pass2").required = creating;
-  $("login-email-wrap").hidden = !(creating && serverConfig.email_required);
-  $("login-email").required = creating && serverConfig.email_required;
-  $("login-btn").textContent = blob ? "Entrar" : "Crear cuenta";
-  $("login-hint").textContent = !NAME_RE.test(name) ? (name ? "3-32 caracteres: letras, números, '_', '.' o '-'." : "")
-    : blob ? `Cuenta @${blob.username || name} encontrada en este dispositivo.`
-    : "Tu @usuario es único. Después podrás poner tu nombre visible y una foto. Si olvidas la contraseña no se puede recuperar.";
-  $("login-pass").autocomplete = blob ? "current-password" : "new-password";
+  $("auth-title").textContent = reg ? "Crear cuenta" : "Iniciar sesión";
+  $("auth-sub").textContent = reg
+    ? "Elige tu @usuario y una contraseña. Después podrás poner tu nombre visible y una foto."
+    : "Entra con tu usuario y contraseña desde cualquier dispositivo.";
+  $("login-pass2").required = reg;
+  $("login-email-wrap").hidden = !(reg && serverConfig.email_required);
+  $("login-email").required = reg && serverConfig.email_required;
+  $("login-btn").textContent = reg ? "Crear cuenta" : "Entrar";
+  $("login-pass").autocomplete = reg ? "new-password" : "current-password";
+  $("login-hint").textContent = name && !NAME_RE.test(name) ? "3-32 caracteres: letras, números, '_', '.' o '-'."
+    : reg ? "Si olvidas la contraseña no se puede recuperar: nadie (ni el servidor) puede abrir tu cuenta sin ella." : "";
   $("login-remember-wrap").hidden = !Vault.canRemember();
+}
+
+/** Busca la copia cifrada de la cuenta: primero en este dispositivo y si no, en el servidor. */
+async function findKeystore(name) {
+  const local = store.get(idKey(name));
+  if (local) return local;
+  const code = encodeURIComponent($("login-code").value.trim());
+  let r;
+  try { r = await fetch(`keystore?user=${encodeURIComponent(name)}&code=${code}`, { cache: "no-store" }); }
+  catch { throw Object.assign(new Error("No se puede conectar con el servidor."), { code: "down" }); }
+  if (r.status === 404) return null;
+  if (r.status === 403) throw Object.assign(new Error("bad code"), { code: "bad_code" });
+  if (r.status === 429) throw new Error("Demasiados intentos. Espera un minuto.");
+  if (!r.ok) throw new Error("El servidor no ha podido responder. Inténtalo de nuevo.");
+  const { user, blob } = await r.json();
+  return { ...blob, username: user };
 }
 
 async function onLogin(ev) {
   ev.preventDefault();
-  const name = $("login-name").value.trim();
+  const name = $("login-name").value.trim().replace(/^@/, "");
   const pass = $("login-pass").value;
+  const reg = authMode === "register";
   $("login-error").textContent = "";
   $("login-btn").disabled = true;
-  $("login-btn").textContent = "Derivando clave…";
+  $("login-btn").textContent = reg ? "Creando cuenta…" : "Comprobando…";
   await new Promise((r) => setTimeout(r, 30)); // deja pintar antes de Argon2id
   try {
-    let blob = store.get(idKey(name));
-    const isNew = !blob;
-    if (isNew) {
-      if (pass !== $("login-pass2").value) throw new Error("Las contraseñas no coinciden.");
-      blob = { ...P.saveIdentity(P.newIdentitySeed(), pass), username: name };
-    }
-    identity = P.loadIdentity(blob, pass);
     if (serverConfig.code_required) store.set("sc:code", $("login-code").value.trim());
-    if (isNew) {
-      // La cuenta nueva solo se guarda si el servidor acepta el nombre (y el correo)
-      $("login-btn").textContent = "Creando cuenta…";
-      await startApp(name, { mustConnect: true, email: $("login-email").value.trim() || null });
-      store.set(idKey(me), { ...blob, username: me });
+    if (reg) {
+      if (pass !== $("login-pass2").value) throw new Error("Las contraseñas no coinciden.");
+      if (store.get(idKey(name))) throw new Error(`Ya tienes la cuenta @${name} en este dispositivo. Inicia sesión.`);
+      const blob = { ...P.saveIdentity(P.newIdentitySeed(), pass), username: name };
+      identity = P.loadIdentity(blob, pass);
+      // La cuenta solo se guarda si el servidor acepta el nombre (y el correo)
+      await startApp(name, { mustConnect: true, email: $("login-email").value.trim() || null, blob });
     } else {
-      await startApp(blob.username || name);
+      const blob = await findKeystore(name);
+      if (!blob) throw new Error("Usuario o contraseña incorrectos.");
+      $("login-btn").textContent = "Abriendo tu cuenta…";
+      await new Promise((r) => setTimeout(r, 30));
+      try { identity = P.loadIdentity(blob, pass); }
+      catch { throw new Error("Usuario o contraseña incorrectos."); }
+      store.set(idKey(blob.username || name), blob);
+      await startApp(blob.username || name, { blob });
     }
     if ($("login-remember").checked) await Vault.remember(me, identity.seed);
     $("login-pass").value = $("login-pass2").value = "";
@@ -78,9 +109,8 @@ async function onLogin(ev) {
     identity = null;
     client = null;
     hideVerify();
-    if (e.code === "down") return showDown(true);
-    $("login-error").textContent = e instanceof P.CryptoError && /contraseña/.test(e.message) ? "Contraseña incorrecta."
-      : /en uso/.test(e.message) ? `El usuario @${name} ya existe. Elige otro nombre.`
+    if (e.code === "down") { showDown(true); return; }
+    $("login-error").textContent = /en uso/.test(e.message) ? `El usuario @${name} ya existe. Elige otro nombre o inicia sesión.`
       : e.code === "bad_code" ? "Código de acceso incorrecto. Pídeselo a quien gestiona el servidor." : e.message;
   } finally {
     $("login-btn").disabled = false;
@@ -107,7 +137,7 @@ function hideVerify() {
   $("login-form").hidden = false;
 }
 
-async function startApp(username, { mustConnect = false, email = null } = {}) {
+async function startApp(username, { mustConnect = false, email = null, blob = null } = {}) {
   const contacts = new Contacts(store.get(`sc:contacts:${username.toLowerCase()}`) || {}, (data) => {
     store.set(`sc:contacts:${(me || username).toLowerCase()}`, data);
     renderContacts();
@@ -121,6 +151,7 @@ async function startApp(username, { mustConnect = false, email = null } = {}) {
     await client.connect(wsUrl(), { email, onVerify: askVerifyCode });
     me = client.name;
     connected = true;
+    if (blob) store.set(idKey(me), { ...blob, username: me });
   }
   history = new Vault.History(me, identity.seed);
   profile = store.get(`sc:profile:${me.toLowerCase()}`) || { name: me, bio: "", avatar: null };
@@ -166,6 +197,9 @@ async function reconnect() {
 }
 
 function onConnected() {
+  // Copia de la clave cifrada con tu contraseña: permite iniciar sesión desde otro dispositivo
+  const blob = store.get(idKey(me));
+  if (blob) { try { client.send({ type: "keystore", blob }); } catch { /* se reintentará */ } }
   replaced = false;
   $("replaced-banner").hidden = true;
   setConn(true);
@@ -252,6 +286,8 @@ async function logout({ keepSession = false } = {}) {
   $("app").hidden = true;
   $("app").classList.remove("in-chat");
   $("login").hidden = false;
+  authMode = "login";
+  $("login-form").dataset.mode = "login";
   updateLoginMode();
 }
 
@@ -1078,6 +1114,8 @@ async function main() {
   $("login-name").value = last || "";
   $("login-name").addEventListener("input", updateLoginMode);
   $("login-form").addEventListener("submit", onLogin);
+  $("to-register").onclick = () => setAuthMode("register");
+  $("to-login").onclick = () => setAuthMode("login");
   $("composer").addEventListener("submit", onSend);
   $("text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !prefs().enterSends && window.matchMedia("(pointer: fine)").matches) {

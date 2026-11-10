@@ -54,6 +54,7 @@ QUEUE_MAX_MSGS = 300
 QUEUE_MAX_BYTES = 64 * 1024 * 1024
 QUEUE_TTL = 14 * 24 * 3600
 CODE_FAILS_LIMIT = 10  # intentos fallidos de código por IP y minuto
+KEYSTORE_LIMIT = 10    # descargas de copias de clave por IP y minuto
 
 # Con PyInstaller los ficheros de la web van dentro del .exe (sys._MEIPASS).
 _BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
@@ -92,8 +93,10 @@ def serve_static(connection: ServerConnection, request: Request) -> Response | N
     if request.headers.get("Upgrade", "").lower() == "websocket":
         return None
     path = request.path.split("?", 1)[0]
+    relay = getattr(connection.server, "relay", None)
+    if path == "/keystore" and relay is not None:
+        return relay.keystore_response(connection, request)
     if path == "/config.json":  # la web pregunta si este servidor pide código de acceso
-        relay = getattr(connection.server, "relay", None)
         body = json.dumps({"code_required": bool(relay and relay.access_code),
                            "email_required": bool(relay and relay.email_sender)}).encode()
         return _response(200, "OK", body, "application/json")
@@ -147,6 +150,7 @@ class RelayServer:
         # Si hay código, solo entra quien lo conozca (el dueño se lo da a sus amigos)
         self.access_code = normalize_code(access_code) or None
         self._code_fails: dict[str, list[float]] = {}
+        self._keystore_hits: dict[str, list[float]] = {}
         # canon(nombre) -> {"name": grafía registrada, "key": bytes, "bundle": dict | None}
         self.registry: dict[str, dict] = {}
         self.online: dict[str, ServerConnection] = {}       # canon -> conexión
@@ -157,7 +161,8 @@ class RelayServer:
                 if isinstance(v, str):  # formato antiguo: {"nombre": "clave"}
                     v = {"name": name, "key": v}
                 self.registry[canon(v["name"])] = {"name": v["name"], "key": b64d(v["key"]),
-                                                   "bundle": v.get("bundle"), "email": v.get("email")}
+                                                   "bundle": v.get("bundle"), "email": v.get("email"),
+                                                   "keystore": v.get("keystore")}
         if queue_dir and queue_dir.exists():
             for f in queue_dir.glob("*.json"):
                 self.queues[f.stem] = json.loads(f.read_text(encoding="utf-8"))
@@ -167,7 +172,8 @@ class RelayServer:
     def _save(self) -> None:
         if not self.db_path:
             return
-        data = {c: {"name": r["name"], "key": b64e(r["key"]), "bundle": r["bundle"], "email": r.get("email")}
+        data = {c: {"name": r["name"], "key": b64e(r["key"]), "bundle": r["bundle"], "email": r.get("email"),
+                    "keystore": r.get("keystore")}
                 for c, r in self.registry.items()}
         tmp = self.db_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -298,6 +304,11 @@ class RelayServer:
                         await _send(ws, type="bundle", id=msg.get("id"), **self._bundle(msg.get("user")))
                 elif t == "prekey":
                     await self._store_prekey(ws, c, msg)
+                elif t == "keystore":
+                    try:
+                        self._store_keystore(c, msg.get("blob"))
+                    except (ValueError, KeyError, TypeError, CryptoError) as exc:
+                        await _send(ws, type="error", code="bad_keystore", message=str(exc))
                 elif t == "who":
                     await _send(ws, type="who", users=sorted(self.registry[x]["name"] for x in self.online))
                 else:
@@ -344,6 +355,52 @@ class RelayServer:
             return info
         r = self.registry[canon(name)]
         return {**info, "identity_key": b64e(r["key"]), "prekey": r["bundle"]}
+
+    # --------------------------------------------- copia cifrada de la clave
+
+    def _store_keystore(self, c: str, blob) -> None:
+        """Guarda la clave del usuario CIFRADA con su contraseña (Argon2id + XSalsa20).
+
+        Sirve para iniciar sesión desde otro dispositivo. El servidor no puede abrirla;
+        solo comprueba que es la clave de esta cuenta (misma clave pública).
+        """
+        r = self.registry[c]
+        if not isinstance(blob, dict) or len(json.dumps(blob)) > 4096:
+            raise ValueError("copia de clave inválida")
+        required = {"version", "kdf", "opslimit", "memlimit", "salt", "public_key", "ciphertext"}
+        if not required <= blob.keys() or b64d(blob["public_key"]) != r["key"]:
+            raise ValueError("copia de clave inválida")
+        if blob.get("opslimit", 0) < 2 or blob.get("memlimit", 0) < 32 * 1024 * 1024:
+            raise ValueError("parámetros de Argon2id demasiado débiles")
+        clean = {k: blob[k] for k in sorted(required | {"username"}) if k in blob}
+        if r.get("keystore") != clean:
+            r["keystore"] = clean
+            self._save()
+
+    def keystore_response(self, connection: ServerConnection, request: Request) -> Response:
+        """GET /keystore?user=NOMBRE[&code=CODIGO]: copia cifrada para iniciar sesión.
+
+        Cualquiera que la descargue podría intentar adivinar la contraseña sin conexión,
+        así que se limita el ritmo por IP y, si el servidor tiene código, se exige.
+        """
+        from urllib.parse import parse_qs, urlsplit
+        q = parse_qs(urlsplit(request.path).query)
+        ip = (connection.remote_address or ("?",))[0]
+        if ip in ("127.0.0.1", "::1"):
+            ip = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For", ip).split(",")[0].strip()
+        now = time.monotonic()
+        hits = self._keystore_hits[ip] = [t for t in self._keystore_hits.get(ip, []) if now - t < 60] + [now]
+        if len(hits) > KEYSTORE_LIMIT:
+            return _response(429, "Too Many Requests", b'{"error": "demasiados intentos, espera un minuto"}',
+                             "application/json")
+        if self.access_code and not hmac.compare_digest(normalize_code(q.get("code", [""])[0]), self.access_code):
+            return _response(403, "Forbidden", b'{"error": "codigo de acceso incorrecto"}', "application/json")
+        name = q.get("user", [""])[0]
+        r = self.registry.get(canon(name)) if USERNAME_RE.match(name) else None
+        if not r or not r.get("keystore"):
+            return _response(404, "Not Found", b'{"error": "no encontrada"}', "application/json")
+        body = json.dumps({"user": r["name"], "blob": r["keystore"]}).encode()
+        return _response(200, "OK", body, "application/json")
 
     async def _store_prekey(self, ws: ServerConnection, c: str, msg: dict) -> None:
         r = self.registry[c]
