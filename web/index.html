@@ -19,7 +19,7 @@
 <body>
   <!-- Pantalla de acceso -->
   <main id="login" class="screen login">
-    <button id="login-theme-btn" class="icon-btn corner" type="button" title="Cambiar tema" aria-label="Cambiar tema">
+    <button id="login-theme-btn" class="icon-btn corner" type="button" title="Personalizar" aria-label="Personalizar">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.4A4.6 4.6 0 0 0 22 9.8C22 6 17.5 3 12 3Z"/><circle cx="7.5" cy="11" r="1.4"/><circle cx="10.5" cy="7" r="1.4"/><circle cx="15.5" cy="7.5" r="1.4"/></svg>
     </button>
     <div class="login-card">
@@ -43,14 +43,35 @@
           <span>Repite la contraseña</span>
           <input id="login-pass2" type="password" minlength="8" autocomplete="new-password">
         </label>
+        <label id="login-email-wrap" class="field" hidden>
+          <span>Correo electrónico</span>
+          <input id="login-email" type="email" maxlength="254" autocomplete="email" placeholder="tu@correo.com">
+          <small class="hint">Te enviaremos un código para comprobar que eres una persona. No se muestra a nadie.</small>
+        </label>
         <label id="login-code-wrap" class="field" hidden>
           <span>Código de acceso del servidor</span>
           <input id="login-code" placeholder="ABCD-1234" autocapitalize="characters" spellcheck="false" maxlength="20">
+        </label>
+        <label id="login-remember-wrap" class="check">
+          <input id="login-remember" type="checkbox" checked>
+          <span>Mantener la sesión iniciada en este dispositivo</span>
         </label>
         <p id="login-hint" class="hint"></p>
         <button id="login-btn" class="primary" type="submit">Entrar</button>
         <p id="login-error" class="error" role="alert"></p>
       </form>
+      <div id="verify-step" class="verify-step" hidden>
+        <div class="verify-icon" aria-hidden="true">📬</div>
+        <h2>Revisa tu correo</h2>
+        <p>Te hemos enviado un código de 6 dígitos a <strong id="verify-to"></strong>.</p>
+        <form id="verify-form">
+          <input id="verify-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+                 pattern="[0-9]{6}" placeholder="000000" required aria-label="Código de verificación">
+          <p id="verify-error" class="error" role="alert"></p>
+          <button class="primary" type="submit">Verificar y crear cuenta</button>
+          <button id="verify-cancel" class="link" type="button">Cancelar</button>
+        </form>
+      </div>
       <ul class="features">
         <li><b>X25519</b> intercambio de claves</li>
         <li><b>XChaCha20</b> cifrado autenticado</li>
@@ -83,7 +104,7 @@
             <span id="conn" class="conn"></span>
           </span>
         </button>
-        <button id="theme-btn" class="icon-btn" type="button" title="Tema" aria-label="Cambiar tema">
+        <button id="theme-btn" class="icon-btn" type="button" title="Personalizar" aria-label="Personalizar">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.4A4.6 4.6 0 0 0 22 9.8C22 6 17.5 3 12 3Z"/><circle cx="7.5" cy="11" r="1.4"/><circle cx="10.5" cy="7" r="1.4"/><circle cx="15.5" cy="7.5" r="1.4"/></svg>
         </button>
       </header>

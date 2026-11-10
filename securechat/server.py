@@ -36,6 +36,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 
 from .crypto import CryptoError, b64d, b64e, encode_fields, verify_signature
+from .email_verify import CODE_TTL, MAX_TRIES, EmailHasher, mask, new_code, normalize_email, valid_email
 
 log = logging.getLogger("securechat.server")
 
@@ -93,7 +94,8 @@ def serve_static(connection: ServerConnection, request: Request) -> Response | N
     path = request.path.split("?", 1)[0]
     if path == "/config.json":  # la web pregunta si este servidor pide código de acceso
         relay = getattr(connection.server, "relay", None)
-        body = json.dumps({"code_required": bool(relay and relay.access_code)}).encode()
+        body = json.dumps({"code_required": bool(relay and relay.access_code),
+                           "email_required": bool(relay and relay.email_sender)}).encode()
         return _response(200, "OK", body, "application/json")
     if path == "/":
         path = "/index.html"
@@ -136,9 +138,12 @@ def spk_message(user: str, spk: bytes, created: int) -> bytes:
 
 class RelayServer:
     def __init__(self, db_path: Path | None = None, queue_dir: Path | None = None,
-                 access_code: str | None = None):
+                 access_code: str | None = None, email_sender=None):
         self.db_path = db_path
         self.queue_dir = queue_dir
+        # Con email_sender, las cuentas nuevas deben confirmar un correo (anti-bots)
+        self.email_sender = email_sender
+        self.email_hash = EmailHasher(db_path.with_name(db_path.stem + "_secret.key") if db_path else None)
         # Si hay código, solo entra quien lo conozca (el dueño se lo da a sus amigos)
         self.access_code = normalize_code(access_code) or None
         self._code_fails: dict[str, list[float]] = {}
@@ -152,7 +157,7 @@ class RelayServer:
                 if isinstance(v, str):  # formato antiguo: {"nombre": "clave"}
                     v = {"name": name, "key": v}
                 self.registry[canon(v["name"])] = {"name": v["name"], "key": b64d(v["key"]),
-                                                   "bundle": v.get("bundle")}
+                                                   "bundle": v.get("bundle"), "email": v.get("email")}
         if queue_dir and queue_dir.exists():
             for f in queue_dir.glob("*.json"):
                 self.queues[f.stem] = json.loads(f.read_text(encoding="utf-8"))
@@ -162,7 +167,7 @@ class RelayServer:
     def _save(self) -> None:
         if not self.db_path:
             return
-        data = {c: {"name": r["name"], "key": b64e(r["key"]), "bundle": r["bundle"]}
+        data = {c: {"name": r["name"], "key": b64e(r["key"]), "bundle": r["bundle"], "email": r.get("email")}
                 for c, r in self.registry.items()}
         tmp = self.db_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -209,7 +214,15 @@ class RelayServer:
 
         known = self.registry.get(canon(user))
         if known is None:
-            self.registry[canon(user)] = {"name": user, "key": key, "bundle": None}
+            email_hash = None
+            if self.email_sender:
+                email_hash = await self._verify_email(ws, hello.get("email"))
+                if email_hash is None:
+                    return None
+                if canon(user) in self.registry:  # alguien lo registró mientras tanto
+                    await _send(ws, type="error", code="name_taken", message="ese nombre de usuario ya está en uso")
+                    return None
+            self.registry[canon(user)] = {"name": user, "key": key, "bundle": None, "email": email_hash}
             self._save()
             log.info("nuevo usuario registrado: %s", user)
             return user
@@ -217,6 +230,39 @@ class RelayServer:
             await _send(ws, type="error", code="name_taken", message="ese nombre de usuario ya está en uso")
             return None
         return known["name"]  # siempre con la grafía con la que se registró
+
+    async def _verify_email(self, ws: ServerConnection, email) -> str | None:
+        """Envía un código al correo y espera a que el usuario lo escriba."""
+        if not valid_email(email):
+            await _send(ws, type="error", code="email_required",
+                        message="para crear una cuenta en este servidor hace falta un correo válido")
+            return None
+        email = normalize_email(email)
+        h = self.email_hash(email)
+        if any(r.get("email") == h for r in self.registry.values()):
+            await _send(ws, type="error", code="email_used", message="ese correo ya tiene una cuenta")
+            return None
+        code = new_code()
+        try:
+            await self.email_sender.send(email, code)
+        except Exception:  # noqa: BLE001 - cualquier fallo de SMTP
+            log.exception("no se pudo enviar el correo")
+            await _send(ws, type="error", code="email_failed",
+                        message="el servidor no pudo enviar el correo; avisa a quien lo gestiona")
+            return None
+        await _send(ws, type="verify_needed", to=mask(email))
+        deadline = time.monotonic() + CODE_TTL
+        for left in range(MAX_TRIES - 1, -1, -1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            msg = json.loads(await asyncio.wait_for(ws.recv(), remaining))
+            if msg.get("type") == "verify" and hmac.compare_digest(str(msg.get("code", "")).strip(), code):
+                return h
+            if left:
+                await _send(ws, type="verify_failed", left=left, message=f"código incorrecto, te quedan {left} intentos")
+        await _send(ws, type="error", code="verify_failed", message="no se pudo verificar el correo; vuelve a intentarlo")
+        return None
 
     async def handler(self, ws: ServerConnection) -> None:
         user = None
@@ -399,6 +445,10 @@ def main() -> None:
                    help="carpeta donde guardar los mensajes cifrados en espera")
     p.add_argument("--code", help="código de acceso (por defecto se genera uno al arrancar)")
     p.add_argument("--no-code", action="store_true", help="no pedir código de acceso")
+    p.add_argument("--email", action="store_true",
+                   help="exigir verificación por correo al crear cuenta (SMTP en variables SECURECHAT_SMTP_*)")
+    p.add_argument("--email-pruebas", action="store_true",
+                   help="verificación por correo, pero el código se muestra en esta consola")
     p.add_argument("--cert", type=Path, help="certificado TLS (PEM) para servir por HTTPS")
     p.add_argument("--key", type=Path, help="clave privada TLS (PEM)")
     args = p.parse_args()
@@ -410,7 +460,16 @@ def main() -> None:
     code = None if args.no_code else (args.code or new_access_code())
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     print_banner(args.port, code, args.lan, bool(tls))
-    relay = RelayServer(args.db, args.queue, code)
+    sender = None
+    if args.email_pruebas:
+        from .email_verify import ConsoleSender
+        sender = ConsoleSender()
+    elif args.email:
+        from .email_verify import SmtpSender
+        sender = SmtpSender.from_env()
+        if sender is None:
+            p.error("--email necesita SECURECHAT_SMTP_HOST, _USER, _PASSWORD (y opcional _PORT, _FROM)")
+    relay = RelayServer(args.db, args.queue, code, sender)
     try:
         asyncio.run(run(host, args.port, relay=relay, tls=tls))
     except KeyboardInterrupt:

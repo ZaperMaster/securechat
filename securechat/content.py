@@ -6,7 +6,11 @@ Cada mensaje cifrado es un JSON con un campo "t" (tipo):
     {"t": "image",   "mime": "image/png", "name": "foto.png", "data": "<base64>"}
     {"t": "video",   "mime": "video/mp4", "name": "clip.mp4", "data": "<base64>"}
     {"t": "sticker", "id": "🔥"}
-    {"t": "profile", "name": "Alejandro", "avatar": "<base64 jpeg>" | null}
+    {"t": "profile", "name": "Alejandro", "bio": "…", "avatar": "<base64 jpeg>" | null}
+    {"t": "receipt", "ids": ["<mid>", …], "s": "delivered" | "read"}
+
+Los mensajes visibles llevan además "mid", un identificador aleatorio que el
+destinatario usa para confirmar la entrega o la lectura (los dos checks).
 
 Como el tipo viaja cifrado, el servidor no sabe si envías texto, una foto o tu
 perfil; solo ve el tamaño aproximado.
@@ -15,6 +19,7 @@ perfil; solo ve el tamaño aproximado.
 from __future__ import annotations
 
 import json
+import secrets
 
 IMAGE_MIME = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 VIDEO_MIME = {"video/mp4", "video/webm", "video/quicktime"}
@@ -22,8 +27,16 @@ MAX_MEDIA = 8 * 1024 * 1024
 MAX_NAME = 64
 
 
+def new_mid() -> str:
+    return secrets.token_urlsafe(12)
+
+
 def text(body: str) -> str:
-    return json.dumps({"t": "text", "body": body}, ensure_ascii=False)
+    return json.dumps({"t": "text", "body": body, "mid": new_mid()}, ensure_ascii=False)
+
+
+def receipt(ids: list[str], status: str) -> str:
+    return json.dumps({"t": "receipt", "ids": ids, "s": status})
 
 
 def decode(plaintext: str) -> dict:

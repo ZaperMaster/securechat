@@ -19,17 +19,22 @@ export function decodeContent(plaintext) {
   try { c = JSON.parse(plaintext); } catch { return { t: "text", body: plaintext }; }
   if (!c || typeof c !== "object" || typeof c.t !== "string") return { t: "text", body: plaintext };
   const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
+  const mid = /^[A-Za-z0-9_-]{8,32}$/.test(c.mid) ? c.mid : null;
   switch (c.t) {
-    case "text": return { t: "text", body: str(c.body, 20000) };
-    case "sticker": return { t: "sticker", id: str(c.id, 16) };
+    case "text": return { t: "text", body: str(c.body, 20000), mid };
+    case "sticker": return { t: "sticker", id: str(c.id, 16), mid };
     case "image": case "video": {
       const allowed = c.t === "image" ? IMAGE_MIME : VIDEO_MIME;
-      if (!allowed.includes(c.mime) || typeof c.data !== "string") return { t: "unsupported" };
-      return { t: c.t, mime: c.mime, name: str(c.name, 120), data: c.data };
+      if (!allowed.includes(c.mime) || typeof c.data !== "string") return { t: "unsupported", mid };
+      return { t: c.t, mime: c.mime, name: str(c.name, 120), data: c.data, mid };
     }
     case "profile": {
       const avatar = typeof c.avatar === "string" && c.avatar.length < 200000 ? c.avatar : null;
-      return { t: "profile", name: str(c.name, 64).trim(), avatar };
+      return { t: "profile", name: str(c.name, 64).trim(), bio: str(c.bio, 140).trim(), avatar };
+    }
+    case "receipt": {
+      const ids = Array.isArray(c.ids) ? c.ids.filter((x) => /^[A-Za-z0-9_-]{8,32}$/.test(x)).slice(0, 500) : [];
+      return { t: "receipt", ids, s: c.s === "read" ? "read" : "delivered" };
     }
     default: return { t: "unsupported" };
   }
@@ -40,7 +45,7 @@ export class Contacts {
   constructor(data = {}, onChange = () => {}) {
     this.items = new Map(Object.entries(data).map(([n, c]) => [n, {
       name: n, key: b64d(c.identity_key), verified: c.verified,
-      displayName: c.display_name || "", avatar: c.avatar || null,
+      displayName: c.display_name || "", avatar: c.avatar || null, bio: c.bio || "", nick: c.nick || "",
     }]));
     this.onChange = onChange;
   }
@@ -53,11 +58,14 @@ export class Contacts {
     this.save();
   }
   setVerified(name, v = true) { this.items.get(name).verified = v; this.save(); }
+  /** Apodo que solo ves tú (no se envía a nadie). */
+  setNick(name, nick) { const c = this.items.get(name); if (c) { c.nick = nick.trim().slice(0, 64); this.save(); } }
   /** Perfil que el contacto nos envió dentro de la sesión cifrada. */
-  setProfile(name, { name: displayName, avatar }) {
+  setProfile(name, { name: displayName, avatar, bio }) {
     const c = this.items.get(name);
     if (!c) return;
     c.displayName = displayName || "";
+    c.bio = bio || "";
     c.avatar = typeof avatar === "string" && /^[A-Za-z0-9+/=]+$/.test(avatar) ? avatar : null;
     this.save();
   }
@@ -66,6 +74,7 @@ export class Contacts {
   toJSON() {
     return Object.fromEntries([...this.items.values()].map((c) => [c.name, {
       identity_key: b64e(c.key), verified: c.verified, display_name: c.displayName, avatar: c.avatar,
+      bio: c.bio || "", nick: c.nick || "",
     }]));
   }
   save() { this.onChange(this.toJSON()); }
@@ -94,12 +103,16 @@ export class ChatClient {
     this.profile = null; // {name, avatar}: se envía cifrado a cada contacto
   }
 
-  connect(url) {
+  /**
+   * Conecta y se autentica. Al crear cuenta, si el servidor pide verificar un correo,
+   * se llama a `onVerify(destino, error)`, que debe devolver el código recibido.
+   */
+  connect(url, { email = null, onVerify = null } = {}) {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       this.ws = ws;
       let stage = "hello";
-      ws.onopen = () => this.send({ type: "hello", user: this.name, code: this.code, identity_key: b64e(this.identity.publicKey) });
+      ws.onopen = () => this.send({ type: "hello", user: this.name, code: this.code, email, identity_key: b64e(this.identity.publicKey) });
       ws.onerror = () => { if (stage === "hello" || stage === "auth") reject(new ClientError("no se pudo conectar con el servidor", "down")); };
       ws.onclose = () => {
         if (stage === "hello" || stage === "auth") reject(new ClientError("el servidor cerró la conexión", "down"));
@@ -115,6 +128,11 @@ export class ChatClient {
           if (msg.type !== "challenge") { stage = "failed"; return reject(new ClientError(msg.message || "respuesta inesperada", msg.code)); }
           this.send({ type: "auth", sig: b64e(signAuth(this.identity, b64d(msg.nonce), this.name)) });
           stage = "auth";
+        } else if (stage === "auth" && (msg.type === "verify_needed" || msg.type === "verify_failed")) {
+          if (!onVerify) { stage = "failed"; ws.close(); return reject(new ClientError("este servidor pide verificar tu correo", "email_required")); }
+          if (msg.type === "verify_needed") this.verifyTarget = msg.to;
+          try { this.send({ type: "verify", code: await onVerify(this.verifyTarget, msg.type === "verify_failed" ? msg.message : null) }); }
+          catch (e) { stage = "failed"; ws.close(); reject(e); }
         } else if (stage === "auth") {
           if (msg.type !== "welcome") { stage = "failed"; return reject(new ClientError(msg.message || "autenticación rechazada", msg.code)); }
           stage = "ready";
@@ -279,7 +297,8 @@ export class ChatClient {
 
   onContent(sender, text, queuedAt) {
     const c = decodeContent(text);
-    if (c.t === "profile") this.emit("profile", sender, "", { name: c.name, avatar: c.avatar });
+    if (c.t === "receipt") return this.emit("receipt", sender, c.s, c);
+    if (c.t === "profile") this.emit("profile", sender, "", { name: c.name, bio: c.bio, avatar: c.avatar });
     else this.emit("message", sender, c.t === "text" ? c.body : "", c, queuedAt);
   }
 

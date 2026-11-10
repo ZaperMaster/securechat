@@ -10,3 +10,4 @@ privado/
 build/
 dist/
 *.spec
+*_secret.key

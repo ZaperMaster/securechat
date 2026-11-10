@@ -39,8 +39,17 @@ arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede ent
   quiera descartar del todo que el propio servidor suplante a un contacto.
 - **Mensajes en diferido**: puedes escribir a alguien desconectado. El mensaje se
   cifra con su *prekey* firmada (al estilo X3DH de Signal) y el servidor lo guarda
-  cifrado hasta que se conecta. Cada mensaje muestra ⏳ enviando, ✓ entregado o
-  🕓 en espera.
+  cifrado hasta que se conecta.
+- **Checks como WhatsApp**: 🕓 enviando, ✓ enviado, ✓✓ entregado y ✓✓ azul leído.
+  Las confirmaciones viajan cifradas y las de lectura se pueden desactivar.
+- **Bandeja de salida**: si te quedas sin conexión (por ejemplo, el móvil corta la
+  conexión al pasar la app a segundo plano), los mensajes esperan con 🕓 y salen
+  solos al reconectar. La app se reconecta en cuanto vuelves a ella.
+- **Sesión recordada e historial**: entras una vez y el dispositivo te recuerda. El
+  historial (también fotos y vídeos) se guarda cifrado en el dispositivo.
+- **Verificación por correo** opcional al crear cuenta, para frenar bots.
+- **Personalización**: 9 temas, color propio, fondos de chat (o tu foto), tamaño de
+  letra, forma de las burbujas, estado en el perfil y apodos para tus contactos.
 - **Presencia**: ves si tu contacto está en línea, y la sesión se renueva sola
   cuando alguien recarga la página.
 - **Servicio caído**: si el servidor está apagado, la app lo dice ("quien lo gestiona
@@ -67,6 +76,11 @@ Opciones útiles:
 - `--lan`: acepta conexiones de otros dispositivos de tu Wi-Fi (muestra tu IP local).
 - `--code MI-CODIGO`: usa un código fijo en vez de uno nuevo en cada arranque.
 - `--no-code`: sin código (solo para pruebas en tu equipo).
+- `--email`: pide verificar un correo al crear cuenta. Necesita un servidor SMTP en
+  las variables `SECURECHAT_SMTP_HOST`, `SECURECHAT_SMTP_USER`,
+  `SECURECHAT_SMTP_PASSWORD` (y opcionalmente `_PORT` y `_FROM`). Con Gmail, usa una
+  *contraseña de aplicación*.
+- `--email-pruebas`: igual, pero el código se muestra en la consola del servidor.
 
 Los datos del servidor (usuarios y mensajes en espera, siempre cifrados) se guardan
 en `server_users.json` y `server_queue/`.
@@ -144,6 +158,7 @@ pytest -q
 securechat/
   crypto.py    almacén de claves, KDF, huellas y números de seguridad
   sealed.py    mensajes en diferido: prekeys firmadas y sobres sellados
+  email_verify.py  verificación por correo (SMTP o consola)
   content.py   formato del contenido cifrado (texto, foto, vídeo, sticker, perfil)
   session.py   handshake + cifrado de mensajes (sin E/S, fácil de testear)
   contacts.py  claves fijadas (TOFU) y estado de verificación
@@ -155,6 +170,7 @@ web/
   js/client.js    port de client.py
   js/app.js       interfaz (solo usa textContent: nunca interpreta HTML recibido)
   js/emoji.js     emojis y stickers
+  js/vault.js     sesión recordada (WebCrypto) e historial cifrado (IndexedDB)
   sw.js, manifest.webmanifest   PWA instalable
   vendor/         libsodium.js 0.7.15 (copiado, sin CDN)
 tests/
@@ -267,6 +283,15 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
   sesiones en vivo. Quien robe la SPK privada de Bob (válida 7 días, y se guardan las
   3 últimas) podría leer los sobres dirigidos a ella. Signal lo mitiga con
   *one-time prekeys* y Double Ratchet.
+- **Sesión recordada**: la semilla de tu identidad queda cifrada con una clave
+  WebCrypto no exportable. Nadie puede copiarla a otro equipo, pero quien use tu
+  navegador sí podría abrir la app. "Cerrar sesión" la borra del dispositivo.
+- **Historial local**: va cifrado con una clave derivada de tu identidad. Protege
+  frente a quien copie los ficheros del navegador sin tu sesión, no frente a malware.
+- **Correo**: el servidor lo ve al crear la cuenta para enviarte el código, pero solo
+  guarda una huella (HMAC con un secreto propio) para impedir cuentas repetidas.
+- **Confirmaciones de entrega y lectura**: van cifradas, pero su tamaño y momento
+  revelan al servidor que hubo actividad. Las de lectura se pueden desactivar.
 - **Un dispositivo por cuenta**: las prekeys viven en el navegador donde creaste la
   cuenta. Si entras desde otro, los mensajes en espera para el primero no se podrán abrir.
 - **Presencia**: el servidor sabe cuándo te conectas y se lo dice a quien ha hablado contigo.
@@ -290,7 +315,8 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - [x] Fase 3 – Claves efímeras por sesión (secreto hacia adelante)
 - [x] Fase 4 – Interfaz web instalable (PWA), temas, perfiles y multimedia cifrada
 - [x] Fase 5a – Mensajes en diferido con prekeys firmadas, presencia y código de acceso
-- [ ] Fase 5b – Grupos y *one-time prekeys*
+- [x] Fase 5b – Checks de entrega/lectura, bandeja de salida, historial cifrado, sesión recordada y verificación por correo
+- [ ] Fase 6 – Grupos, *one-time prekeys* y varios dispositivos por cuenta
 - [ ] Double Ratchet completo, TLS en el relay, historial local cifrado
 
 ## Referencias

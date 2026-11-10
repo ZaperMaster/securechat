@@ -4,6 +4,7 @@
 import { ChatClient, ClientError, Contacts, IMAGE_MIME, MAX_MEDIA, VIDEO_MIME } from "./client.js";
 import { EMOJIS, STICKERS } from "./emoji.js";
 import * as P from "./protocol.js";
+import * as Vault from "./vault.js";
 
 const $ = (id) => document.getElementById(id);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{1,30}[A-Za-z0-9_]$/;
@@ -13,27 +14,36 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch { /* */ } },
 };
 const idKey = (name) => `sc:identity:${name.toLowerCase()}`;
+const newId = () => sodium.to_base64(sodium.randombytes_buf(12), sodium.base64_variants.URLSAFE_NO_PADDING);
 
 let me = null;          // mi @usuario (grafía oficial)
 let identity = null;    // {seed, publicKey, privateKey}
-let profile = null;     // {name, avatar}: lo que ven los demás
+let profile = null;     // {name, bio, avatar}: lo que ven los demás
 let client = null;
+let history = null;     // historial cifrado en este dispositivo
 let active = null;      // conversación abierta
-const chats = new Map(); // peer -> {messages: [], unread: 0, online: bool|null}
+let connected = false;
+const chats = new Map(); // peer -> {messages: [], online: bool|null}
 let reconnectTimer = null;
+let serverConfig = { code_required: false, email_required: false };
+const prefs = () => window.SC_PREFS();
 
 // ---------------------------------------------------------------- acceso
 
 function updateLoginMode() {
   const name = $("login-name").value.trim();
   const blob = NAME_RE.test(name) && store.get(idKey(name));
-  $("login-pass2-wrap").hidden = !!blob || !NAME_RE.test(name);
-  $("login-pass2").required = !blob;
+  const creating = !blob && NAME_RE.test(name);
+  $("login-pass2-wrap").hidden = !creating;
+  $("login-pass2").required = creating;
+  $("login-email-wrap").hidden = !(creating && serverConfig.email_required);
+  $("login-email").required = creating && serverConfig.email_required;
   $("login-btn").textContent = blob ? "Entrar" : "Crear cuenta";
   $("login-hint").textContent = !NAME_RE.test(name) ? (name ? "3-32 caracteres: letras, números, '_', '.' o '-'." : "")
-    : blob ? `Cuenta @${blob.username || name} encontrada en este navegador.`
+    : blob ? `Cuenta @${blob.username || name} encontrada en este dispositivo.`
     : "Tu @usuario es único. Después podrás poner tu nombre visible y una foto. Si olvidas la contraseña no se puede recuperar.";
   $("login-pass").autocomplete = blob ? "current-password" : "new-password";
+  $("login-remember-wrap").hidden = !Vault.canRemember();
 }
 
 async function onLogin(ev) {
@@ -53,13 +63,20 @@ async function onLogin(ev) {
     }
     identity = P.loadIdentity(blob, pass);
     if (serverConfig.code_required) store.set("sc:code", $("login-code").value.trim());
-    await startApp(blob.username || name);
-    // Solo guardamos la cuenta nueva si el servidor aceptó el nombre
-    if (isNew) store.set(idKey(me), { ...blob, username: me });
-    store.set("sc:last", me);
+    if (isNew) {
+      // La cuenta nueva solo se guarda si el servidor acepta el nombre (y el correo)
+      $("login-btn").textContent = "Creando cuenta…";
+      await startApp(name, { mustConnect: true, email: $("login-email").value.trim() || null });
+      store.set(idKey(me), { ...blob, username: me });
+    } else {
+      await startApp(blob.username || name);
+    }
+    if ($("login-remember").checked) await Vault.remember(me, identity.seed);
     $("login-pass").value = $("login-pass2").value = "";
   } catch (e) {
     identity = null;
+    client = null;
+    hideVerify();
     if (e.code === "down") return showDown(true);
     $("login-error").textContent = e instanceof P.CryptoError && /contraseña/.test(e.message) ? "Contraseña incorrecta."
       : /en uso/.test(e.message) ? `El usuario @${name} ya existe. Elige otro nombre.`
@@ -70,41 +87,73 @@ async function onLogin(ev) {
   }
 }
 
-async function startApp(username) {
+/** Pide al usuario el código que le llegó por correo. */
+function askVerifyCode(to, error) {
+  return new Promise((resolve, reject) => {
+    $("login-form").hidden = true;
+    $("verify-step").hidden = false;
+    $("verify-to").textContent = to;
+    $("verify-error").textContent = error || "";
+    $("verify-code").value = "";
+    $("verify-code").focus();
+    $("verify-form").onsubmit = (e) => { e.preventDefault(); resolve($("verify-code").value.trim()); };
+    $("verify-cancel").onclick = () => { hideVerify(); reject(new Error("Has cancelado la verificación.")); };
+  });
+}
+
+function hideVerify() {
+  $("verify-step").hidden = true;
+  $("login-form").hidden = false;
+}
+
+async function startApp(username, { mustConnect = false, email = null } = {}) {
   const contacts = new Contacts(store.get(`sc:contacts:${username.toLowerCase()}`) || {}, (data) => {
-    store.set(`sc:contacts:${me.toLowerCase()}`, data);
+    store.set(`sc:contacts:${(me || username).toLowerCase()}`, data);
     renderContacts();
     renderHeader();
   });
   const prekeys = new P.PrekeyStore(username, identity, store.get(`sc:prekeys:${username.toLowerCase()}`),
     (data) => store.set(`sc:prekeys:${(me || username).toLowerCase()}`, data));
   client = new ChatClient(username, identity, contacts, onEvent, { prekeys, code: store.get("sc:code") });
-  try { await client.connect(wsUrl()); }
-  catch (e) { client = null; throw e; }
-  me = client.name;
-  profile = store.get(`sc:profile:${me.toLowerCase()}`) || { name: me, avatar: null };
+  me = username;
+  if (mustConnect) {
+    await client.connect(wsUrl(), { email, onVerify: askVerifyCode });
+    me = client.name;
+    connected = true;
+  }
+  history = new Vault.History(me, identity.seed);
+  profile = store.get(`sc:profile:${me.toLowerCase()}`) || { name: me, bio: "", avatar: null };
   client.profile = profile;
-  setConn(true);
+  store.set("sc:last", me);
+  chats.clear();
+  for (const [peer, list] of await history.loadAll()) chats.set(peer, { messages: list, online: null });
+  hideVerify();
   $("login").hidden = true;
   $("app").hidden = false;
   renderMe();
   renderContacts();
   renderChat();
+  updateTitle();
+  if (connected) onConnected();
+  else reconnect();
 }
 
 const wsUrl = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;
 
 async function reconnect() {
   if (!client) return;
+  clearTimeout(reconnectTimer);
   try {
     await client.connect(wsUrl());
-    setConn(true);
-    renderHeader();
+    me = client.name;
+    connected = true;
+    onConnected();
   } catch (e) {
+    connected = false;
     setConn(false);
     if (e.code === "bad_code" || e.code === "name_taken") {
       // El servidor cambió de código (o de dueño): volver a la pantalla de acceso
-      logout();
+      logout({ keepSession: true });
       $("login-error").textContent = e.code === "bad_code"
         ? "El servidor ha cambiado su código de acceso. Pide el nuevo a quien lo gestiona."
         : e.message;
@@ -115,9 +164,26 @@ async function reconnect() {
   }
 }
 
+function onConnected() {
+  setConn(true);
+  showDown(false);
+  renderHeader();
+  flushOutbox();
+  if (active) markRead(active);
+}
+
+function scheduleReconnect(ms = 3000) {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(reconnect, ms);
+}
+
+/** En móvil la conexión se corta al pasar la app a segundo plano: al volver, reconectamos ya. */
+function wakeUp() {
+  if (client && !connected) scheduleReconnect(50);
+}
+
 // ---------------------------------------------------- servicio caído
 
-let serverConfig = { code_required: false };
 let downTimer = null;
 
 /** Comprueba si el servidor responde. Devuelve true/false. */
@@ -128,6 +194,7 @@ async function probe() {
     serverConfig = await r.json();
     $("login-code-wrap").hidden = !serverConfig.code_required;
     $("login-code").required = serverConfig.code_required;
+    updateLoginMode();
     return true;
   } catch {
     return false;
@@ -135,7 +202,12 @@ async function probe() {
 }
 
 function showDown(down) {
-  $("down").hidden = !down;
+  // Con la sesión iniciada no tapamos la app: se puede leer el historial y escribir
+  // (los mensajes esperan en la bandeja de salida). Basta con la franja de aviso.
+  $("down").hidden = !down || !!client;
+  $("offline-banner").textContent = down
+    ? "El servicio no está disponible: quien lo gestiona tiene que ponerlo en marcha. Tus mensajes se enviarán al volver."
+    : "Sin conexión. Reconectando…";
   clearTimeout(downTimer);
   if (down) {
     downTimer = setTimeout(async () => {
@@ -145,36 +217,38 @@ function showDown(down) {
   }
 }
 
-function scheduleReconnect() {
-  clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(reconnect, 3000);
-}
-
 function setConn(on) {
-  $("conn").textContent = on ? "En línea" : "Sin conexión, reintentando…";
+  $("conn").textContent = on ? "En línea" : "Conectando…";
   $("conn").className = `conn ${on ? "on" : "off"}`;
   $("offline-banner").hidden = on;
 }
 
-function logout() {
+/** Cierra la sesión. Con keepSession no olvida la clave recordada (cambio de código). */
+async function logout({ keepSession = false } = {}) {
   clearTimeout(reconnectTimer);
   const c = client;
   client = null;
+  connected = false;
   c?.close();
+  if (!keepSession && me) await Vault.forget(me);
   for (const ch of chats.values()) for (const m of ch.messages) if (m.url) URL.revokeObjectURL(m.url);
-  identity = null; me = null; active = null; profile = null;
+  identity = null; me = null; active = null; profile = null; history = null;
   chats.clear();
   $("messages").replaceChildren();
   $("contacts").replaceChildren();
   $("picker").hidden = true;
   $("app").hidden = true;
+  $("app").classList.remove("in-chat");
   $("login").hidden = false;
   updateLoginMode();
 }
 
 // ------------------------------------------------------------- nombres
 
-const displayName = (peer) => client?.contacts.get(peer)?.displayName || peer;
+const displayName = (peer) => {
+  const c = client?.contacts.get(peer);
+  return c?.nick || c?.displayName || peer;
+};
 const avatarOf = (peer) => client?.contacts.get(peer)?.avatar || null;
 
 /** Avatar: la foto si la hay; si no, la inicial con un color estable según el nombre. */
@@ -195,71 +269,152 @@ function setAvatar(el, name, photo) {
   return el;
 }
 
-// ---------------------------------------------------------------- eventos
+// ------------------------------------------------------------ mensajes
 
 function chat(peer) {
-  if (!chats.has(peer)) chats.set(peer, { messages: [], unread: 0, online: null });
+  if (!chats.has(peer)) chats.set(peer, { messages: [], online: null });
   return chats.get(peer);
 }
 
-function addMsg(peer, entry) {
-  const c = chat(peer);
-  const m = { time: new Date(), ...entry };
-  c.messages.push(m);
-  if (m.from === "them" && (peer !== active || document.hidden)) c.unread += 1;
+const unreadOf = (peer) => chats.get(peer)?.messages.filter((m) => m.from === "them" && !m.read).length || 0;
+
+/** Añade un mensaje a la conversación, lo pinta y lo guarda cifrado. */
+function addMsg(peer, entry, { persist = true } = {}) {
+  const m = { id: newId(), time: new Date(), ...entry };
+  chat(peer).messages.push(m);
   if (peer === active) appendMessage(m);
   renderContacts();
   updateTitle();
+  if (persist) history?.put(peer, m);
   return m;
+}
+
+function sysOnce(peer, text) {
+  if (!chat(peer).messages.some((m) => m.sys === text)) addMsg(peer, { sys: text });
+}
+
+const ORDER = { sending: 0, sent: 1, delivered: 2, read: 3 };
+const STATUS = {
+  sending: ["🕓", "Enviando…"],
+  sent: ["✓", "Enviado"],
+  delivered: ["✓✓", "Entregado"],
+  read: ["✓✓", "Leído"],
+  failed: ["⚠️", "No se pudo enviar"],
+};
+
+function setStatus(peer, m, status) {
+  if (m.status === status) return;
+  if (status !== "failed" && m.status in ORDER && ORDER[status] < ORDER[m.status]) return; // nunca hacia atrás
+  m.status = status;
+  history?.put(peer, m);
+  const el = m.el?.querySelector(".tick");
+  if (el) paintTick(el, status);
+}
+
+function paintTick(el, status) {
+  el.textContent = STATUS[status][0];
+  el.title = STATUS[status][1];
+  el.className = `tick ${status}`;
 }
 
 function onEvent(ev) {
   switch (ev.kind) {
-    case "message": {
-      const content = ev.content;
-      if (content.t === "unsupported") return addMsg(ev.peer, { sys: `${displayName(ev.peer)} envió un contenido que esta versión no puede mostrar.` });
-      const entry = { from: "them", content, ...(ev.queuedAt ? { time: new Date(ev.queuedAt * 1000) } : {}) };
-      if (content.t === "image" || content.t === "video") {
-        entry.url = URL.createObjectURL(new Blob([sodium.from_base64(content.data, sodium.base64_variants.ORIGINAL)], { type: content.mime }));
-        delete content.data; // no guardamos dos copias en memoria
+    case "message": return onIncoming(ev);
+    case "receipt": {
+      const byId = new Map(chat(ev.peer).messages.filter((m) => m.from === "me").map((m) => [m.id, m]));
+      for (const id of ev.content.ids) {
+        const m = byId.get(id);
+        if (m) setStatus(ev.peer, m, ev.content.s);
       }
-      addMsg(ev.peer, entry);
-      notify(ev.peer, content);
       break;
     }
     case "profile":
       client.contacts.setProfile(ev.peer, ev.content);
-      if (ev.peer === active) renderChat();
+      if (ev.peer === active) renderHeader();
       break;
     case "presence":
       chat(ev.peer).online = ev.text === "online";
+      if (ev.text === "online") flushOutbox(ev.peer);
       if (ev.peer === active) renderHeader();
       break;
     case "session":
       chat(ev.peer).online = true;
-      if (ev.text === "sesión iniciada" && !chat(ev.peer).messages.some((m) => m.sys)) {
-        addMsg(ev.peer, { sys: "🔒 Los mensajes y archivos de este chat están cifrados de extremo a extremo." });
-      }
-      renderHeader();
+      sysOnce(ev.peer, "🔒 Los mensajes y archivos de este chat están cifrados de extremo a extremo.");
+      if (ev.peer === active) renderHeader();
       break;
     case "identity_changed":
       addMsg(ev.peer, { sys: `⚠️ La clave de seguridad de @${ev.peer} ha cambiado. Si no ha cambiado de dispositivo, alguien podría estar suplantándole. Confírmalo con esa persona por otro medio.`, warn: true });
       break;
     case "warning":
-      if (ev.peer && !/no está conectado/.test(ev.text)) addMsg(ev.peer, { sys: ev.text, warn: true });
+      if (ev.peer && !/no está conectado|sesión caducada/.test(ev.text)) addMsg(ev.peer, { sys: ev.text, warn: true });
       break;
     case "disconnected":
       if (client) {
+        connected = false;
         setConn(false);
-        scheduleReconnect();
+        scheduleReconnect(document.hidden ? 3000 : 800);
         probe().then((ok) => { if (!ok) showDown(true); });
       }
       break;
   }
 }
 
+async function onIncoming(ev) {
+  const content = ev.content;
+  const peer = ev.peer;
+  if (content.mid && chat(peer).messages.some((m) => m.id === content.mid)) {
+    sendReceipt(peer, [content.mid], "delivered"); // repetido (se reenvió): solo confirmamos
+    return;
+  }
+  if (content.t === "unsupported") {
+    addMsg(peer, { sys: `${displayName(peer)} envió un contenido que esta versión no puede mostrar.` });
+    return;
+  }
+  const entry = { from: "them", content: { ...content, data: undefined }, read: false,
+    ...(content.mid ? { id: content.mid } : {}), ...(ev.queuedAt ? { time: new Date(ev.queuedAt * 1000) } : {}) };
+  if (content.t === "image" || content.t === "video") {
+    const bytes = sodium.from_base64(content.data, sodium.base64_variants.ORIGINAL);
+    entry.url = URL.createObjectURL(new Blob([bytes], { type: content.mime }));
+    entry.hasMedia = true;
+    const m = addMsg(peer, entry);
+    history?.putMedia(peer, m.id, bytes);
+  } else {
+    addMsg(peer, entry);
+  }
+  if (content.mid) sendReceipt(peer, [content.mid], "delivered");
+  if (peer === active && !document.hidden) markRead(peer);
+  notify(peer, content);
+}
+
+// Confirmaciones agrupadas: si llegan 10 mensajes seguidos, mandamos una sola
+const pendingReceipts = new Map(); // `${peer}|${status}` -> Set(ids)
+function sendReceipt(peer, ids, status) {
+  if (status === "read" && !prefs().readReceipts) return;
+  const k = `${peer}|${status}`;
+  const first = !pendingReceipts.has(k);
+  if (first) pendingReceipts.set(k, new Set());
+  for (const id of ids) pendingReceipts.get(k).add(id);
+  if (!first) return;
+  setTimeout(async () => {
+    const set = pendingReceipts.get(k);
+    pendingReceipts.delete(k);
+    try { await client?.sendContent(peer, { t: "receipt", ids: [...set], s: status }); }
+    catch { /* son opcionales: si falla, no pasa nada */ }
+  }, 300);
+}
+
+function markRead(peer) {
+  const unread = chat(peer).messages.filter((m) => m.from === "them" && !m.read);
+  if (!unread.length) return;
+  for (const m of unread) { m.read = true; history?.put(peer, m); }
+  const ids = unread.map((m) => m.content?.mid).filter(Boolean);
+  if (ids.length && connected) sendReceipt(peer, ids, "read");
+  renderContacts();
+  updateTitle();
+}
+
 function notify(peer, content) {
-  if (!document.hidden || !("Notification" in window) || Notification.permission !== "granted") return;
+  if (!document.hidden || !prefs().notifications || !("Notification" in window) || Notification.permission !== "granted") return;
   // No mostramos el contenido: la notificación podría verse con la pantalla bloqueada.
   new Notification(displayName(peer), { body: content.t === "text" ? "Nuevo mensaje" : previewOf(content), tag: peer });
 }
@@ -270,10 +425,10 @@ async function onNewChat(ev) {
   ev.preventDefault();
   const input = $("new-chat-name");
   const name = input.value.trim().replace(/^@/, "");
-  const err = $("new-chat-error");
-  err.hidden = true;
+  $("new-chat-error").hidden = true;
   if (!NAME_RE.test(name)) return showNewChatError("Escribe un @usuario válido.");
   if (name.toLowerCase() === me.toLowerCase()) return showNewChatError("Ese eres tú 🙂");
+  if (!connected) return showNewChatError("Sin conexión: espera a que vuelva para buscar usuarios.");
   input.disabled = true;
   try {
     const info = await client.lookup(name);
@@ -289,85 +444,94 @@ async function onNewChat(ev) {
   }
 }
 
-function showNewChatError(text) {
-  $("new-chat-error").textContent = text;
+function showNewChatError(t) {
+  $("new-chat-error").textContent = t;
   $("new-chat-error").hidden = false;
 }
 
 async function openChat(peer) {
   active = peer;
-  chat(peer).unread = 0;
   $("app").classList.add("in-chat");
   $("new-chat-error").hidden = true;
   closePicker();
   renderContacts();
   renderChat();
-  updateTitle();
-  $("text").focus();
-  // Si está conectado, preparamos ya la sesión en vivo; si no, los mensajes irán en diferido.
-  if (!client.sessions.has(peer) && chat(peer).online !== false) {
+  markRead(peer);
+  if (window.matchMedia("(pointer: fine)").matches) $("text").focus();
+  // Si está conectado, preparamos ya la sesión en vivo
+  if (connected && !client.sessions.has(peer) && chat(peer).online !== false) {
     try { await client.openSession(peer, 5000); }
-    catch (e) {
-      if (e instanceof P.IdentityMismatch) return;
-      chat(peer).online = false;
-      renderHeader();
-    }
+    catch (e) { if (!(e instanceof P.IdentityMismatch)) { chat(peer).online = false; renderHeader(); } }
   }
 }
 
-async function send(content, local = {}) {
+/** Escribe un mensaje: aparece al momento con 🕓 y sale en cuanto haya conexión. */
+async function send(content, { bytes = null, url = null } = {}) {
   const peer = active;
   if (!peer) return;
-  // El mensaje aparece al momento con ⏳ y se actualiza a ✓ (entregado) o 🕓 (en espera)
-  const m = addMsg(peer, { from: "me", content: { ...content, data: undefined }, ...local, status: "sending" });
-  try {
-    const { status } = await client.sendContent(peer, content);
-    setStatus(m, status);
-    if (status === "queued" && !chat(peer).queuedNotice) {
-      chat(peer).queuedNotice = true;
-      chat(peer).online = false;
-      renderHeader();
-      addMsg(peer, { sys: `🕓 ${displayName(peer)} no está conectado. Tus mensajes le llegarán cifrados en cuanto se conecte.` });
+  const mid = newId();
+  const m = addMsg(peer, { id: mid, from: "me", content: { ...content, data: undefined, mid }, status: "sending",
+    ...(bytes ? { hasMedia: true, url } : {}) });
+  if (bytes) await history?.putMedia(peer, mid, bytes);
+  askNotifications();
+  flushOutbox(peer);
+}
+
+// La bandeja de salida: mensajes con 🕓 que aún no ha recibido el servidor
+const flushing = new Set();
+async function flushOutbox(onlyPeer = null) {
+  if (!client || !connected) return;
+  for (const [peer, ch] of chats) {
+    if (onlyPeer && peer !== onlyPeer) continue;
+    if (flushing.has(peer)) continue;
+    flushing.add(peer);
+    try {
+      for (const m of ch.messages.filter((x) => x.from === "me" && x.status === "sending")) {
+        if (!connected) break;
+        let content = m.content;
+        if (m.hasMedia) {
+          const bytes = await history.getMedia(peer, m.id);
+          if (!bytes) { setStatus(peer, m, "failed"); continue; }
+          content = { ...content, data: sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL) };
+        }
+        try {
+          await client.sendContent(peer, content);
+          setStatus(peer, m, "sent");
+        } catch (e) {
+          if (isConnectivity(e)) break; // se queda con 🕓 y se reintenta al reconectar
+          setStatus(peer, m, "failed");
+          addMsg(peer, { sys: e instanceof P.IdentityMismatch ? e.message : `No se pudo enviar: ${e.message}`, warn: true });
+        }
+      }
+    } finally {
+      flushing.delete(peer);
     }
-    askNotifications();
-    return true;
-  } catch (e) {
-    setStatus(m, "failed");
-    addMsg(peer, { sys: e instanceof P.IdentityMismatch ? e.message : `No se pudo enviar: ${e.message}`, warn: true });
-    return false;
   }
 }
 
-const STATUS = { sending: ["⏳", "Enviando…"], delivered: ["✓", "Entregado"], queued: ["🕓", "En espera: se entregará cuando se conecte"], failed: ["⚠️", "No enviado"] };
-
-function setStatus(m, status) {
-  m.status = status;
-  const el = m.el?.querySelector(".tick");
-  if (el) { el.textContent = STATUS[status][0]; el.title = STATUS[status][1]; }
-}
+const isConnectivity = (e) => e instanceof ClientError && /no conectado|conexión cerrada|no responde|no respondió/.test(e.message);
 
 async function onSend(ev) {
   ev.preventDefault();
-  const text = $("text").value;
-  if (!text.trim()) return;
+  const t = $("text").value;
+  if (!t.trim()) return;
   $("text").value = "";
   closePicker();
-  await send({ t: "text", body: text });
+  await send({ t: "text", body: t });
 }
 
 async function sendFile(file) {
   if (!file || !active) return;
   const isImage = IMAGE_MIME.includes(file.type), isVideo = VIDEO_MIME.includes(file.type);
-  if (!isImage && !isVideo) return addMsg(active, { sys: "Solo puedes enviar fotos (PNG, JPG, GIF, WebP) o vídeos (MP4, WebM, MOV).", warn: true });
-  if (file.size > MAX_MEDIA) return addMsg(active, { sys: `El archivo pesa ${(file.size / 1048576).toFixed(1)} MB. El máximo es 8 MB.`, warn: true });
+  if (!isImage && !isVideo) return addMsg(active, { sys: "Solo puedes enviar fotos (PNG, JPG, GIF, WebP) o vídeos (MP4, WebM, MOV).", warn: true }, { persist: false });
+  if (file.size > MAX_MEDIA) return addMsg(active, { sys: `El archivo pesa ${(file.size / 1048576).toFixed(1)} MB. El máximo es 8 MB.`, warn: true }, { persist: false });
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const content = { t: isImage ? "image" : "video", mime: file.type, name: file.name.slice(0, 120),
-    data: sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL) };
-  await send(content, { url: URL.createObjectURL(file) });
+  await send({ t: isImage ? "image" : "video", mime: file.type, name: file.name.slice(0, 120) },
+    { bytes, url: URL.createObjectURL(file) });
 }
 
 function askNotifications() {
-  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+  if (prefs().notifications && "Notification" in window && Notification.permission === "default") Notification.requestPermission();
 }
 
 // ------------------------------------------------------- emojis y stickers
@@ -385,13 +549,18 @@ function renderPicker() {
   const body = $("picker-body");
   body.replaceChildren();
   if (pickerTab === "emoji") {
-    for (const [group, list] of EMOJIS) {
+    const recent = store.get("sc:recent-emoji") || [];
+    const groups = recent.length ? [["Recientes", recent], ...EMOJIS] : EMOJIS;
+    for (const [group, list] of groups) {
       body.append(text(group, "p", "picker-group"));
       const grid = text("", "div", "emoji-grid");
       for (const e of list) {
         const b = text(e, "button", "emoji");
         b.type = "button";
-        b.onclick = () => insertAtCursor($("text"), e);
+        b.onclick = () => {
+          insertAtCursor($("text"), e);
+          store.set("sc:recent-emoji", [e, ...recent.filter((x) => x !== e)].slice(0, 16));
+        };
         grid.append(b);
       }
       body.append(grid);
@@ -418,6 +587,21 @@ function insertAtCursor(input, str) {
 
 // ---------------------------------------------------------------- perfiles
 
+function field(label, input, hint) {
+  const f = text("", "label", "field");
+  f.append(text(label, "span"), input);
+  if (hint) f.append(text(hint, "small", "hint"));
+  return f;
+}
+
+function input(value, { max = 64, placeholder = "" } = {}) {
+  const i = document.createElement("input");
+  i.value = value || "";
+  i.maxLength = max;
+  i.placeholder = placeholder;
+  return i;
+}
+
 function showMyProfile() {
   let avatar = profile.avatar;
   const preview = setAvatar(text("", "span", "avatar xl"), profile.name || me, avatar);
@@ -432,17 +616,11 @@ function showMyProfile() {
   remove.type = "button";
   remove.onclick = () => { avatar = null; setAvatar(preview, nameIn.value || me, null); };
   fileIn.onchange = async () => {
-    try { avatar = await resizeAvatar(fileIn.files[0]); setAvatar(preview, nameIn.value || me, avatar); }
+    try { avatar = await resizeImage(fileIn.files[0], 256, true); setAvatar(preview, nameIn.value || me, avatar); }
     catch { change.textContent = "Imagen no válida"; }
   };
-
-  const nameIn = document.createElement("input");
-  nameIn.value = profile.name || me;
-  nameIn.maxLength = 64;
-  nameIn.placeholder = me;
-  const nameField = text("", "label", "field");
-  nameField.append(text("Nombre visible", "span"), nameIn);
-
+  const nameIn = input(profile.name || me, { placeholder: me });
+  const bioIn = input(profile.bio, { max: 140, placeholder: "Disponible · ¡Hola! Estoy usando SecureChat" });
   const head = text("", "div", "profile-head");
   const btns = text("", "div", "profile-photo-btns");
   btns.append(change, remove, fileIn);
@@ -450,26 +628,34 @@ function showMyProfile() {
 
   dialog("Mi perfil", [
     head,
-    nameField,
+    field("Nombre visible", nameIn),
+    field("Estado", bioIn, "Una frase que verán tus contactos."),
     text(`Tu usuario es @${me}. Es único y es lo que otros escriben para encontrarte.`, "p", "hint"),
-    text("Tu nombre y tu foto viajan cifrados: solo los ven tus contactos, nunca el servidor.", "p", "hint"),
+    text("Tu nombre, estado y foto viajan cifrados: solo los ven tus contactos, nunca el servidor.", "p", "hint"),
     advancedSecurityMine(),
   ], [["Cancelar"], ["Guardar", () => {
-    profile = { name: nameIn.value.trim().slice(0, 64) || me, avatar };
+    profile = { name: nameIn.value.trim().slice(0, 64) || me, bio: bioIn.value.trim().slice(0, 140), avatar };
     if (!store.set(`sc:profile:${me.toLowerCase()}`, profile)) profile.avatar = null;
     client.setProfile(profile);
     renderMe();
   }]]);
 }
 
-/** Recorta la foto a un cuadrado de 256 px en JPEG: pocos KB y sin metadatos (EXIF/GPS). */
-async function resizeAvatar(file) {
+/** Recorta/redimensiona una imagen a JPEG: pocos KB y sin metadatos (EXIF/GPS). */
+async function resizeImage(file, size, square) {
   const bmp = await createImageBitmap(file);
-  const size = 256, side = Math.min(bmp.width, bmp.height);
   const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = size;
-  canvas.getContext("2d").drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
-  const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.85));
+  if (square) {
+    const side = Math.min(bmp.width, bmp.height);
+    canvas.width = canvas.height = size;
+    canvas.getContext("2d").drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+  } else {
+    const scale = Math.min(1, size / Math.max(bmp.width, bmp.height));
+    canvas.width = Math.round(bmp.width * scale);
+    canvas.height = Math.round(bmp.height * scale);
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  }
+  const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.82));
   return sodium.to_base64(new Uint8Array(await blob.arrayBuffer()), sodium.base64_variants.ORIGINAL);
 }
 
@@ -490,9 +676,13 @@ function showPeerProfile(peer) {
   const c = client.contacts.get(peer);
   const head = text("", "div", "profile-view");
   head.append(setAvatar(text("", "span", "avatar xl"), displayName(peer), avatarOf(peer)),
-    text(displayName(peer), "h3"), text(`@${peer}`, "p", "muted"));
+    text(c?.displayName || peer, "h3"), text(`@${peer}`, "p", "muted"));
+  if (c?.bio) head.append(text(c.bio, "p", "bio"));
   const body = [head];
+  let nickIn = null;
   if (c) {
+    nickIn = input(c.nick, { placeholder: c.displayName || peer });
+    body.push(field("Apodo", nickIn, "Solo lo ves tú. Sustituye a su nombre en tu lista de chats."));
     const d = document.createElement("details");
     d.className = "advanced";
     const grid = text("", "div", "safety");
@@ -506,7 +696,135 @@ function showPeerProfile(peer) {
       grid, toggle);
     body.push(d);
   }
-  dialog("Perfil", body);
+  const clear = text("Vaciar este chat", "button", "chip danger");
+  clear.type = "button";
+  clear.onclick = async () => {
+    if (!confirm(`¿Borrar todos los mensajes con ${displayName(peer)} de este dispositivo? No se puede deshacer.`)) return;
+    await history.deleteChat(peer);
+    chat(peer).messages = [];
+    $("dialog").close();
+    renderChat();
+    renderContacts();
+  };
+  body.push(clear);
+  dialog("Perfil", body, [["Cerrar", () => { if (nickIn) client.contacts.setNick(peer, nickIn.value); }]]);
+}
+
+// ------------------------------------------------------------- personalizar
+
+const ACCENTS = ["#4f46e5", "#7c3aed", "#db2777", "#e11d48", "#ea580c", "#ca8a04", "#16a34a", "#0d9488", "#0284c7", "#475569"];
+const WALLS = [["dots", "Puntos"], ["plain", "Liso"], ["grid", "Cuadrícula"], ["diagonal", "Rayas"], ["bubbles", "Burbujas"], ["gradient", "Degradado"], ["image", "Tu foto"]];
+
+function showSettings() {
+  const p = prefs();
+  const save = (patch) => { window.SC_SET_PREFS({ ...prefs(), ...patch }); };
+
+  // Tema
+  const current = document.documentElement.dataset.theme;
+  const themes = text("", "div", "themes");
+  for (const t of window.SC_THEMES) {
+    const card = text("", "button", "theme-card");
+    card.type = "button";
+    card.dataset.theme = t.id; // la tarjeta se pinta con los colores de su propio tema
+    card.setAttribute("aria-pressed", String(t.id === current));
+    const sw = text("", "span", "swatch");
+    sw.style.background = t.swatch[0];
+    const a = document.createElement("i"), b = document.createElement("i");
+    a.style.background = t.swatch[2];
+    a.style.border = "1px solid rgb(127 127 127 / .3)";
+    b.style.background = t.swatch[1];
+    sw.append(a, b);
+    card.append(sw, text(t.name, "strong"), text(t.desc, "small"));
+    card.onclick = () => {
+      store.set("sc:theme", window.applyTheme(t.id));
+      for (const el of themes.children) el.setAttribute("aria-pressed", String(el === card));
+    };
+    themes.append(card);
+  }
+
+  // Color
+  const colors = text("", "div", "swatches");
+  const mkColor = (value, label) => {
+    const b = text(label || "", "button", "color-dot");
+    b.type = "button";
+    b.title = value || "Color del tema";
+    if (value) b.style.background = value; else b.classList.add("theme-color");
+    b.setAttribute("aria-pressed", String((p.accent || null) === value));
+    b.onclick = () => { save({ accent: value }); for (const x of colors.children) x.setAttribute("aria-pressed", String(x === b)); };
+    return b;
+  };
+  colors.append(mkColor(null, "A"), ...ACCENTS.map((c) => mkColor(c)));
+  const picker = document.createElement("input");
+  picker.type = "color";
+  picker.value = p.accent || "#4f46e5";
+  picker.title = "Elige cualquier color";
+  picker.oninput = () => save({ accent: picker.value });
+  colors.append(picker);
+
+  // Fondo
+  const walls = text("", "div", "wall-grid");
+  const wallFile = document.createElement("input");
+  wallFile.type = "file";
+  wallFile.accept = "image/png,image/jpeg,image/webp";
+  wallFile.hidden = true;
+  wallFile.onchange = async () => {
+    try {
+      const img = await resizeImage(wallFile.files[0], 1280, false);
+      save({ wall: "image", wallImage: `data:image/jpeg;base64,${img}` });
+      for (const x of walls.querySelectorAll(".wall")) x.setAttribute("aria-pressed", String(x.dataset.wall === "image"));
+    } catch { /* imagen no válida */ }
+  };
+  for (const [id, label] of WALLS) {
+    const b = text(label, "button", "wall");
+    b.type = "button";
+    b.dataset.wall = id;
+    b.setAttribute("aria-pressed", String(p.wall === id));
+    b.onclick = () => {
+      if (id === "image") return wallFile.click();
+      save({ wall: id });
+      for (const x of walls.querySelectorAll(".wall")) x.setAttribute("aria-pressed", String(x === b));
+    };
+    walls.append(b);
+  }
+  walls.append(wallFile);
+
+  // Letra y burbujas
+  const seg = (options, key) => {
+    const g = text("", "div", "segmented");
+    for (const [value, label] of options) {
+      const b = text(label, "button");
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(p[key] === value));
+      b.onclick = () => { save({ [key]: value }); for (const x of g.children) x.setAttribute("aria-pressed", String(x === b)); };
+      g.append(b);
+    }
+    return g;
+  };
+
+  // Privacidad
+  const toggle = (key, label, hint) => {
+    const l = text("", "label", "switch");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!p[key];
+    cb.onchange = () => save({ [key]: cb.checked });
+    const t = text("", "span");
+    t.append(text(label, "strong"), text(hint, "small"));
+    l.append(cb, t);
+    return l;
+  };
+
+  dialog("Personalizar", [
+    text("Tema", "h3", "settings-h"), themes,
+    text("Color principal", "h3", "settings-h"), colors,
+    text("Fondo de los chats", "h3", "settings-h"), walls,
+    text("Tamaño de letra", "h3", "settings-h"), seg([[13, "Pequeña"], [15, "Normal"], [17, "Grande"], [19, "Enorme"]], "font"),
+    text("Forma de las burbujas", "h3", "settings-h"), seg([[22, "Redondas"], [14, "Suaves"], [4, "Rectas"]], "radius"),
+    text("Privacidad y avisos", "h3", "settings-h"),
+    toggle("readReceipts", "Confirmaciones de lectura", "Si las desactivas, los demás no verán el doble check azul."),
+    toggle("notifications", "Notificaciones", "Aviso cuando llega un mensaje con la app en segundo plano."),
+    toggle("enterSends", "Enviar con Intro", "Si lo quitas, Intro hace salto de línea en el ordenador."),
+  ]);
 }
 
 // -------------------------------------------------------------- renderizado
@@ -519,6 +837,21 @@ function text(t, tag = "p", cls = "") {
 }
 
 const hhmm = (d) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+function dayLabel(d) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const day = new Date(d); day.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - day) / 86400000);
+  if (diff === 0) return "Hoy";
+  if (diff === 1) return "Ayer";
+  if (diff < 7) return d.toLocaleDateString([], { weekday: "long" });
+  return d.toLocaleDateString([], { day: "numeric", month: "long", year: diff > 300 ? "numeric" : undefined });
+}
+
+function shortTime(d) {
+  const label = dayLabel(d);
+  return label === "Hoy" ? hhmm(d) : label === "Ayer" ? "Ayer" : d.toLocaleDateString([], { day: "2-digit", month: "2-digit" });
+}
 
 function previewOf(c) {
   if (!c) return "";
@@ -537,24 +870,28 @@ function renderMe() {
 function renderContacts() {
   if (!client) return;
   const names = new Set([...client.contacts.all().map((c) => c.name), ...chats.keys()]);
-  const list = [...names].sort((a, b) => {
-    const ta = chats.get(a)?.messages.at(-1)?.time || 0, tb = chats.get(b)?.messages.at(-1)?.time || 0;
-    return tb - ta || displayName(a).localeCompare(displayName(b));
-  });
+  const lastTime = (n) => chats.get(n)?.messages.filter((m) => m.content).at(-1)?.time || 0;
+  const list = [...names].sort((a, b) => lastTime(b) - lastTime(a) || displayName(a).localeCompare(displayName(b)));
   $("contacts-empty").hidden = list.length > 0;
   $("contacts").replaceChildren(...list.map((name) => {
-    const ch = chats.get(name);
-    const last = ch?.messages.filter((m) => m.content).at(-1);
+    const last = chats.get(name)?.messages.filter((m) => m.content).at(-1);
+    const unread = unreadOf(name);
     const li = document.createElement("li");
     if (name === active) li.className = "active";
     const btn = document.createElement("button");
     btn.type = "button";
     const main = text("", "span", "contact-main");
-    main.append(text(displayName(name), "strong"),
-      text(last ? `${last.from === "me" ? "Tú: " : ""}${previewOf(last.content)}` : `@${name}`, "span", "preview"));
+    const prev = text("", "span", "preview");
+    if (last?.from === "me") {
+      const tick = text("", "span");
+      paintTick(tick, last.status || "sent");
+      prev.append(tick, " ");
+    }
+    prev.append(last ? previewOf(last.content) : `@${name}`);
+    main.append(text(displayName(name), "strong"), prev);
     const side = text("", "span", "contact-side");
-    if (last) side.append(text(hhmm(last.time), "time"));
-    if (ch?.unread) side.append(text(String(ch.unread), "span", "unread"));
+    if (last) side.append(text(shortTime(last.time), "time"));
+    if (unread) side.append(text(String(unread), "span", "unread"));
     btn.append(setAvatar(text("", "span", "avatar"), displayName(name), avatarOf(name)), main, side);
     btn.onclick = () => openChat(name);
     li.append(btn);
@@ -568,13 +905,10 @@ function renderHeader() {
   if (has) {
     $("peer-name").textContent = displayName(active);
     setAvatar($("peer-avatar"), displayName(active), avatarOf(active));
-    const online = client.sessions.has(active) || chat(active).online;
-    const status = $("peer-status");
-    status.replaceChildren(text(`@${active}`, "span"), text("·", "span"),
-      client.sessions.has(active) ? text("🟢 en línea · 🔒 cifrado", "span", "lock")
-        : text(online === false ? "desconectado · le llegará al conectarse" : "🔒 cifrado", "span"));
+    const online = client.sessions.has(active) || chat(active).online === true;
+    const c = client.contacts.get(active);
+    $("peer-status").replaceChildren(online ? text("en línea", "span", "lock") : text(c?.bio || `@${active}`, "span"));
   }
-  for (const id of ["text", "send-btn", "emoji-btn", "attach-btn"]) $(id).disabled = !has;
   $("chat").classList.toggle("is-empty", !has);
   $("empty-chat").hidden = has;
 }
@@ -582,6 +916,7 @@ function renderHeader() {
 function renderChat() {
   renderHeader();
   $("messages").replaceChildren();
+  $("messages").dataset.day = "";
   if (active) for (const m of chat(active).messages) appendMessage(m);
 }
 
@@ -592,11 +927,26 @@ function isJumboEmoji(s) {
   return n >= 1 && n <= 3;
 }
 
+async function mediaUrl(m) {
+  if (m.url) return m.url;
+  const bytes = await history?.getMedia(active, m.id);
+  if (!bytes) return null;
+  m.url = URL.createObjectURL(new Blob([bytes], { type: m.content.mime }));
+  return m.url;
+}
+
 function appendMessage(m) {
+  const list = $("messages");
+  // Separador de día (Hoy, Ayer, lunes…) como en WhatsApp
+  const label = dayLabel(m.time);
+  if (list.dataset.day !== label) {
+    list.dataset.day = label;
+    list.append(text(label, "li", "day"));
+  }
   let li;
   if (m.sys) li = text(m.sys, "li", `sys${m.warn ? " warn" : ""}`);
   else {
-    const prev = $("messages").lastElementChild;
+    const prev = list.lastElementChild;
     const side = m.from === "me" ? "mine" : "theirs";
     const cont = prev?.classList.contains(side) ? "cont" : "first";
     const c = m.content;
@@ -609,33 +959,33 @@ function appendMessage(m) {
       li.append(text(c.id, "span", "sticker-face"));
     } else {
       li.className = `msg ${side} ${cont} media`;
-      let el;
+      const el = document.createElement(c.t === "image" ? "img" : "video");
       if (c.t === "image") {
-        el = document.createElement("img");
         el.alt = c.name || "imagen";
         el.onclick = () => viewImage(m.url, c.name);
-        el.onload = () => li.scrollIntoView({ block: "end" });
+        el.onload = () => { if (isNearBottom()) li.scrollIntoView({ block: "end" }); };
       } else {
-        el = document.createElement("video");
         el.controls = true;
         el.playsInline = true;
         el.preload = "metadata";
       }
-      el.src = m.url;
+      mediaUrl(m).then((u) => { if (u) el.src = u; else li.classList.add("missing"); });
       li.append(el);
     }
     const t = text(hhmm(m.time), "time");
-    if (m.from === "me" && m.status) {
-      const tick = text(STATUS[m.status][0], "span", "tick");
-      tick.title = STATUS[m.status][1];
+    if (m.from === "me") {
+      const tick = text("", "span");
+      paintTick(tick, m.status || "sent");
       t.append(" ", tick);
     }
     li.append(t);
     m.el = li;
   }
-  $("messages").append(li);
+  list.append(li);
   li.scrollIntoView({ block: "end" });
 }
+
+const isNearBottom = () => { const l = $("messages"); return l.scrollHeight - l.scrollTop - l.clientHeight < 200; };
 
 function viewImage(url, name) {
   const img = document.createElement("img");
@@ -651,8 +1001,9 @@ function viewImage(url, name) {
 }
 
 function updateTitle() {
-  const n = [...chats.values()].reduce((s, c) => s + c.unread, 0);
+  const n = [...chats.keys()].reduce((s, p) => s + unreadOf(p), 0);
   document.title = n ? `(${n}) SecureChat` : "SecureChat";
+  if ("setAppBadge" in navigator) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
 }
 
 function dialog(title, body, actions = [["Cerrar"]]) {
@@ -684,29 +1035,18 @@ window.addEventListener("beforeinstallprompt", (e) => {
   $("install-btn").hidden = false;
 });
 
-function showThemes() {
-  const current = document.documentElement.dataset.theme;
-  const grid = text("", "div", "themes");
-  for (const t of window.SC_THEMES) {
-    const card = text("", "button", "theme-card");
-    card.type = "button";
-    card.dataset.theme = t.id; // la tarjeta se pinta con los colores de su propio tema
-    card.setAttribute("aria-pressed", String(t.id === current));
-    const sw = text("", "span", "swatch");
-    sw.style.background = t.swatch[0];
-    const a = document.createElement("i"), b = document.createElement("i");
-    a.style.background = t.swatch[2];
-    a.style.border = "1px solid rgb(127 127 127 / .3)";
-    b.style.background = t.swatch[1];
-    sw.append(a, b);
-    card.append(sw, text(t.name, "strong"), text(t.desc, "small"));
-    card.onclick = () => {
-      store.set("sc:theme", window.applyTheme(t.id));
-      for (const el of grid.children) el.setAttribute("aria-pressed", String(el === card));
-    };
-    grid.append(card);
-  }
-  dialog("Tema", [grid]);
+/** Si este dispositivo recuerda la sesión, entramos sin pedir contraseña. */
+async function autoLogin() {
+  const last = store.get("sc:last");
+  const blob = last && store.get(idKey(last));
+  if (!blob) return false;
+  const seed = await Vault.recall(last);
+  if (!seed) return false;
+  const kp = sodium.crypto_sign_seed_keypair(seed);
+  if (!P.equal(kp.publicKey, P.b64d(blob.public_key))) { await Vault.forget(last); return false; }
+  identity = { seed, publicKey: kp.publicKey, privateKey: kp.privateKey };
+  await startApp(blob.username || last);
+  return true;
 }
 
 async function main() {
@@ -716,13 +1056,19 @@ async function main() {
   $("login-name").addEventListener("input", updateLoginMode);
   $("login-form").addEventListener("submit", onLogin);
   $("composer").addEventListener("submit", onSend);
+  $("text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !prefs().enterSends && window.matchMedia("(pointer: fine)").matches) {
+      e.preventDefault();
+      insertAtCursor($("text"), "\n");
+    }
+  });
   $("new-chat").addEventListener("submit", onNewChat);
   $("new-chat-name").addEventListener("input", () => { $("new-chat-error").hidden = true; });
   $("profile-btn").onclick = showMyProfile;
   $("peer-btn").onclick = () => active && showPeerProfile(active);
-  $("logout-btn").onclick = logout;
-  $("theme-btn").onclick = showThemes;
-  $("login-theme-btn").onclick = showThemes;
+  $("logout-btn").onclick = () => { if (confirm("¿Cerrar sesión en este dispositivo? Tendrás que volver a escribir tu contraseña.")) logout(); };
+  $("theme-btn").onclick = showSettings;
+  $("login-theme-btn").onclick = showSettings;
   $("emoji-btn").onclick = togglePicker;
   $("attach-btn").onclick = () => $("file-input").click();
   $("file-input").onchange = () => { sendFile($("file-input").files[0]); $("file-input").value = ""; };
@@ -739,15 +1085,25 @@ async function main() {
   $("install-btn").onclick = async () => { await installPrompt?.prompt(); installPrompt = null; $("install-btn").hidden = true; };
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("picker").hidden) closePicker(); });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && active) { chat(active).unread = 0; renderContacts(); updateTitle(); }
+    if (document.hidden) return;
+    wakeUp();
+    if (active) markRead(active);
   });
+  window.addEventListener("online", wakeUp);
+  window.addEventListener("focus", wakeUp);
+  window.addEventListener("pageshow", wakeUp);
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () =>
     window.applyTheme(document.documentElement.dataset.theme));
   $("login-code").value = store.get("sc:code") || "";
   $("down-retry").onclick = async () => { if (await probe()) { showDown(false); if (client) reconnect(); } };
+  const up = await probe();
   updateLoginMode();
-  if (!await probe()) showDown(true);
-  if ($("login-name").value) $("login-pass").focus(); else $("login-name").focus();
+  if (!await autoLogin()) {
+    if (!up) showDown(true);
+    if ($("login-name").value) $("login-pass").focus(); else $("login-name").focus();
+  } else if (!up) {
+    showDown(true);
+  }
   if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js");
 }
 

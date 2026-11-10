@@ -95,11 +95,51 @@ def test_access_code(tmp_path):
     async def main():
         srv, url = await start(RelayServer(access_code="ABCD-2345"))
         status, _, body = await http_get(url, "/config.json")
-        assert status == 200 and json.loads(body) == {"code_required": True}
+        assert status == 200 and json.loads(body) == {"code_required": True, "email_required": False}
         with pytest.raises(ClientError, match="código"):
             await client(url, "eve", SigningKey.generate(), tmp_path)
         with pytest.raises(ClientError, match="código"):
             await client(url, "eve", SigningKey.generate(), tmp_path, code="WXYZ-9999")
         ok = await client(url, "amigo", SigningKey.generate(), tmp_path, code="abcd2345")  # sin guion y en minúsculas vale
         await ok.close(); srv.close()
+    run(main())
+
+
+def test_email_verification_for_new_accounts(tmp_path):
+    async def main():
+        from securechat.email_verify import ConsoleSender
+        sender = ConsoleSender()
+        db = tmp_path / "users.json"
+        srv, url = await start(RelayServer(db, None, None, sender))
+        status, _, body = await http_get(url, "/config.json")
+        assert json.loads(body)["email_required"] is True
+
+        # Sin correo no se puede crear cuenta
+        with pytest.raises(ClientError, match="correo"):
+            await client(url, "bot", SigningKey.generate(), tmp_path)
+
+        # Código incorrecto y luego el correcto
+        key = SigningKey.generate()
+        tries = []
+
+        async def on_verify(to, error):
+            tries.append((to, error))
+            return "000000" if len(tries) == 1 and sender.sent[-1][1] != "000000" else sender.sent[-1][1]
+
+        c = ChatClient("persona", key, Contacts(None), prekeys_path=tmp_path / "p.json")
+        await c.connect(url, email="Persona.Real@Example.com", on_verify=on_verify)
+        assert tries[0] == ("p**********l@example.com", None) and "incorrecto" in tries[1][1]
+        assert "example.com" not in db.read_text()  # solo se guarda la huella del correo
+        await c.close()
+
+        # Las cuentas ya verificadas entran sin volver a pedirlo
+        again = ChatClient("persona", key, Contacts(None), prekeys_path=tmp_path / "p.json")
+        await again.connect(url)
+        await again.close()
+
+        # El mismo correo no sirve para otra cuenta
+        other = ChatClient("otra", SigningKey.generate(), Contacts(None), prekeys_path=tmp_path / "o.json")
+        with pytest.raises(ClientError, match="ya tiene una cuenta"):
+            await other.connect(url, email="persona.real@example.com", on_verify=on_verify)
+        srv.close()
     run(main())

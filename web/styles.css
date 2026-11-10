@@ -121,7 +121,7 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
-  font: 15px/1.45 var(--font);
+  font: var(--font-size, 15px)/1.45 var(--font);
   color: var(--text);
   background:
     radial-gradient(60vmax 60vmax at 0% 0%, color-mix(in srgb, var(--bg-glow-1) 55%, transparent), transparent 60%),
@@ -281,7 +281,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .messages {
   list-style: none; margin: 0; padding: 20px clamp(12px, 4vw, 40px); flex: 1; overflow-y: auto;
   display: flex; flex-direction: column; gap: 3px;
-  background: radial-gradient(var(--dots) 1px, transparent 1.4px) 0 0 / 18px 18px, var(--chat-bg);
+  background: var(--wall, radial-gradient(var(--dots) 1px, transparent 1.4px) 0 0 / 18px 18px), var(--chat-bg);
 }
 .msg {
   max-width: min(72%, 560px); padding: 9px 14px 7px; border-radius: var(--radius);
@@ -520,3 +520,85 @@ dialog .hint { font-size: 13px; color: var(--muted); margin: 0 0 8px; }
   padding: 6px 12px; font-weight: 600;
 }
 .tick { font-size: 11px; }
+
+/* =====================================================================
+   Ticks, separadores de día, acceso y personalización
+   ===================================================================== */
+.tick { font-size: 11px; letter-spacing: -2px; margin-left: 1px; }
+.tick.sending { letter-spacing: 0; }
+.tick.read { color: #34b7f1; }
+.msg.mine .tick.read { color: #9ee7ff; }
+[data-theme="light"] .msg.mine .tick.read, [data-theme="forest"] .msg.mine .tick.read { color: #b9f0ff; }
+.preview .tick { font-size: 12px; margin-right: 2px; }
+.preview .tick.read { color: #34b7f1; }
+.day {
+  align-self: center; font-size: 12px; font-weight: 600; color: var(--muted); margin: 14px 0 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px;
+  text-transform: capitalize; position: sticky; top: 4px; z-index: 1;
+}
+.msg.missing::before { content: "Archivo no disponible en este dispositivo"; font-size: 12px; opacity: .7; padding: 8px; display: block; }
+.bio { font-size: 14px; color: var(--muted); margin-top: 6px !important; font-style: italic; }
+
+.check { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); cursor: pointer; }
+.check input { width: 18px; height: 18px; accent-color: var(--accent); }
+.field .hint { font-weight: 400; }
+.verify-step { text-align: center; margin-top: 18px; }
+.verify-icon { font-size: 44px; }
+.verify-step h2 { margin: 6px 0; font-size: 20px; }
+.verify-step form { display: grid; gap: 12px; margin-top: 16px; }
+#verify-code {
+  text-align: center; font: 600 28px/1 var(--mono); letter-spacing: 10px; padding: 12px;
+  border-radius: 14px; border: 1px solid var(--line); background: var(--panel-2);
+}
+button.link { background: none; color: var(--muted); text-decoration: underline; padding: 4px; }
+.chip.danger { color: var(--error); margin-top: 14px; }
+
+dialog { max-height: min(88vh, 900px); overflow-y: auto; }
+.settings-h { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 20px 0 10px; }
+.settings-h:first-of-type { margin-top: 4px; }
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.color-dot {
+  width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--panel);
+  box-shadow: 0 0 0 1px var(--line); font-size: 12px; font-weight: 700; color: var(--accent-ink);
+}
+.color-dot.theme-color { background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+.color-dot[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--text); }
+.swatches input[type="color"] {
+  width: 40px; height: 34px; border: 1px dashed var(--muted); border-radius: 10px; padding: 2px; background: none; cursor: pointer;
+}
+.wall-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.wall {
+  height: 64px; border-radius: 12px; border: 2px solid var(--line); font-size: 12px; font-weight: 600;
+  display: grid; place-items: end center; padding-bottom: 6px; color: var(--text); background-color: var(--chat-bg);
+}
+.wall[aria-pressed="true"] { border-color: var(--accent); }
+.wall[data-wall="dots"] { background-image: radial-gradient(var(--muted) 1px, transparent 1.4px); background-size: 10px 10px; }
+.wall[data-wall="grid"] { background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 12px 12px; }
+.wall[data-wall="diagonal"] { background-image: repeating-linear-gradient(45deg, var(--line) 0 2px, transparent 2px 9px); }
+.wall[data-wall="bubbles"] { background-image: radial-gradient(circle at 30% 30%, var(--accent-soft) 0 12px, transparent 13px), radial-gradient(circle at 75% 60%, var(--accent-soft) 0 8px, transparent 9px); }
+.wall[data-wall="gradient"] { background-image: linear-gradient(135deg, var(--accent-soft), var(--chat-bg)); }
+.wall[data-wall="image"] { background-image: linear-gradient(transparent, transparent), var(--wall-image, linear-gradient(135deg, var(--line), var(--panel-2))); background-size: cover; }
+.segmented { display: flex; gap: 4px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 4px; }
+.segmented button { flex: 1; padding: 8px 6px; border-radius: 9px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.segmented button[aria-pressed="true"] { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+.switch { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.switch input { width: 20px; height: 20px; margin-top: 2px; accent-color: var(--accent); flex: none; }
+.switch span { display: grid; gap: 2px; }
+.switch small { color: var(--muted); font-size: 12.5px; }
+
+/* Fondos de chat */
+[data-wall="plain"] .messages { --wall: none; }
+[data-wall="grid"] .messages { --wall: linear-gradient(var(--dots) 1px, transparent 1px) 0 0 / 26px 26px, linear-gradient(90deg, var(--dots) 1px, transparent 1px) 0 0 / 26px 26px; }
+[data-wall="diagonal"] .messages { --wall: repeating-linear-gradient(45deg, var(--dots) 0 2px, transparent 2px 16px); }
+[data-wall="bubbles"] .messages {
+  --wall: radial-gradient(circle at 20% 30%, color-mix(in srgb, var(--accent) 9%, transparent) 0 46px, transparent 47px) 0 0 / 220px 220px,
+          radial-gradient(circle at 70% 75%, color-mix(in srgb, var(--accent-2) 8%, transparent) 0 26px, transparent 27px) 0 0 / 160px 160px;
+}
+[data-wall="gradient"] .messages {
+  --wall: linear-gradient(165deg, color-mix(in srgb, var(--accent) 16%, transparent), transparent 55%, color-mix(in srgb, var(--accent-2) 14%, transparent));
+}
+[data-wall="image"] .messages {
+  --wall: linear-gradient(color-mix(in srgb, var(--chat-bg) 30%, transparent), color-mix(in srgb, var(--chat-bg) 30%, transparent)),
+          var(--wall-image, none) center / cover no-repeat;
+  background-attachment: local, local;
+}

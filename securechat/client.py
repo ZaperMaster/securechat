@@ -64,9 +64,11 @@ class ChatClient:
 
     # ------------------------------------------------------------ conexión
 
-    async def connect(self, url: str) -> None:
+    async def connect(self, url: str, email: str | None = None, on_verify=None) -> None:
+        """Conecta y se autentica. Si el servidor pide verificar el correo (solo al
+        crear la cuenta), `on_verify(destino, error)` debe devolver el código recibido."""
         self.ws = await connect(url, max_size=MAX_FRAME)
-        await self._send(type="hello", user=self.name, code=self.code,
+        await self._send(type="hello", user=self.name, code=self.code, email=email,
                          identity_key=b64e(bytes(self.identity.verify_key)))
         challenge = json.loads(await self.ws.recv())
         if challenge.get("type") != "challenge":
@@ -74,6 +76,16 @@ class ChatClient:
         sig = self.identity.sign(auth_message(b64d(challenge["nonce"]), self.name)).signature
         await self._send(type="auth", sig=b64e(sig))
         welcome = json.loads(await self.ws.recv())
+        error = None
+        while welcome.get("type") in ("verify_needed", "verify_failed"):
+            if on_verify is None:
+                raise ClientError("este servidor pide verificar un correo al crear la cuenta")
+            if welcome["type"] == "verify_needed":
+                target = welcome["to"]
+            else:
+                error = welcome.get("message")
+            await self._send(type="verify", code=await on_verify(target, error))
+            welcome = json.loads(await self.ws.recv())
         if welcome.get("type") != "welcome":
             raise ClientError(welcome.get("message", "autenticación rechazada"))
         self.name = self.prekeys.user = welcome["user"]  # grafía oficial
@@ -259,12 +271,24 @@ class ChatClient:
 
     def _on_content(self, sender: str, text: str) -> None:
         c = content.decode(text)
+        if c["t"] == "receipt":
+            self._emit("receipt", sender, f"{c.get('s')}:{','.join(c.get('ids', []))}")
+            return
+        if isinstance(c.get("mid"), str) and c["t"] != "profile":
+            # Como el doble check de WhatsApp: "ya lo tengo" (va cifrado como cualquier mensaje)
+            asyncio.get_running_loop().create_task(self._send_receipt(sender, [c["mid"]], "delivered"))
         if c["t"] == "profile":
             name = str(c.get("name") or "")[:content.MAX_NAME]
             self.profiles[sender] = name
             self._emit("profile", sender, name)
         else:
             self._emit("message", sender, content.describe(c))
+
+    async def _send_receipt(self, peer: str, ids: list[str], status: str) -> None:
+        try:
+            await self.send_content(peer, content.receipt(ids, status))
+        except (ClientError, CryptoError):
+            pass  # las confirmaciones son opcionales
 
     async def _on_hs1(self, sender: str, hs1: dict) -> None:
         # Si los dos iniciamos a la vez, gana el handshake del nombre menor.
