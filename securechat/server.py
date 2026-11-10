@@ -1,0 +1,155 @@
+"""Servidor relay.
+
+Solo hace tres cosas:
+  1. Autentica a cada cliente con un reto firmado por su clave Ed25519.
+  2. Recuerda qué clave pública corresponde a cada nombre (TOFU), para que nadie
+     pueda conectarse con el nombre de otro y recibir sus mensajes.
+  3. Reenvía bytes opacos entre usuarios conectados.
+
+Nunca ve el texto de los mensajes ni posee claves capaces de descifrarlos.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import re
+from pathlib import Path
+
+import nacl.utils
+from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosed
+
+from .crypto import CryptoError, b64d, b64e, encode_fields, verify_signature
+
+log = logging.getLogger("securechat.server")
+
+USERNAME_RE = re.compile(r"^[a-z0-9_]{3,32}$")
+MAX_FRAME = 64 * 1024
+AUTH_TIMEOUT = 10
+AUTH_CONTEXT = b"securechat-auth-v1"
+
+
+def auth_message(nonce: bytes, user: str) -> bytes:
+    return encode_fields(AUTH_CONTEXT, nonce, user.encode())
+
+
+class RelayServer:
+    def __init__(self, db_path: Path | None = None):
+        self.db_path = db_path
+        self.registry: dict[str, bytes] = {}
+        self.online: dict[str, ServerConnection] = {}
+        if db_path and db_path.exists():
+            self.registry = {u: b64d(k) for u, k in
+                             json.loads(db_path.read_text(encoding="utf-8")).items()}
+
+    def _save(self) -> None:
+        if not self.db_path:
+            return
+        tmp = self.db_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({u: b64e(k) for u, k in self.registry.items()}, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, self.db_path)
+
+    async def _authenticate(self, ws: ServerConnection) -> str | None:
+        hello = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT))
+        user, key = hello.get("user", ""), b64d(hello.get("identity_key", ""))
+        if hello.get("type") != "hello" or not USERNAME_RE.match(user) or len(key) != 32:
+            await _send(ws, type="error", code="bad_hello",
+                        message="nombre inválido (3-32 caracteres: a-z, 0-9, _)")
+            return None
+        nonce = nacl.utils.random(32)
+        await _send(ws, type="challenge", nonce=b64e(nonce))
+        reply = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT))
+        verify_signature(key, auth_message(nonce, user), b64d(reply.get("sig", "")))
+
+        known = self.registry.get(user)
+        if known is None:
+            self.registry[user] = key
+            self._save()
+            log.info("nuevo usuario registrado: %s", user)
+        elif known != key:
+            await _send(ws, type="error", code="name_taken",
+                        message="ese nombre ya está registrado con otra clave")
+            return None
+        return user
+
+    async def handler(self, ws: ServerConnection) -> None:
+        user = None
+        try:
+            user = await self._authenticate(ws)
+            if user is None:
+                return
+            old = self.online.get(user)
+            if old is not None:
+                await old.close(4000, "sesión iniciada en otro sitio")
+            self.online[user] = ws
+            await _send(ws, type="welcome", user=user)
+            log.info("%s conectado (%d en línea)", user, len(self.online))
+
+            async for raw in ws:
+                msg = json.loads(raw)
+                if msg.get("type") == "send":
+                    await self._relay(ws, user, msg)
+                elif msg.get("type") == "who":
+                    await _send(ws, type="who", users=sorted(self.online))
+                else:
+                    await _send(ws, type="error", code="unknown_type", message="tipo desconocido")
+        except (CryptoError, ValueError, KeyError, TimeoutError, json.JSONDecodeError):
+            await _send(ws, type="error", code="auth_failed", message="autenticación fallida")
+        except ConnectionClosed:
+            pass
+        finally:
+            if user and self.online.get(user) is ws:
+                del self.online[user]
+                log.info("%s desconectado", user)
+
+    async def _relay(self, ws: ServerConnection, sender: str, msg: dict) -> None:
+        to, payload = msg.get("to"), msg.get("payload")
+        target = self.online.get(to) if isinstance(to, str) else None
+        if target is None or not isinstance(payload, dict):
+            await _send(ws, type="error", code="offline", to=to,
+                        message=f"'{to}' no está conectado")
+            return
+        # El remitente lo pone el servidor a partir de la sesión autenticada,
+        # nunca se copia de lo que diga el cliente.
+        try:
+            await _send(target, type="deliver", **{"from": sender}, payload=payload)
+        except ConnectionClosed:
+            await _send(ws, type="error", code="offline", to=to,
+                        message=f"'{to}' no está conectado")
+
+
+async def _send(ws: ServerConnection, **msg) -> None:
+    try:
+        await ws.send(json.dumps(msg))
+    except ConnectionClosed:
+        pass
+
+
+async def run(host: str, port: int, db: Path | None) -> None:
+    server = RelayServer(db)
+    async with serve(server.handler, host, port, max_size=MAX_FRAME) as ws_server:
+        log.info("relay escuchando en ws://%s:%d", host, port)
+        await ws_server.serve_forever()
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Servidor relay de SecureChat")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--db", type=Path, default=Path("server_users.json"),
+                   help="fichero donde guardar el registro nombre -> clave pública")
+    args = p.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    try:
+        asyncio.run(run(args.host, args.port, args.db))
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
