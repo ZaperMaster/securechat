@@ -43,6 +43,7 @@ if (mode === "keystore") {
   const finish = (code) => { client.close(); setTimeout(() => process.exit(code), 50); };
   client = new ChatClient(name, identity, new Contacts(), (ev) => {
     if (ev.kind !== "message") return;
+    if (ev.content.t !== "text") { out(JSON.stringify({ t: ev.content.t, mime: ev.content.mime, len: ev.content.data?.length })); return finish(0); }
     if (mode === "listen") { client.sendText(ev.peer, `eco: ${ev.text}`); setTimeout(() => finish(0), 300); }
     else { out(ev.text); finish(0); }
   });

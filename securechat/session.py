@@ -32,7 +32,7 @@ from nacl.signing import SigningKey
 from .crypto import CryptoError, b64d, b64e, encode_fields, kdf, verify_signature
 
 PROTOCOL = b"securechat-v1"
-MAX_PLAINTEXT = 16 * 1024
+MAX_PLAINTEXT = 12 * 1024 * 1024  # cabe una imagen o vídeo de hasta 8 MB en base64
 MAX_SKIP = 1000
 
 

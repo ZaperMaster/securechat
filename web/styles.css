@@ -393,3 +393,109 @@ dialog menu button.ghost:hover { background: var(--hover); }
   .msg { max-width: 84%; }
   .login-card { padding: 28px 20px 20px; }
 }
+
+/* =====================================================================
+   Perfil, búsqueda, multimedia, emojis y stickers
+   ===================================================================== */
+.me-btn, .peer-btn {
+  display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; text-align: left;
+  padding: 4px 6px; margin: -4px -6px; border-radius: 14px; color: var(--text);
+}
+.me-btn:hover, .peer-btn:hover { background: var(--hover); }
+.peer-btn .chat-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.avatar { overflow: hidden; }
+.avatar.has-photo { background: var(--panel-2); }
+.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avatar.xl { width: 96px; height: 96px; border-radius: 32px; font-size: 38px; }
+[data-theme="terminal"] .avatar.has-photo, [data-theme="contrast"] .avatar.has-photo { background: var(--panel-2); }
+
+.new-chat-error {
+  margin: -2px 14px 6px; padding: 8px 12px; border-radius: 12px; font-size: 13px;
+  background: color-mix(in srgb, var(--error) 12%, var(--panel)); color: var(--error);
+}
+
+.profile-head { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.profile-photo-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.profile-view { display: grid; justify-items: center; gap: 4px; text-align: center; margin-bottom: 8px; }
+.profile-view h3 { margin: 8px 0 0; font-size: 20px; }
+.profile-view p { margin: 0; }
+dialog .field { display: grid; gap: 6px; margin-bottom: 10px; }
+dialog .field span { font-size: 13px; font-weight: 600; color: var(--muted); }
+dialog .field input {
+  padding: 11px 13px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2);
+}
+dialog .hint { font-size: 13px; color: var(--muted); margin: 0 0 8px; }
+.advanced {
+  margin-top: 14px; border: 1px solid var(--line); border-radius: 14px; padding: 10px 14px;
+  background: var(--panel-2);
+}
+.advanced summary { cursor: pointer; font-weight: 600; font-size: 14px; color: var(--muted); }
+.advanced[open] summary { margin-bottom: 10px; }
+.advanced .chip { margin: 4px 0 8px; }
+.viewer { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto 12px; border-radius: 12px; }
+
+/* Barra de escribir con botones */
+.composer { gap: 6px; padding-left: 10px; }
+.composer .icon-btn { width: 40px; height: 40px; border-radius: 50%; }
+.icon-btn circle.ring { fill: none; stroke: currentColor; }
+
+/* Selector de emojis / stickers */
+.picker {
+  position: absolute; left: 12px; right: 12px; bottom: 80px; max-width: 420px; z-index: 5;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; max-height: min(380px, 55vh); overflow: hidden;
+  animation: rise .15s ease-out;
+}
+@keyframes rise { from { transform: translateY(8px); } }
+.picker-tabs { display: flex; gap: 4px; padding: 8px; border-bottom: 1px solid var(--line); }
+.picker-tabs button {
+  flex: 1; padding: 8px; border-radius: 12px; font-weight: 600; font-size: 13px; color: var(--muted);
+}
+.picker-tabs button[aria-selected="true"] { background: var(--accent-soft); color: var(--text); }
+.picker-body { overflow-y: auto; padding: 4px 10px 12px; }
+.picker-group {
+  margin: 10px 4px 4px; font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted);
+}
+.emoji-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); }
+.emoji {
+  font-size: 24px; line-height: 1; padding: 6px 0; border-radius: 10px;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+}
+.emoji:hover { background: var(--hover); transform: scale(1.15); }
+.sticker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; padding-top: 8px; }
+.sticker-btn, .sticker-face {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif; line-height: 1;
+  /* contorno blanco tipo pegatina */
+  filter: drop-shadow(2px 0 0 #fff) drop-shadow(-2px 0 0 #fff) drop-shadow(0 2px 0 #fff)
+          drop-shadow(0 -2px 0 #fff) drop-shadow(0 4px 6px rgb(0 0 0 / .25));
+}
+.sticker-btn { font-size: 46px; padding: 10px 0; border-radius: 16px; transition: transform .12s; }
+.sticker-btn:hover { background: var(--hover); transform: rotate(-6deg) scale(1.1); }
+
+/* Mensajes especiales */
+.msg.jumbo, .msg.sticker { background: none !important; border: 0 !important; padding: 2px 4px; }
+.msg.jumbo .body { font-size: 44px; line-height: 1.15; }
+.msg.sticker .sticker-face { font-size: 96px; display: block; padding: 6px; animation: wobble .4s ease-out; }
+@keyframes wobble { 0% { transform: scale(.6) rotate(-10deg); } 70% { transform: scale(1.08) rotate(3deg); } }
+.msg.jumbo time, .msg.sticker time { color: var(--muted); opacity: 1; }
+.msg.media { padding: 4px; max-width: min(72%, 360px); }
+.msg.media img, .msg.media video {
+  display: block; width: 100%; max-height: 360px; object-fit: cover; border-radius: calc(var(--radius) - 4px);
+  background: rgb(0 0 0 / .08);
+}
+.msg.media img { cursor: zoom-in; min-height: 60px; }
+.msg.media time { padding: 2px 8px 2px; }
+.msg .body { white-space: pre-wrap; }
+
+.drop-hint {
+  position: absolute; inset: 72px 12px 80px; z-index: 6; display: grid; place-items: center;
+  border: 2px dashed var(--accent); border-radius: 20px; font-weight: 700; color: var(--accent);
+  background: color-mix(in srgb, var(--panel) 85%, transparent); pointer-events: none;
+}
+
+@media (max-width: 760px) {
+  .picker { left: 8px; right: 8px; max-width: none; }
+  .msg.media { max-width: 80%; }
+  .composer .icon-btn { width: 36px; height: 36px; }
+}

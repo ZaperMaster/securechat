@@ -87,3 +87,17 @@ def test_python_initiates_web_replies():
         await asyncio.wait_for(web.wait(), 15)
         await alice.close(); srv.close()
     run(main())
+
+
+def test_python_sends_image_to_web():
+    async def main():
+        srv, url, _ = await start_server()
+        web = await _spawn("listen", url, "WebBob")
+        alice = await new_client(url, "alice")
+        data = b64e(nacl.utils.random(2_000_000))
+        await alice.send_content("webbob", json.dumps(
+            {"t": "image", "mime": "image/gif", "name": "gato.gif", "data": data}))
+        out, _ = await asyncio.wait_for(web.communicate(), 20)
+        assert json.loads(out) == {"t": "image", "mime": "image/gif", "len": len(data)}
+        await alice.close(); srv.close()
+    run(main())

@@ -32,8 +32,14 @@ from .crypto import CryptoError, b64d, b64e, encode_fields, verify_signature
 
 log = logging.getLogger("securechat.server")
 
-USERNAME_RE = re.compile(r"^[a-z0-9_]{3,32}$")
-MAX_FRAME = 64 * 1024
+# Letras (mayúsculas o minúsculas), números, punto, guion y guion bajo. Solo ASCII a
+# propósito: con Unicode, "аlice" (con 'а' cirílica) se vería igual que "alice".
+# La unicidad no distingue mayúsculas: si existe "Alice", nadie puede registrar "alice".
+USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{1,30}[A-Za-z0-9_]$")
+USERNAME_HELP = "3-32 caracteres: letras, números, '_', '.' o '-'"
+# Cabe un vídeo de ~8 MB cifrado y en base64 (dos veces) dentro de un mensaje.
+MAX_FRAME = 20 * 1024 * 1024
+LOOKUP_LIMIT = 30  # búsquedas por minuto y conexión (frena la enumeración de usuarios)
 AUTH_TIMEOUT = 10
 AUTH_CONTEXT = b"securechat-auth-v1"
 
@@ -45,7 +51,7 @@ MIME = {".js": "text/javascript", ".webmanifest": "application/manifest+json",
 SECURITY_HEADERS = {
     # libsodium.js compila WebAssembly: necesita 'wasm-unsafe-eval' (no 'unsafe-eval').
     "Content-Security-Policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; "
-                               "connect-src 'self'; img-src 'self' data:; "
+                               "connect-src 'self'; img-src 'self' data: blob:; media-src blob:; "
                                "frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -80,65 +86,83 @@ def _response(status: int, reason: str, body: bytes, ctype: str) -> Response:
     return Response(status, reason, headers, body)
 
 
+def canon(name: str) -> str:
+    """Clave interna de un usuario: sin distinguir mayúsculas."""
+    return name.lower()
+
+
 class RelayServer:
     def __init__(self, db_path: Path | None = None):
         self.db_path = db_path
-        self.registry: dict[str, bytes] = {}
-        self.online: dict[str, ServerConnection] = {}
+        # canon(nombre) -> (nombre tal y como se registró, clave pública)
+        self.registry: dict[str, tuple[str, bytes]] = {}
+        self.online: dict[str, ServerConnection] = {}  # canon(nombre) -> conexión
         if db_path and db_path.exists():
-            self.registry = {u: b64d(k) for u, k in
-                             json.loads(db_path.read_text(encoding="utf-8")).items()}
+            for name, v in json.loads(db_path.read_text(encoding="utf-8")).items():
+                if isinstance(v, str):  # formato antiguo: {"nombre": "clave"}
+                    v = {"name": name, "key": v}
+                self.registry[canon(v["name"])] = (v["name"], b64d(v["key"]))
 
     def _save(self) -> None:
         if not self.db_path:
             return
         tmp = self.db_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({u: b64e(k) for u, k in self.registry.items()}, indent=2),
-                       encoding="utf-8")
+        data = {c: {"name": n, "key": b64e(k)} for c, (n, k) in self.registry.items()}
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, self.db_path)
 
     async def _authenticate(self, ws: ServerConnection) -> str | None:
         hello = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT))
         user, key = hello.get("user", ""), b64d(hello.get("identity_key", ""))
         if hello.get("type") != "hello" or not USERNAME_RE.match(user) or len(key) != 32:
-            await _send(ws, type="error", code="bad_hello",
-                        message="nombre inválido (3-32 caracteres: a-z, 0-9, _)")
+            await _send(ws, type="error", code="bad_hello", message=f"nombre inválido ({USERNAME_HELP})")
             return None
         nonce = nacl.utils.random(32)
         await _send(ws, type="challenge", nonce=b64e(nonce))
         reply = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT))
         verify_signature(key, auth_message(nonce, user), b64d(reply.get("sig", "")))
 
-        known = self.registry.get(user)
+        known = self.registry.get(canon(user))
         if known is None:
-            self.registry[user] = key
+            self.registry[canon(user)] = (user, key)
             self._save()
             log.info("nuevo usuario registrado: %s", user)
-        elif known != key:
+            return user
+        if known[1] != key:
             await _send(ws, type="error", code="name_taken",
-                        message="ese nombre ya está registrado con otra clave")
+                        message="ese nombre de usuario ya está en uso")
             return None
-        return user
+        return known[0]  # siempre con la grafía con la que se registró
 
     async def handler(self, ws: ServerConnection) -> None:
         user = None
+        lookups: list[float] = []
         try:
             user = await self._authenticate(ws)
             if user is None:
                 return
-            old = self.online.get(user)
+            old = self.online.get(canon(user))
             if old is not None:
                 await old.close(4000, "sesión iniciada en otro sitio")
-            self.online[user] = ws
+            self.online[canon(user)] = ws
             await _send(ws, type="welcome", user=user)
             log.info("%s conectado (%d en línea)", user, len(self.online))
 
             async for raw in ws:
                 msg = json.loads(raw)
-                if msg.get("type") == "send":
+                t = msg.get("type")
+                if t == "send":
                     await self._relay(ws, user, msg)
-                elif msg.get("type") == "who":
-                    await _send(ws, type="who", users=sorted(self.online))
+                elif t == "lookup":
+                    now = asyncio.get_running_loop().time()
+                    lookups[:] = [x for x in lookups if now - x < 60] + [now]
+                    if len(lookups) > LOOKUP_LIMIT:
+                        await _send(ws, type="error", code="rate_limited", id=msg.get("id"),
+                                    message="demasiadas búsquedas, espera un momento")
+                        continue
+                    await _send(ws, type="lookup", id=msg.get("id"), **self._lookup(msg.get("user")))
+                elif t == "who":
+                    await _send(ws, type="who", users=sorted(self.registry[c][0] for c in self.online))
                 else:
                     await _send(ws, type="error", code="unknown_type", message="tipo desconocido")
         except (CryptoError, ValueError, KeyError, TimeoutError, json.JSONDecodeError):
@@ -146,13 +170,25 @@ class RelayServer:
         except ConnectionClosed:
             pass
         finally:
-            if user and self.online.get(user) is ws:
-                del self.online[user]
+            if user and self.online.get(canon(user)) is ws:
+                del self.online[canon(user)]
                 log.info("%s desconectado", user)
+
+    def _lookup(self, name) -> dict:
+        """¿Existe el usuario? Devuelve su grafía oficial y si está conectado.
+
+        No devuelve la clave pública: la clave se obtiene en el handshake, firmada.
+        """
+        if not isinstance(name, str) or not USERNAME_RE.match(name):
+            return {"exists": False, "user": None, "online": False}
+        known = self.registry.get(canon(name))
+        if known is None:
+            return {"exists": False, "user": None, "online": False}
+        return {"exists": True, "user": known[0], "online": canon(name) in self.online}
 
     async def _relay(self, ws: ServerConnection, sender: str, msg: dict) -> None:
         to, payload = msg.get("to"), msg.get("payload")
-        target = self.online.get(to) if isinstance(to, str) else None
+        target = self.online.get(canon(to)) if isinstance(to, str) else None
         if target is None or not isinstance(payload, dict):
             await _send(ws, type="error", code="offline", to=to,
                         message=f"'{to}' no está conectado")

@@ -17,7 +17,7 @@ from nacl.signing import SigningKey
 from .client import ChatClient, ClientError
 from .contacts import Contacts
 from .crypto import CryptoError, fingerprint, load_identity, safety_number, save_identity
-from .server import USERNAME_RE
+from .server import USERNAME_HELP, USERNAME_RE
 
 HELP = """Comandos:
   /open <usuario>     abre una sesión cifrada y la deja como conversación activa
@@ -71,6 +71,8 @@ async def _show_events(client: ChatClient) -> None:
             _print(f"!!! AVISO DE SEGURIDAD: {ev.text}\n"
                    f"!!! Puede ser un ataque man-in-the-middle o que {ev.peer} reinstaló.\n"
                    f"!!! Confírmalo por otro canal antes de usar /forget {ev.peer}.")
+        elif ev.kind == "profile":
+            _print(f"* {ev.peer} se muestra como «{ev.text}»")
         elif ev.kind == "warning":
             _print(f"! {ev.text}")
         elif ev.kind == "disconnected":
@@ -103,7 +105,7 @@ async def _repl(client: ChatClient) -> None:
                     print("Nombre de usuario inválido.")
                     continue
                 if cmd == "/open" or arg not in client.sessions:
-                    await client.open_session(arg)
+                    arg = (await client.open_session(arg)).peer  # grafía oficial
                 active = arg
                 print(f"Conversación activa: {active}")
             elif cmd == "/who":
@@ -181,7 +183,7 @@ def main() -> None:
     pc.add_argument("--server", default="ws://127.0.0.1:8765")
     args = p.parse_args()
     if not USERNAME_RE.match(args.name):
-        sys.exit("Nombre inválido: 3-32 caracteres a-z, 0-9 o _.")
+        sys.exit(f"Nombre inválido: {USERNAME_HELP}.")
     {"init": cmd_init, "chat": cmd_chat}[args.cmd](args)
 
 

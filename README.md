@@ -22,10 +22,17 @@ El servidor solo reenvía bytes cifrados: nunca ve el texto ni tiene claves para
   (ratchet simétrico con BLAKE2b).
 - **Secreto perfecto hacia adelante**: las claves efímeras solo viven en memoria;
   robar tu clave de identidad no descifra conversaciones pasadas.
-- **Números de seguridad** (60 dígitos) para verificar contactos por otro canal y
-  detectar ataques man-in-the-middle.
+- **Fotos, GIF, vídeos, stickers y emojis**, cifrados igual que el texto. El tipo
+  de contenido también va dentro del cifrado: el servidor no sabe si es una foto.
+- **Perfil cifrado**: nombre visible y foto que solo ven tus contactos. Al
+  recortarla a 256 px se eliminan los metadatos EXIF (por ejemplo la ubicación GPS).
+- **@usuario único** con mayúsculas, números, `.`, `-` y `_`. La unicidad no
+  distingue mayúsculas, así que `Alice` y `alice` no pueden ser dos personas distintas.
+  Al abrir un chat se comprueba que el usuario existe.
 - **TOFU** (*trust on first use*): la primera clave vista de un contacto queda
   fijada; si cambia, el cliente muestra un aviso y rechaza la sesión.
+- **Números de seguridad** (60 dígitos) en *Perfil → Seguridad avanzada*, para quien
+  quiera descartar del todo que el propio servidor suplante a un contacto.
 - Protección contra **repetición, reflexión, manipulación** y claves de orden bajo.
 
 ## Uso rápido
@@ -44,13 +51,16 @@ python -m securechat.server
 
 ### Web
 
-Abre <http://localhost:8765> en dos pestañas o navegadores, crea un usuario en cada
-una (por ejemplo `alice` y `bob`), escribe el nombre del otro en "Nuevo chat" y
-envía mensajes. Con **Verificar** comparas el número de seguridad.
+Abre <http://localhost:8765> en dos pestañas o navegadores y crea una cuenta en
+cada una (por ejemplo `Alice` y `bob`). Escribe el @usuario del otro en "Nuevo chat":
+si no existe te lo dice y no se crea el chat. Pulsa sobre tu nombre para poner
+tu nombre visible y tu foto.
 
+- 😊 abre emojis y stickers; 📎 envía fotos, GIF o vídeos (máx. 8 MB). También
+  puedes pegar una imagen o arrastrarla al chat.
 - La clave privada se genera en el navegador y se guarda en `localStorage`, cifrada
-  con tu contraseña (Argon2id). Con 🔑 → *Exportar identidad* obtienes un
-  `identity.json` compatible con la versión de terminal.
+  con tu contraseña (Argon2id). En *Mi perfil → Seguridad avanzada* puedes exportarla
+  como `identity.json`, compatible con la versión de terminal.
 - Los mensajes solo existen mientras la pestaña está abierta: no se guarda historial.
 - En Chrome/Edge aparece **Instalar app** (o el icono de instalar en la barra de
   direcciones) y se abre en su propia ventana, como una app.
@@ -110,6 +120,7 @@ pytest -q
 ```
 securechat/
   crypto.py    almacén de claves, KDF, huellas y números de seguridad
+  content.py   formato del contenido cifrado (texto, foto, vídeo, sticker, perfil)
   session.py   handshake + cifrado de mensajes (sin E/S, fácil de testear)
   contacts.py  claves fijadas (TOFU) y estado de verificación
   server.py    relay WebSocket + servidor de la web estática
@@ -119,6 +130,7 @@ web/
   js/protocol.js  port de crypto.py + session.py (mismos bytes)
   js/client.js    port de client.py
   js/app.js       interfaz (solo usa textContent: nunca interpreta HTML recibido)
+  js/emoji.js     emojis y stickers
   sw.js, manifest.webmanifest   PWA instalable
   vendor/         libsodium.js 0.7.15 (copiado, sin CDN)
 tests/
@@ -191,6 +203,15 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
   mensaje. Usa TLS (`wss://`) delante del relay para ocultarlos al menos a la red.
 - **Primer contacto sin verificar**: si el servidor es malicioso desde el principio
   y nunca comparáis los números de seguridad, puede hacer de intermediario.
+  Escribir bien el @usuario no basta: quien controla el servidor decide a quién
+  entrega tus mensajes. Por eso la verificación existe, aunque esté escondida en
+  *Seguridad avanzada* para no estorbar en el día a día (igual que en Signal o WhatsApp).
+- **Existencia de usuarios**: cualquiera puede preguntar si un @usuario existe y
+  si está conectado. Se limita a 30 búsquedas por minuto para frenar la enumeración.
+- **Tamaño de los mensajes**: el tipo de contenido va cifrado, pero un mensaje de
+  3 MB delata que es una foto o un vídeo. Rellenar (*padding*) los mensajes lo ocultaría.
+- **Búsqueda de GIF**: no hay buscador tipo Giphy/Tenor porque enviaría lo que
+  buscas a un tercero. Los GIF se envían desde tu dispositivo.
 - **Disponibilidad**: el servidor puede descartar mensajes o desconectar usuarios.
 - **Dispositivo comprometido**: con malware en tu equipo no hay cifrado que valga.
   Python además no permite borrar claves de memoria de forma fiable.
@@ -214,7 +235,7 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - [x] Fase 1 – Chat 1 a 1 por CLI con relay ciego y claves protegidas con contraseña
 - [x] Fase 2 – Huellas, números de seguridad y contactos verificados
 - [x] Fase 3 – Claves efímeras por sesión (secreto hacia adelante)
-- [x] Fase 4 – Interfaz web instalable (PWA) compatible con la CLI
+- [x] Fase 4 – Interfaz web instalable (PWA), temas, perfiles y multimedia cifrada
 - [ ] Fase 5 – Mensajes sin conexión (prekeys firmadas, al estilo X3DH) y grupos
 - [ ] Double Ratchet completo, TLS en el relay, historial local cifrado
 

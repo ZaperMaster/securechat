@@ -159,3 +159,41 @@ def test_serves_web_app_safely():
             assert (await http_get(url, evil))[0] == 404, evil
         srv.close()
     run(main())
+
+
+def test_lookup_and_case_insensitive_names():
+    async def main():
+        srv, url, _ = await start_server()
+        alice = await new_client(url, "Alice.Dev")
+        bob = await new_client(url, "bob")
+        assert await bob.lookup("alice.dev") == {"exists": True, "user": "Alice.Dev", "online": True}
+        assert (await bob.lookup("nadie"))["exists"] is False
+        assert (await bob.lookup("../etc"))["exists"] is False
+        # Escribir el nombre con otras mayúsculas llega a la misma persona
+        await bob.send_text("ALICE.DEV", "hola")
+        ev = await next_event(alice, "message")
+        assert (ev.peer, ev.text) == ("bob", "hola")
+        assert "Alice.Dev" in bob.sessions
+        # Nadie puede registrar el mismo nombre cambiando mayúsculas
+        with pytest.raises(ClientError):
+            await new_client(url, "alice.dev")
+        # Mensajes a usuarios inexistentes: error claro, sin crear sesión
+        with pytest.raises(ClientError, match="no existe"):
+            await bob.send_text("fantasma", "¿hola?")
+        await alice.close(); await bob.close(); srv.close()
+    run(main())
+
+
+def test_media_and_profile_content():
+    async def main():
+        from securechat import content
+        srv, url, _ = await start_server()
+        alice, bob = await new_client(url, "alice"), await new_client(url, "bob")
+        img = {"t": "image", "mime": "image/png", "name": "foto.png", "data": "A" * 3_000_000}
+        await alice.send_content("bob", json.dumps(img))
+        assert (await next_event(bob, "message")).text == "[imagen: foto.png]"
+        await alice.send_content("bob", json.dumps({"t": "profile", "name": "Alicia 🌸", "avatar": None}))
+        assert (await next_event(bob, "profile")).text == "Alicia 🌸"
+        assert content.decode("no es json") == {"t": "text", "body": "no es json"}
+        await alice.close(); await bob.close(); srv.close()
+    run(main())
