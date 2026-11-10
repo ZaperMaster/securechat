@@ -930,6 +930,8 @@ function renderHeader() {
     const c = client.contacts.get(active);
     $("peer-status").replaceChildren(online ? text("en línea", "span", "lock") : text(c?.bio || `@${active}`, "span"));
   }
+  // Se puede escribir siempre que haya un chat abierto (sin conexión, el mensaje espera con 🕓)
+  for (const id of ["text", "send-btn", "emoji-btn", "attach-btn"]) $(id).disabled = !has;
   $("chat").classList.toggle("is-empty", !has);
   $("empty-chat").hidden = has;
 }
