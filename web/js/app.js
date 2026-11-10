@@ -76,6 +76,7 @@ async function startApp() {
   $("login").hidden = true;
   $("app").hidden = false;
   $("me-name").textContent = me;
+  setAvatar($("me-avatar"), me);
   renderContacts();
   renderChat();
 }
@@ -230,6 +231,32 @@ function text(t, tag = "p", cls = "") {
   return el;
 }
 
+const hhmm = (d) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+/** Avatar con la inicial y un color estable derivado del nombre. */
+function setAvatar(el, name) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) % 360;
+  el.textContent = name[0] || "?";
+  el.style.setProperty("--h", h); // CSSOM: permitido por la CSP (no es un atributo style inline)
+  return el;
+}
+
+function shieldIcon(ok) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("class", `shield ${ok ? "ok" : "no"}`);
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", ok ? "M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6l-8-3Z M8.5 12l2.5 2.5 4.5-5"
+    : "M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6l-8-3Z M12 8v5 M12 16.5v.01");
+  svg.append(path);
+  const title = document.createElementNS(NS, "title");
+  title.textContent = ok ? "Verificado" : "Sin verificar";
+  svg.append(title);
+  return svg;
+}
+
 function renderContacts() {
   if (!client) return;
   const names = new Set([...client.contacts.all().map((c) => c.name), ...chats.keys()]);
@@ -237,19 +264,28 @@ function renderContacts() {
     const ta = chats.get(a)?.messages.at(-1)?.time || 0, tb = chats.get(b)?.messages.at(-1)?.time || 0;
     return tb - ta || a.localeCompare(b);
   });
+  $("contacts-empty").hidden = list.length > 0;
   $("contacts").replaceChildren(...list.map((name) => {
     const c = client.contacts.get(name);
-    const last = chats.get(name)?.messages.filter((m) => m.text).at(-1);
+    const ch = chats.get(name);
+    const last = ch?.messages.filter((m) => m.text).at(-1);
     const li = document.createElement("li");
     if (name === active) li.className = "active";
     const btn = document.createElement("button");
-    const main = document.createElement("span");
-    main.className = "contact-main";
-    main.append(text(name, "strong"), text(last ? `${last.from === "me" ? "Tú: " : ""}${last.text}` : "", "span", "small muted"));
-    const badge = c ? text(c.verified ? "✔" : "?", "span", `badge ${c.verified ? "ok" : "no"}`) : "";
-    const unread = chats.get(name)?.unread ? text(String(chats.get(name).unread), "span", "unread") : "";
-    btn.append(text(name[0], "span", "avatar"), main, badge, unread);
-    btn.title = c?.verified ? "Verificado" : "Sin verificar";
+    btn.type = "button";
+
+    const top = text("", "span", "contact-top");
+    top.append(text(name, "strong"));
+    if (c) top.append(shieldIcon(c.verified));
+    const main = text("", "span", "contact-main");
+    main.append(top, text(last ? `${last.from === "me" ? "Tú: " : ""}${last.text}`
+      : client.sessions.has(name) ? "🔒 Sesión cifrada lista" : "Sin mensajes", "span", "preview"));
+
+    const side = text("", "span", "contact-side");
+    if (last) side.append(text(hhmm(last.time), "time"));
+    if (ch?.unread) side.append(text(String(ch.unread), "span", "unread"));
+
+    btn.append(setAvatar(text("", "span", "avatar"), name), main, side);
     btn.onclick = () => openChat(name);
     li.append(btn);
     return li;
@@ -259,33 +295,69 @@ function renderContacts() {
 function renderHeader() {
   if (!client) return;
   const has = !!active;
-  $("peer-name").textContent = active || "Elige un chat";
   const c = active && client.contacts.get(active);
   const online = active && client.sessions.has(active);
-  $("peer-status").textContent = !has ? ""
-    : `${online ? "🔒 cifrado E2E" : "sin sesión"} · ${c?.verified ? "✔ verificado" : "sin verificar"}`;
+  $("peer-name").textContent = active || "";
+  $("peer-avatar").hidden = !has;
+  if (has) setAvatar($("peer-avatar"), active);
+  const status = $("peer-status");
+  status.replaceChildren();
+  if (has) {
+    status.append(online ? text("🔒 Cifrado E2E", "span", "lock") : text("Conectando…", "span"));
+    status.append(text("·", "span"), text(c?.verified ? "verificado" : "sin verificar", "span"));
+  }
   $("verify-btn").hidden = !c;
   $("verify-btn").textContent = c?.verified ? "✔ Verificado" : "Verificar";
+  $("verify-btn").classList.toggle("ok", !!c?.verified);
   $("text").disabled = $("send-btn").disabled = !has;
+  $("chat").classList.toggle("is-empty", !has);
+  $("empty-chat").hidden = has;
 }
 
 function renderChat() {
   renderHeader();
-  const has = !!active;
   $("messages").replaceChildren();
-  if (has) for (const m of chat(active).messages) appendMessage(m);
-  else $("messages").append(text("Escribe un nombre de usuario a la izquierda para empezar. Los mensajes solo existen mientras la página está abierta.", "li", "sys"));
+  if (active) for (const m of chat(active).messages) appendMessage(m);
 }
 
 function appendMessage(m) {
   let li;
   if (m.sys) li = text(m.sys, "li", `sys${m.warn ? " warn" : ""}`);
   else {
-    li = text(m.text, "li", `msg ${m.from === "me" ? "mine" : ""}`);
-    li.append(text(m.time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), "time"));
+    // Agrupa mensajes seguidos del mismo autor (burbujas más compactas)
+    const prev = $("messages").lastElementChild;
+    const side = m.from === "me" ? "mine" : "theirs";
+    const cont = prev?.classList.contains(side);
+    li = text(m.text, "li", `msg ${side} ${cont ? "cont" : "first"}`);
+    li.append(text(hhmm(m.time), "time"));
   }
   $("messages").append(li);
   li.scrollIntoView({ block: "end" });
+}
+
+function showThemes() {
+  const current = document.documentElement.dataset.theme;
+  const grid = text("", "div", "themes");
+  for (const t of window.SC_THEMES) {
+    const card = text("", "button", "theme-card");
+    card.type = "button";
+    card.dataset.theme = t.id; // la tarjeta se pinta con los colores de su propio tema
+    card.setAttribute("aria-pressed", String(t.id === current));
+    const sw = text("", "span", "swatch");
+    sw.style.background = t.swatch[0];
+    const a = document.createElement("i"), b = document.createElement("i");
+    a.style.background = t.swatch[2];
+    a.style.border = "1px solid rgb(127 127 127 / .3)";
+    b.style.background = t.swatch[1];
+    sw.append(a, b);
+    card.append(sw, text(t.name, "strong"), text(t.desc, "small"));
+    card.onclick = () => {
+      store.set("sc:theme", window.applyTheme(t.id));
+      for (const el of grid.children) el.setAttribute("aria-pressed", String(el === card));
+    };
+    grid.append(card);
+  }
+  dialog("Tema", [grid]);
 }
 
 function updateTitle() {
@@ -297,7 +369,7 @@ function dialog(title, body, actions = [["Cerrar"]]) {
   $("dlg-title").textContent = title;
   $("dlg-body").replaceChildren(...body);
   $("dlg-actions").replaceChildren(...actions.map(([label, fn], i) => {
-    const b = text(label, "button", i === actions.length - 1 ? "" : "ghost");
+    const b = text(label, "button", i === actions.length - 1 ? "primary" : "ghost");
     b.value = label;
     b.onclick = () => { fn?.(); renderChat(); };
     return b;
@@ -337,6 +409,11 @@ async function main() {
   });
   $("verify-btn").onclick = () => showSafety(active);
   $("me-btn").onclick = showMe;
+  $("theme-btn").onclick = showThemes;
+  $("login-theme-btn").onclick = showThemes;
+  // Con el tema "Sistema", sigue los cambios de claro/oscuro del dispositivo
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () =>
+    window.applyTheme(document.documentElement.dataset.theme));
   $("logout-btn").onclick = logout;
   $("back-btn").onclick = () => { active = null; $("app").classList.remove("in-chat"); renderContacts(); renderChat(); };
   $("install-btn").onclick = async () => { await installPrompt?.prompt(); installPrompt = null; $("install-btn").hidden = true; };
