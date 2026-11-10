@@ -40,10 +40,13 @@ def b64d(data: str) -> bytes:
 
 
 def kdf(key: bytes, label: bytes, data: bytes = b"", size: int = 32) -> bytes:
-    """Derivación de claves con BLAKE2b en modo keyed (label = 'personalization')."""
-    if len(label) > 16:
-        raise ValueError("la etiqueta de BLAKE2b admite como máximo 16 bytes")
-    return blake2b(data, digest_size=size, key=key, person=label.ljust(16, b"\0"),
+    """Derivación de claves con BLAKE2b en modo keyed.
+
+    La etiqueta va dentro del mensaje (con longitud prefijada) para separar dominios.
+    No usamos el parámetro 'personalization' de BLAKE2b porque libsodium.js no lo
+    expone junto con un mensaje, y el cliente web debe derivar exactamente lo mismo.
+    """
+    return blake2b(encode_fields(b"securechat-kdf", label, data), digest_size=size, key=key,
                    encoder=RawEncoder)
 
 

@@ -19,9 +19,14 @@ import os
 import re
 from pathlib import Path
 
+import mimetypes
+import ssl
+
 import nacl.utils
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request, Response
 
 from .crypto import CryptoError, b64d, b64e, encode_fields, verify_signature
 
@@ -33,8 +38,46 @@ AUTH_TIMEOUT = 10
 AUTH_CONTEXT = b"securechat-auth-v1"
 
 
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+MIME = {".js": "text/javascript", ".webmanifest": "application/manifest+json",
+        ".svg": "image/svg+xml", ".png": "image/png", ".css": "text/css",
+        ".html": "text/html", ".json": "application/json"}
+SECURITY_HEADERS = {
+    # libsodium.js compila WebAssembly: necesita 'wasm-unsafe-eval' (no 'unsafe-eval').
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; "
+                               "connect-src 'self'; img-src 'self' data:; "
+                               "frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-cache",
+}
+
+
 def auth_message(nonce: bytes, user: str) -> bytes:
     return encode_fields(AUTH_CONTEXT, nonce, user.encode())
+
+
+def serve_static(connection: ServerConnection, request: Request) -> Response | None:
+    """Sirve la web estática. Las peticiones WebSocket siguen su camino (None)."""
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return None
+    path = request.path.split("?", 1)[0]
+    if path == "/":
+        path = "/index.html"
+    target = (WEB_DIR / path.lstrip("/")).resolve()
+    if not target.is_relative_to(WEB_DIR) or not target.is_file():
+        return _response(404, "Not Found", b"404", "text/plain")
+    ctype = MIME.get(target.suffix) or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if ctype.startswith("text/") or ctype.endswith(("json", "javascript")):
+        ctype += "; charset=utf-8"
+    return _response(200, "OK", target.read_bytes(), ctype)
+
+
+def _response(status: int, reason: str, body: bytes, ctype: str) -> Response:
+    headers = Headers(SECURITY_HEADERS)
+    headers["Content-Type"] = ctype
+    headers["Content-Length"] = str(len(body))
+    return Response(status, reason, headers, body)
 
 
 class RelayServer:
@@ -130,23 +173,33 @@ async def _send(ws: ServerConnection, **msg) -> None:
         pass
 
 
-async def run(host: str, port: int, db: Path | None) -> None:
+async def run(host: str, port: int, db: Path | None, tls: ssl.SSLContext | None = None) -> None:
     server = RelayServer(db)
-    async with serve(server.handler, host, port, max_size=MAX_FRAME) as ws_server:
-        log.info("relay escuchando en ws://%s:%d", host, port)
+    async with serve(server.handler, host, port, max_size=MAX_FRAME,
+                     process_request=serve_static, ssl=tls) as ws_server:
+        scheme = "https" if tls else "http"
+        shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
+        log.info("web y relay en %s://%s:%d", scheme, shown, port)
         await ws_server.serve_forever()
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Servidor relay de SecureChat")
-    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="usa 0.0.0.0 para aceptar conexiones de otros equipos de tu red")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--db", type=Path, default=Path("server_users.json"),
                    help="fichero donde guardar el registro nombre -> clave pública")
+    p.add_argument("--cert", type=Path, help="certificado TLS (PEM) para servir por HTTPS")
+    p.add_argument("--key", type=Path, help="clave privada TLS (PEM)")
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    tls = None
+    if args.cert:
+        tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        tls.load_cert_chain(args.cert, args.key)
     try:
-        asyncio.run(run(args.host, args.port, args.db))
+        asyncio.run(run(args.host, args.port, args.db, tls))
     except KeyboardInterrupt:
         pass
 

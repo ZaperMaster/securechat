@@ -1,0 +1,142 @@
+:root {
+  --bg: #f3f5f7; --panel: #ffffff; --line: #e2e6ea; --text: #15202b; --muted: #64707d;
+  --accent: #0f766e; --accent-ink: #ffffff; --mine: #d7f2ee; --theirs: #ffffff;
+  --warn-bg: #fff4e5; --warn: #9a5b00; --error: #b42318; --ok: #15803d;
+  --radius: 12px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #2a313b; --text: #e6edf3; --muted: #8b949e;
+    --accent: #2dd4bf; --accent-ink: #04201d; --mine: #134e48; --theirs: #1f2630;
+    --warn-bg: #2d2210; --warn: #f0b45b; --error: #ff7b72; --ok: #4ade80;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--text);
+}
+[hidden] { display: none !important; }
+button, input { font: inherit; color: inherit; }
+button {
+  border: 0; border-radius: 10px; padding: 10px 16px; cursor: pointer;
+  background: var(--accent); color: var(--accent-ink); font-weight: 600;
+}
+button:disabled { opacity: .5; cursor: default; }
+button.ghost { background: transparent; color: var(--text); padding: 8px 10px; font-weight: 500; }
+button.ghost:hover { background: var(--line); }
+input {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg);
+}
+input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.small { font-size: 13px; }
+.muted { color: var(--muted); }
+.error { color: var(--error); min-height: 1.2em; margin: 8px 0 0; }
+.warning { color: var(--warn); }
+
+/* ---------- acceso */
+.login { min-height: 100%; display: grid; place-items: center; padding: 16px; }
+.card {
+  width: min(400px, 100%); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 16px; padding: 28px 24px; text-align: center;
+}
+.card h1 { margin: 8px 0 4px; font-size: 24px; }
+.card form { text-align: left; display: grid; gap: 12px; margin-top: 20px; }
+.card label { display: grid; gap: 4px; font-weight: 600; font-size: 14px; }
+.logo { width: 56px; height: 56px; }
+
+/* ---------- app */
+.app { height: 100%; display: grid; grid-template-columns: 300px 1fr; }
+.sidebar {
+  background: var(--panel); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.sidebar-head, .chat-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line); min-height: 60px;
+  padding-top: max(12px, env(safe-area-inset-top));
+}
+.conn { display: block; font-size: 12px; color: var(--muted); }
+.conn.on::before { content: "● "; color: var(--ok); }
+.conn.off::before { content: "● "; color: var(--error); }
+.new-chat { display: flex; gap: 8px; padding: 12px 14px; }
+.new-chat button { padding: 0 14px; font-size: 20px; }
+.contacts { list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; flex: 1; }
+.contacts li button {
+  width: 100%; text-align: left; background: transparent; color: var(--text);
+  display: flex; align-items: center; gap: 10px; padding: 10px; font-weight: 500;
+}
+.contacts li button:hover { background: var(--bg); }
+.contacts li.active button { background: var(--mine); }
+.avatar {
+  width: 36px; height: 36px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  background: var(--accent); color: var(--accent-ink); font-weight: 700; text-transform: uppercase;
+}
+.contact-main { flex: 1; min-width: 0; }
+.contact-main .small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { font-size: 12px; }
+.badge.ok { color: var(--ok); }
+.badge.no { color: var(--warn); }
+.unread {
+  background: var(--accent); color: var(--accent-ink); border-radius: 999px;
+  font-size: 12px; padding: 1px 7px; font-weight: 700;
+}
+.sidebar-foot {
+  display: flex; justify-content: space-between; padding: 8px 14px;
+  border-top: 1px solid var(--line); padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+
+.chat { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.chat-head { background: var(--panel); justify-content: flex-start; }
+.chat-title { flex: 1; min-width: 0; display: grid; }
+.back { display: none; font-size: 26px; line-height: 1; padding: 2px 10px; }
+.messages {
+  list-style: none; margin: 0; padding: 16px; flex: 1; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.msg {
+  max-width: min(75%, 560px); padding: 8px 12px; border-radius: var(--radius);
+  background: var(--theirs); border: 1px solid var(--line); align-self: flex-start;
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.msg.mine { align-self: flex-end; background: var(--mine); border-color: transparent; }
+.msg time { display: block; font-size: 11px; color: var(--muted); text-align: right; margin-top: 2px; }
+.sys {
+  align-self: center; font-size: 13px; color: var(--muted); text-align: center;
+  padding: 4px 10px; max-width: 90%;
+}
+.sys.warn { background: var(--warn-bg); color: var(--warn); border-radius: 8px; }
+.composer {
+  display: flex; gap: 8px; padding: 10px 12px; background: var(--panel);
+  border-top: 1px solid var(--line); padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+
+/* ---------- diálogo */
+dialog {
+  border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text);
+  width: min(440px, calc(100% - 32px)); padding: 20px;
+}
+dialog::backdrop { background: rgb(0 0 0 / .45); }
+dialog h2 { margin: 0 0 12px; font-size: 18px; }
+dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 16px 0 0; }
+.safety {
+  font: 600 18px/1.6 ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .5px;
+  display: grid; grid-template-columns: repeat(4, auto); justify-content: center; gap: 2px 14px;
+  background: var(--bg); border-radius: 10px; padding: 12px; margin: 10px 0;
+}
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; word-break: break-all; }
+
+/* ---------- móvil: una sola columna */
+@media (max-width: 720px) {
+  .app { grid-template-columns: 1fr; }
+  .app .chat { display: none; }
+  .app.in-chat .sidebar { display: none; }
+  .app.in-chat .chat { display: flex; }
+  .back { display: block; }
+  .msg { max-width: 85%; }
+}

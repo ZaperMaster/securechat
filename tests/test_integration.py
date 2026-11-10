@@ -10,7 +10,7 @@ from websockets.asyncio.server import serve
 
 from securechat.client import ChatClient, ClientError
 from securechat.contacts import Contacts
-from securechat.server import MAX_FRAME, RelayServer
+from securechat.server import MAX_FRAME, RelayServer, serve_static
 
 
 async def next_event(client, kind, timeout=5):
@@ -26,7 +26,8 @@ def run(coro):
 
 async def start_server(relay=None):
     relay = relay or RelayServer()
-    srv = await serve(relay.handler, "127.0.0.1", 0, max_size=MAX_FRAME)
+    srv = await serve(relay.handler, "127.0.0.1", 0, max_size=MAX_FRAME,
+                      process_request=serve_static)
     port = srv.sockets[0].getsockname()[1]
     return srv, f"ws://127.0.0.1:{port}", relay
 
@@ -133,4 +134,28 @@ def test_identity_change_is_detected():
         ev = await next_event(alice, "identity_changed")
         assert ev.peer == "bob"
         await alice.close(); await impostor.close(); srv.close()
+    run(main())
+
+
+async def http_get(url, path):
+    host, port = url.removeprefix("ws://").split(":")
+    reader, writer = await asyncio.open_connection(host, int(port))
+    writer.write(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+    data = await reader.read()
+    writer.close()
+    head, _, body = data.partition(b"\r\n\r\n")
+    return int(head.split()[1]), head.decode(), body
+
+
+def test_serves_web_app_safely():
+    async def main():
+        srv, url, _ = await start_server()
+        status, head, body = await http_get(url, "/")
+        assert status == 200 and b"SecureChat" in body
+        assert "Content-Security-Policy" in head and "text/html" in head
+        status, head, _ = await http_get(url, "/js/protocol.js")
+        assert status == 200 and "text/javascript" in head
+        for evil in ("/../securechat/server.py", "/%2e%2e/README.md", r"/..\README.md", "/nope.js"):
+            assert (await http_get(url, evil))[0] == 404, evil
+        srv.close()
     run(main())
