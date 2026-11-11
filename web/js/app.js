@@ -1201,7 +1201,8 @@ function showMyProfile({ welcome = false } = {}) {
   dialog("Mi perfil", [
     head,
     field("Nombre visible", nameIn),
-    field("Estado", bioIn, "Una frase que verán tus contactos."),
+    text("Tu estado", "h3", "settings-h"), statusPicker(),
+    field("Frase de perfil", bioIn, "Una frase que verán tus contactos."),
     text(`Tu usuario es @${me}. Es único y es lo que otros escriben para encontrarte.`, "p", "hint"),
     text("Tu nombre, estado y foto viajan cifrados: solo los ven tus contactos, nunca el servidor.", "p", "hint"),
     advancedSecurityMine(),
@@ -1395,7 +1396,7 @@ async function importBackup(file) {
   return added;
 }
 
-function showBackup() {
+function showBackup(back = false) {
   const status = text("", "p", "hint");
   const exp = withIcon("download", "Descargar copia cifrada", "button", "primary");
   exp.type = "button";
@@ -1422,10 +1423,10 @@ function showBackup() {
     text("Guarda todo tu historial (mensajes, fotos, notas de voz, grupos y contactos) en un fichero cifrado.", "p"),
     text("Solo tu cuenta puede abrirlo: la clave sale de tu identidad. Sirve para pasar tu historial a otro móvil u ordenador: inicia sesión allí y restaura la copia.", "p", "hint"),
     exp, imp, fileIn, status,
-  ]);
+  ], subActions(back));
 }
 
-function showAbout() {
+function showAbout(back = false) {
   const items = [
     ["lock", "Cifrado de extremo a extremo", "Tus mensajes, fotos, notas de voz y perfil se cifran en tu dispositivo. El servidor solo ve datos ilegibles."],
     ["users", "Grupos invisibles", "Cada mensaje de grupo se cifra por separado para cada miembro: el servidor no sabe que el grupo existe."],
@@ -1439,7 +1440,7 @@ function showAbout() {
     t.append(text(title, "strong"), text(desc, "p", "hint"));
     row.append(icon(ic, "about-icon"), t);
     return row;
-  }));
+  }), subActions(back));
 }
 
 function showNewGroup() {
@@ -1597,7 +1598,34 @@ function statusPicker() {
   return box;
 }
 
-function showSettings() {
+const OPTIONS = [
+  ["sliders", "Apariencia", "Tema, colores, fondo y tamaño de letra", () => showSettings("appearance")],
+  ["lock", "Privacidad", "Escribiendo, visto y última conexión", () => showSettings("privacy")],
+  ["mail", "Chats y notificaciones", "Avisos y tecla Intro", () => showSettings("chats")],
+  ["download", "Copia de seguridad", "Guarda o restaura tu historial cifrado", () => showBackup(true)],
+  ["shield", "Cómo te protege SecureChat", "Qué ve y qué no ve el servidor", () => showAbout(true)],
+];
+
+/** Pantalla de opciones: una lista de apartados; cada uno abre el suyo. */
+function showOptions() {
+  dialog("Opciones", [text("", "div", "options-list")].map((list) => {
+    for (const [ic, title, desc, open] of OPTIONS) {
+      const b = text("", "button", "option-row");
+      b.type = "button";
+      const t = text("", "span", "option-text");
+      t.append(text(title, "strong"), text(desc, "small"));
+      b.append(icon(ic, "option-ico"), t, icon("chevron", "option-chev"));
+      b.onclick = open;
+      list.append(b);
+    }
+    return list;
+  }));
+}
+
+/** Botones de un apartado de Opciones: «Atrás» vuelve a la lista. */
+const subActions = (back = true) => (back ? [["Atrás", () => setTimeout(showOptions)], ["Listo"]] : [["Listo"]]);
+
+function showSettings(section = "appearance", back = true) {
   const p = prefs();
   const setPref = (patch) => { window.SC_SET_PREFS({ ...prefs(), ...patch }); };
 
@@ -1700,21 +1728,27 @@ function showSettings() {
     return l;
   };
 
-  dialog("Personalizar", [
-    text("Tu estado", "h3", "settings-h"), statusPicker(),
+  if (section === "privacy") {
+    return dialog("Privacidad", [
+      text("Tu estado (en línea, ausente o invisible) se cambia desde Mi perfil.", "p", "hint"),
+      toggle("typing", "Mostrar que estoy escribiendo", "Si lo quitas, los demás no verán «escribiendo…» cuando escribes."),
+      toggle("readReceipts", "Mostrar que he leído (visto)", "Si lo quitas, los demás no verán el doble check azul cuando leas sus mensajes."),
+      toggle("lastSeen", "Mostrar mi última conexión", "Si lo quitas, nadie verá a qué hora te conectaste por última vez (y tú tampoco la de los demás)."),
+    ], subActions(back));
+  }
+  if (section === "chats") {
+    return dialog("Chats y notificaciones", [
+      toggle("notifications", "Notificaciones", "Aviso cuando llega un mensaje con la app en segundo plano."),
+      toggle("enterSends", "Enviar con Intro", "Si lo quitas, Intro hace salto de línea en el ordenador."),
+    ], subActions(back));
+  }
+  dialog("Apariencia", [
     text("Tema", "h3", "settings-h"), themes,
     text("Color principal", "h3", "settings-h"), colors,
     text("Fondo de los chats", "h3", "settings-h"), walls,
     text("Tamaño de letra", "h3", "settings-h"), seg([[13, "Pequeña"], [15, "Normal"], [17, "Grande"], [19, "Enorme"]], "font"),
     text("Forma de las burbujas", "h3", "settings-h"), seg([[22, "Redondas"], [14, "Suaves"], [4, "Rectas"]], "radius"),
-    text("Privacidad", "h3", "settings-h"),
-    toggle("typing", "Mostrar que estoy escribiendo", "Si lo quitas, los demás no verán «escribiendo…» cuando escribes."),
-    toggle("readReceipts", "Mostrar que he leído (visto)", "Si lo quitas, los demás no verán el doble check azul cuando leas sus mensajes."),
-    toggle("lastSeen", "Mostrar mi última conexión", "Si lo quitas, nadie verá a qué hora te conectaste por última vez (y tú tampoco la de los demás)."),
-    text("Avisos", "h3", "settings-h"),
-    toggle("notifications", "Notificaciones", "Aviso cuando llega un mensaje con la app en segundo plano."),
-    toggle("enterSends", "Enviar con Intro", "Si lo quitas, Intro hace salto de línea en el ordenador."),
-  ]);
+  ], subActions(back));
 }
 
 // -------------------------------------------------------------- renderizado
@@ -2134,8 +2168,8 @@ async function main() {
   $("profile-btn").onclick = showMyProfile;
   $("peer-btn").onclick = () => active && showPeerProfile(active);
   $("logout-btn").onclick = () => { if (confirm("¿Cerrar sesión en este dispositivo? Tendrás que volver a escribir tu contraseña.")) logout(); };
-  $("theme-btn").onclick = showSettings;
-  $("login-theme-btn").onclick = showSettings;
+  $("theme-btn").onclick = () => showSettings("appearance");
+  $("login-theme-btn").onclick = () => showSettings("appearance", false);
   $("emoji-btn").onclick = togglePicker;
   $("attach-btn").onclick = () => $("file-input").click();
   $("file-input").onchange = () => { sendFile($("file-input").files[0]); $("file-input").value = ""; };
@@ -2181,10 +2215,8 @@ async function main() {
     closeMenu();
     if (action === "profile") showMyProfile();
     else if (action === "group") showNewGroup();
-    else if (action === "settings") showSettings();
-    else if (action === "backup") showBackup();
+    else if (action === "options") showOptions();
     else if (action === "install") { await installPrompt?.prompt(); installPrompt = null; }
-    else if (action === "about") showAbout();
     else if (action === "logout") $("logout-btn").click();
   };
   $("messages").addEventListener("scroll", closeMsgMenu, { passive: true });

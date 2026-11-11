@@ -852,3 +852,15 @@ dialog menu button { border-radius: 10px; }
 .pick-names { display: grid; min-width: 0; }
 .pick-names strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pick-names small { color: var(--muted); font-size: 12px; }
+
+/* Opciones: lista de apartados */
+.options-list { display: grid; gap: 4px; }
+.option-row { display: flex; align-items: center; gap: 14px; width: 100%; padding: 12px 10px; border-radius: 12px; text-align: left; color: var(--text); }
+.option-row:hover, .option-row:focus-visible { background: var(--panel-2); }
+.option-row + .option-row { border-top: 1px solid var(--line); border-radius: 0; }
+.option-row + .option-row:hover { border-radius: 12px; }
+.option-ico { width: 22px; height: 22px; color: var(--accent); flex: none; }
+.option-text { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.option-text strong { font-weight: 600; }
+.option-text small { color: var(--muted); font-size: 12.5px; }
+.option-chev { width: 18px; height: 18px; color: var(--muted); flex: none; }
