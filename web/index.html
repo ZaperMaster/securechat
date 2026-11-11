@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="es" data-theme="system">
+<html lang="es" data-theme="forest">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#4f46e5">
+  <meta name="theme-color" content="#f3f6f4">
   <meta name="description" content="Mensajería cifrada extremo a extremo (proyecto educativo)">
   <title>SecureChat</title>
   <link rel="manifest" href="manifest.webmanifest">
@@ -65,7 +65,7 @@
         <p class="auth-switch register-only">¿Ya tienes cuenta? <button id="to-login" class="link-strong" type="button">Inicia sesión</button></p>
       </form>
       <div id="verify-step" class="verify-step" hidden>
-        <div class="verify-icon" aria-hidden="true">📬</div>
+        <div class="state-icon"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 7l8 6 8-6"/></svg></div>
         <h2>Revisa tu correo</h2>
         <p>Te hemos enviado un código de 6 dígitos a <strong id="verify-to"></strong>.</p>
         <form id="verify-form">
@@ -88,7 +88,7 @@
   <!-- Servicio caído -->
   <div id="down" class="down" hidden role="alertdialog" aria-labelledby="down-title">
     <div class="down-card">
-      <div class="down-icon" aria-hidden="true">🔌</div>
+      <div class="state-icon"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M5 12.6a10 10 0 0 1 4.2-2.4"/><path d="M14.8 10.2A10 10 0 0 1 19 12.6"/><path d="M12 20h.01"/></svg></div>
       <h2 id="down-title">Servicio no disponible</h2>
       <p>No se puede conectar con el servidor de SecureChat. Probablemente está apagado:
          <strong>quien lo gestiona tiene que ponerlo en marcha</strong>.</p>
@@ -128,17 +128,17 @@
       <ul id="contacts" class="contacts"></ul>
       <p id="contacts-empty" class="contacts-empty">Aún no tienes chats.<br>Escribe un usuario arriba para empezar.</p>
       <nav id="app-menu" class="app-menu" hidden aria-label="Menú de la app">
-        <button type="button" data-action="profile">👤<span>Mi perfil</span></button>
-        <button type="button" data-action="group">👥<span>Nuevo grupo</span></button>
-        <button type="button" data-action="settings">🎨<span>Personalizar y privacidad</span></button>
-        <button type="button" data-action="backup">💾<span>Copia de seguridad</span></button>
-        <button type="button" data-action="install" hidden>📲<span>Instalar app</span></button>
-        <button type="button" data-action="about">🔒<span>Cómo te protege SecureChat</span></button>
+        <button type="button" data-action="profile"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M4 20c.8-3.6 4-6 8-6s7.2 2.4 8 6"/></svg><span>Mi perfil</span></button>
+        <button type="button" data-action="group"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M2.5 20c.7-3.3 3.2-5.5 6.5-5.5s5.8 2.2 6.5 5.5"/><path d="M16 4.3a3.5 3.5 0 0 1 0 6.4"/><path d="M17.5 14.6c2.1.6 3.6 2.6 4 5.4"/></svg><span>Nuevo grupo</span></button>
+        <button type="button" data-action="settings"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10"/><path d="M18 6h2"/><path d="M4 12h4"/><path d="M12 12h8"/><path d="M4 18h12"/><path d="M20 18h0"/><path d="M16 4v4"/><path d="M10 10v4"/><path d="M18 16v4"/></svg><span>Personalizar y privacidad</span></button>
+        <button type="button" data-action="backup"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></svg><span>Copia de seguridad</span></button>
+        <button type="button" data-action="install" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M12 8v6"/><path d="M9.5 11.5 12 14l2.5-2.5"/><path d="M11 18h2"/></svg><span>Instalar app</span></button>
+        <button type="button" data-action="about"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5.5c0 4.4 3 7.8 7 9.5 4-1.7 7-5.1 7-9.5V6l-7-3Z"/><path d="M9 12l2 2 4-4"/></svg><span>Cómo te protege SecureChat</span></button>
         <hr>
-        <button type="button" data-action="logout" class="danger">🚪<span>Cerrar sesión</span></button>
+        <button type="button" data-action="logout" class="danger"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 16l-4-4 4-4"/><path d="M6 12h10"/></svg><span>Cerrar sesión</span></button>
       </nav>
       <footer class="sidebar-foot">
-        <button id="install-btn" class="chip" type="button" hidden>⬇ Instalar app</button>
+        <button id="install-btn" class="chip" type="button" hidden>Instalar app</button>
         <button id="logout-btn" class="chip" type="button">Cerrar sesión</button>
       </footer>
     </aside>
@@ -169,15 +169,15 @@
       </div>
       <div id="picker" class="picker" hidden>
         <div class="picker-tabs" role="tablist">
-          <button type="button" role="tab" data-tab="emoji" aria-selected="true">😊 Emojis</button>
-          <button type="button" role="tab" data-tab="sticker" aria-selected="false">✨ Stickers</button>
+          <button type="button" role="tab" data-tab="emoji" aria-selected="true">Emojis</button>
+          <button type="button" role="tab" data-tab="sticker" aria-selected="false">Stickers</button>
         </div>
         <div id="picker-body" class="picker-body"></div>
       </div>
       <div id="drop-hint" class="drop-hint" hidden>Suelta aquí para enviar cifrado</div>
       <div id="reply-bar" class="reply-bar" hidden>
         <div class="reply-body"><strong id="reply-title"></strong><span id="reply-text"></span></div>
-        <button id="reply-cancel" class="icon-btn" type="button" aria-label="Cancelar">✕</button>
+        <button id="reply-cancel" class="icon-btn" type="button" aria-label="Cancelar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg></button>
       </div>
       <form id="composer" class="composer">
         <button id="emoji-btn" class="icon-btn" type="button" title="Emojis y stickers" aria-label="Emojis y stickers" disabled>
@@ -189,7 +189,7 @@
         <input id="file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden>
         <input id="text" placeholder="Escribe un mensaje cifrado…" maxlength="4000" autocomplete="off" disabled>
         <div id="rec-bar" class="rec-bar" hidden>
-          <button id="rec-cancel" class="icon-btn" type="button" aria-label="Cancelar grabación">🗑️</button>
+          <button id="rec-cancel" class="icon-btn" type="button" aria-label="Cancelar grabación"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>
           <span class="rec-dot" aria-hidden="true"></span><span id="rec-time">0:00</span>
           <span class="muted small">Grabando nota de voz…</span>
           <button id="rec-send" class="send" type="button" aria-label="Enviar nota de voz">

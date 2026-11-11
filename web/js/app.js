@@ -5,6 +5,7 @@ import { ChatClient, ClientError, Contacts, IMAGE_MIME, MAX_MEDIA, VIDEO_MIME } 
 import { EMOJIS, STICKERS } from "./emoji.js";
 import * as P from "./protocol.js";
 import { DeviceKeys } from "./ratchet.js";
+import { icon } from "./icons.js";
 import * as Vault from "./vault.js";
 
 const $ = (id) => document.getElementById(id);
@@ -397,6 +398,16 @@ function addMsg(conv, entry, { persist = true } = {}) {
   return m;
 }
 
+/** Aviso de cifrado: siempre el primero del chat, aunque ya hubiera mensajes. */
+function e2eNotice(conv) {
+  const t = "Los mensajes y archivos de este chat están cifrados de extremo a extremo.";
+  const list = chat(conv).messages;
+  if (list.some((m) => m.sys && m.sys.includes("cifrados de extremo a extremo"))) return;
+  const m = { id: newId(), sys: t, time: list[0] ? new Date(list[0].time.getTime() - 1) : new Date() };
+  list.unshift(m);
+  history?.put(conv, m);
+}
+
 function sysOnce(conv, t) {
   if (!chat(conv).messages.some((m) => m.sys === t)) addMsg(conv, { sys: t });
 }
@@ -408,11 +419,11 @@ function save(conv, m) {
 
 const ORDER = { sending: 0, sent: 1, delivered: 2, read: 3 };
 const STATUS = {
-  sending: ["🕓", "Enviando…"],
-  sent: ["✓", "Enviado"],
-  delivered: ["✓✓", "Entregado"],
-  read: ["✓✓", "Leído"],
-  failed: ["⚠️", "No se pudo enviar"],
+  sending: ["clock_small", "Enviando…"],
+  sent: ["check", "Enviado"],
+  delivered: ["checks", "Entregado"],
+  read: ["checks", "Leído"],
+  failed: ["alert", "No se pudo enviar"],
 };
 
 /** Estado que se muestra: en grupos, el del miembro más "atrasado" (como WhatsApp). */
@@ -435,8 +446,9 @@ function setStatus(conv, m, status) {
 }
 
 function paintTick(el, status) {
-  el.textContent = STATUS[status][0];
+  el.replaceChildren(icon(STATUS[status][0]));
   el.title = STATUS[status][1];
+  el.setAttribute("aria-label", STATUS[status][1]);
   el.className = `tick ${status}`;
 }
 
@@ -460,11 +472,11 @@ function onEvent(ev) {
       break;
     case "session":
       chat(ev.peer).online = true;
-      sysOnce(ev.peer, "🔒 Los mensajes y archivos de este chat están cifrados de extremo a extremo.");
+      sysOnce(ev.peer, "Los mensajes y archivos de este chat están cifrados de extremo a extremo.");
       if (ev.peer === active) renderHeader();
       break;
     case "identity_changed":
-      addMsg(ev.peer, { sys: `⚠️ La clave de seguridad de @${ev.peer} ha cambiado. Si no ha cambiado de dispositivo, alguien podría estar suplantándole. Confírmalo con esa persona por otro medio.`, warn: true });
+      addMsg(ev.peer, { sys: `La clave de seguridad de @${ev.peer} ha cambiado. Si no ha cambiado de dispositivo, alguien podría estar suplantándole. Confírmalo con esa persona por otro medio.`, warn: true });
       break;
     case "warning":
       if (ev.peer && !/no está conectado|sesión caducada/.test(ev.text)) addMsg(ev.peer, { sys: ev.text, warn: true });
@@ -777,7 +789,7 @@ async function onNewChat(ev) {
   const name = input.value.trim().replace(/^@/, "");
   $("new-chat-error").hidden = true;
   if (!NAME_RE.test(name)) return showNewChatError("Escribe un @usuario válido.");
-  if (same(name, me)) return showNewChatError("Ese eres tú 🙂");
+  if (same(name, me)) return showNewChatError("Ese eres tú.");
   if (!connected) return showNewChatError("Sin conexión: espera a que vuelva para buscar usuarios.");
   input.disabled = true;
   try {
@@ -803,6 +815,7 @@ function showNewChatError(t) {
 async function openChat(conv) {
   stopTyping();
   active = conv;
+  if (!isGroup(conv)) e2eNotice(conv);
   cancelReply();
   $("app").classList.add("in-chat");
   $("new-chat-error").hidden = true;
@@ -1216,7 +1229,7 @@ function advancedSecurityMine() {
         const row = text("", "div", "device-row");
         const label = x.device === client.device ? "Este dispositivo" : `Dispositivo ${x.device.slice(0, 6)}`;
         const when = x.online ? "conectado ahora" : x.seen ? `visto ${shortTime(new Date(x.seen * 1000))}` : "";
-        row.append(text(x.device === client.device ? "📱" : "💻", "span"), text(`${label} · ${when}`, "span", "member-name"));
+        row.append(icon(x.device === client.device ? "phone" : "laptop", "muted-ico"), text(`${label} · ${when}`, "span", "member-name"));
         if (x.device !== client.device) {
           const rm = text("Desvincular", "button", "chip danger");
           rm.type = "button";
@@ -1369,7 +1382,7 @@ async function importBackup(file) {
 
 function showBackup() {
   const status = text("", "p", "hint");
-  const exp = text("💾 Descargar copia cifrada", "button", "primary");
+  const exp = withIcon("download", "Descargar copia cifrada", "button", "primary");
   exp.type = "button";
   exp.onclick = async () => {
     exp.disabled = true;
@@ -1387,7 +1400,7 @@ function showBackup() {
     try { status.textContent = `Restaurados ${await importBackup(fileIn.files[0])} mensajes nuevos.`; }
     catch (e) { status.textContent = e.message; }
   };
-  const imp = text("📂 Restaurar una copia", "button", "chip");
+  const imp = withIcon("upload", "Restaurar una copia", "button", "chip");
   imp.type = "button";
   imp.onclick = () => fileIn.click();
   dialog("Copia de seguridad", [
@@ -1399,17 +1412,17 @@ function showBackup() {
 
 function showAbout() {
   const items = [
-    ["🔐", "Cifrado de extremo a extremo", "Tus mensajes, fotos, notas de voz y perfil se cifran en tu dispositivo. El servidor solo ve datos ilegibles."],
-    ["👥", "Grupos invisibles", "Cada mensaje de grupo se cifra por separado para cada miembro: el servidor no sabe que el grupo existe."],
-    ["🕓", "Mensajes en diferido", "Si alguien no está conectado, el servidor guarda el mensaje cifrado hasta que entra."],
-    ["🔑", "Tu clave es tuya", "La copia que guarda el servidor va cifrada con tu contraseña. Si la olvidas, nadie puede recuperarla."],
-    ["⚠️", "Proyecto educativo", "No está auditado: no lo uses para información sensible real."],
+    ["lock", "Cifrado de extremo a extremo", "Tus mensajes, fotos, notas de voz y perfil se cifran en tu dispositivo. El servidor solo ve datos ilegibles."],
+    ["users", "Grupos invisibles", "Cada mensaje de grupo se cifra por separado para cada miembro: el servidor no sabe que el grupo existe."],
+    ["clock", "Mensajes en diferido", "Si alguien no está conectado, el servidor guarda el mensaje cifrado hasta que entra."],
+    ["key", "Tu clave es tuya", "La copia que guarda el servidor va cifrada con tu contraseña. Si la olvidas, nadie puede recuperarla."],
+    ["alert", "Proyecto educativo", "No está auditado: no lo uses para información sensible real."],
   ];
-  dialog("Cómo te protege SecureChat", items.map(([icon, title, desc]) => {
+  dialog("Cómo te protege SecureChat", items.map(([ic, title, desc]) => {
     const row = text("", "div", "about-row");
     const t = text("", "div");
     t.append(text(title, "strong"), text(desc, "p", "hint"));
-    row.append(text(icon, "span", "about-icon"), t);
+    row.append(icon(ic, "about-icon"), t);
     return row;
   }));
 }
@@ -1421,7 +1434,7 @@ function showNewGroup() {
   const chips = text("", "div", "chosen");
   const err = text("", "p", "error");
   const draw = () => chips.replaceChildren(...chosen.map((u) => {
-    const b = text(`${displayName(u)} ✕`, "button", "chip");
+    const b = withIcon("close", displayName(u), "button", "chip removable", true);
     b.type = "button";
     b.onclick = () => { chosen.splice(chosen.indexOf(u), 1); draw(); };
     return b;
@@ -1477,7 +1490,7 @@ function showPeerProfile(peer) {
     const toggle = text(c.verified ? "Quitar verificación" : "Coinciden: marcar como verificado", "button", "chip");
     toggle.type = "button";
     toggle.onclick = () => { client.contacts.setVerified(peer, !c.verified); showPeerProfile(peer); };
-    d.append(text(`Seguridad avanzada${c.verified ? " · ✔ verificado" : ""}`, "summary"),
+    d.append(text(`Seguridad avanzada${c.verified ? " · verificado" : ""}`, "summary"),
       text("El servidor solo reenvía mensajes, pero si alguien lo controlara podría intentar hacerse pasar por este contacto. "
         + "Para descartarlo del todo, comparad estos números en persona o por otra app: si coinciden, nadie está en medio.", "p", "hint"),
       grid, toggle);
@@ -1650,10 +1663,10 @@ function previewOf(c) {
   if (!c) return "";
   if (c.t === "text") return c.body;
   if (c.t === "sticker") return `Sticker ${c.id}`;
-  if (c.t === "image") return c.mime === "image/gif" ? "🎞️ GIF" : "📷 Foto";
-  if (c.t === "video") return "🎬 Vídeo";
-  if (c.t === "audio") return `🎤 Nota de voz${c.dur ? ` (${fmtDur(c.dur)})` : ""}`;
-  if (c.t === "deleted") return "🚫 Mensaje eliminado";
+  if (c.t === "image") return c.mime === "image/gif" ? "GIF" : "Foto";
+  if (c.t === "video") return "Vídeo";
+  if (c.t === "audio") return `Nota de voz${c.dur ? ` · ${fmtDur(c.dur)}` : ""}`;
+  if (c.t === "deleted") return "Mensaje eliminado";
   return "";
 }
 
@@ -1698,7 +1711,10 @@ function renderContacts() {
       const who = isGroup(conv) && last ? `${last.from === "me" ? "Tú" : displayName(last.sender)}: ` : "";
       prev.append(last ? who + previewOf(last.content) : isGroup(conv) ? `${groups.get(gidOf(conv))?.members.length || 0} miembros` : `@${conv}`);
     }
-    main.append(text((isGroup(conv) ? "👥 " : "") + convName(conv), "strong"), prev);
+    const nameEl = text("", "strong", "contact-name");
+    if (isGroup(conv)) nameEl.append(icon("users", "group-ico"));
+    nameEl.append(convName(conv));
+    main.append(nameEl, prev);
     const side = text("", "span", "contact-side");
     if (last) side.append(text(shortTime(last.time), "time"));
     if (unread) side.append(text(String(unread), "span", "unread"));
@@ -1798,7 +1814,9 @@ function buildMessage(conv, m, prev) {
     li.append(q);
   }
   if (m.deleted) {
-    li.append(text(m.from === "me" ? "🚫 Has eliminado este mensaje" : "🚫 Mensaje eliminado", "span", "body"));
+    const del = text("", "span", "body");
+    del.append(icon("ban", "inline-ico"), m.from === "me" ? "Has eliminado este mensaje" : "Mensaje eliminado");
+    li.append(del);
   } else if (c.t === "text") {
     li.append(text(c.body, "span", "body"));
   } else if (c.t === "sticker") {
@@ -1808,7 +1826,7 @@ function buildMessage(conv, m, prev) {
     a.controls = true;
     a.preload = "metadata";
     mediaUrl(conv, m).then((u) => { if (u) a.src = u; else li.classList.add("missing"); });
-    li.append(text("🎤", "span", "mic-icon"), a);
+    li.append(icon("mic", "mic-icon"), a);
   } else {
     const el = document.createElement(c.t === "image" ? "img" : "video");
     if (c.t === "image") {
@@ -1866,9 +1884,27 @@ function appendMessage(m) {
     list.dataset.day = label;
     list.append(text(label, "li", "day"));
   }
-  const li = m.sys ? text(m.sys, "li", `sys${m.warn ? " warn" : ""}`) : buildMessage(active, m, list.lastElementChild);
+  const li = m.sys ? sysItem(m) : buildMessage(active, m, list.lastElementChild);
   list.append(li);
   li.scrollIntoView({ block: "end" });
+}
+
+const LEADING_EMOJI = /^[\p{Extended_Pictographic}\u{1F300}-\u{1FAFF}\u2600-\u27BF][\ufe0f\s]*/u;
+
+function sysItem(m) {
+  const t = m.sys.replace(LEADING_EMOJI, "");
+  const li = text("", "li", `sys${m.warn ? " warn" : ""}`);
+  const ic = m.warn ? "alert" : /cifrad/.test(t) ? "lock" : /grupo|añadido|salido/.test(t) ? "users" : "info";
+  li.append(icon(ic, "inline-ico"), t);
+  return li;
+}
+
+/** Botón (u otro elemento) con un icono delante del texto. */
+function withIcon(ic, label, tag = "button", cls = "", after = false) {
+  const el = text("", tag, cls);
+  if (after) el.append(label, icon(ic, "inline-ico"));
+  else el.append(icon(ic, "inline-ico"), label);
+  return el;
 }
 
 function rerenderMessage(m) {
@@ -1907,19 +1943,19 @@ function openMsgMenu(conv, m, x, y) {
     }
     menu.append(row);
   }
-  const item = (label, fn, cls = "") => {
-    const b = text(label, "button", `menu-item ${cls}`);
+  const item = (ic, label, fn, cls = "") => {
+    const b = withIcon(ic, label, "button", `menu-item ${cls}`);
     b.type = "button";
     b.setAttribute("role", "menuitem");
     b.onclick = () => { closeMsgMenu(); fn(); };
     menu.append(b);
   };
   const canWrite = !isGroup(conv) || targetsOf(conv).length;
-  if (!m.deleted && canWrite) item("↩️  Responder", () => startReply(m));
-  if (!m.deleted && m.content.t === "text") item("📋  Copiar", () => navigator.clipboard?.writeText(m.content.body));
-  if (m.from === "me" && !m.deleted && m.content.t === "text" && canWrite) item("✏️  Editar", () => startEdit(m));
-  item("🗑️  Eliminar para mí", () => myDelete(conv, m, false), "danger");
-  if (m.from === "me" && !m.deleted && canWrite) item("🗑️  Eliminar para todos", () => myDelete(conv, m, true), "danger");
+  if (!m.deleted && canWrite) item("reply", "Responder", () => startReply(m));
+  if (!m.deleted && m.content.t === "text") item("copy", "Copiar", () => navigator.clipboard?.writeText(m.content.body));
+  if (m.from === "me" && !m.deleted && m.content.t === "text" && canWrite) item("edit", "Editar", () => startEdit(m));
+  item("trash", "Eliminar para mí", () => myDelete(conv, m, false), "danger");
+  if (m.from === "me" && !m.deleted && canWrite) item("trash", "Eliminar para todos", () => myDelete(conv, m, true), "danger");
   document.body.append(menu);
   // Que no se salga de la pantalla
   const r = menu.getBoundingClientRect();

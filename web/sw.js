@@ -1,9 +1,9 @@
 // Service worker: permite instalar SecureChat como app y abrirla sin red
 // (la interfaz carga; para enviar mensajes hace falta el servidor).
-const CACHE = "securechat-v11";
+const CACHE = "securechat-v12";
 const SHELL = [
   "./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg", "lock.svg", "icon-192.png", "icon-512.png",
-  "js/theme.js", "js/app.js", "js/emoji.js", "js/vault.js", "js/ratchet.js", "js/client.js", "js/protocol.js",
+  "js/theme.js", "js/app.js", "js/emoji.js", "js/vault.js", "js/ratchet.js", "js/icons.js", "js/client.js", "js/protocol.js",
   "vendor/libsodium-sumo.js", "vendor/libsodium-wrappers.js",
 ];
 

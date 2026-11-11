@@ -56,13 +56,14 @@
 }
 
 [data-theme="forest"] {
-  --bg: #e6efe6; --bg-glow-1: #bbdcc4; --bg-glow-2: #e3edc2;
-  --panel: #ffffff; --panel-2: #f3f7f2; --hover: #e9f2ea;
-  --line: #d9e5da; --text: #14261a; --muted: #5d7563;
-  --accent: #2f7d4f; --accent-2: #4d9a3c; --accent-ink: #ffffff; --accent-soft: #e0f0e4;
-  --mine-text: #ffffff; --theirs: #ffffff; --theirs-text: #14261a;
-  --chat-bg: #f3f7f2; --dots: rgb(47 125 79 / .08);
-  --warn-bg: #fdf5e1; --warn: #8a5a00; --error: #b4322b; --ok: #2f7d4f;
+  --bg: #eef2ef; --bg-glow-1: #eef2ef; --bg-glow-2: #eef2ef;
+  --panel: #ffffff; --panel-2: #f5f8f6; --hover: #edf3ef;
+  --line: #e0e7e2; --text: #142019; --muted: #5d6e65;
+  --accent: #1f7a52; --accent-2: #1a6b48; --accent-ink: #ffffff; --accent-soft: #e2f0e8;
+  --mine-text: #ffffff; --theirs: #ffffff; --theirs-text: #142019;
+  --chat-bg: #f3f6f4; --dots: rgb(31 122 82 / .05);
+  --warn-bg: #fdf5e3; --warn: #8a5a00; --error: #b4322b; --ok: #1f7a52;
+  --shadow: 0 1px 2px rgb(16 40 28 / .05), 0 6px 20px rgb(16 40 28 / .06);
   color-scheme: light;
 }
 
@@ -710,3 +711,125 @@ button.link-strong:hover { text-decoration: underline; }
 .about-row { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
 .about-icon { font-size: 22px; line-height: 1.2; }
 #dlg-body > .primary { width: 100%; margin: 6px 0; }
+
+/* =====================================================================
+   Estilo profesional: colores sólidos, iconos de línea, menos adornos.
+   Va al final para imponerse a lo anterior en todos los temas.
+   ===================================================================== */
+body { background: var(--bg); font-feature-settings: "cv11", "ss01"; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, strong { letter-spacing: -0.01em; }
+
+/* Iconos */
+.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.inline-ico { width: 16px; height: 16px; vertical-align: -3px; margin-right: 6px; }
+.chip .inline-ico, .primary .inline-ico { margin-right: 8px; }
+.chip.removable .inline-ico { margin: 0 0 0 6px; }
+.muted-ico { color: var(--muted); }
+.group-ico { width: 15px; height: 15px; margin-right: 6px; color: var(--muted); vertical-align: -2px; }
+
+/* Botones */
+.primary, .send, .unread, .brand-mark, .empty-art, .color-dot.theme-color {
+  background: var(--accent) !important; background-image: none !important;
+}
+.primary { border-radius: 10px; font-weight: 600; box-shadow: none; padding: 12px 18px; }
+.primary:hover:not(:disabled) { filter: brightness(1.07); transform: none; }
+.send { box-shadow: none; width: 44px; height: 44px; }
+.send:hover:not(:disabled) { transform: none; filter: brightness(1.08); }
+.chip { border-radius: 8px; font-weight: 500; padding: 7px 12px; display: inline-flex; align-items: center; }
+.icon-btn { border-radius: 10px; }
+
+/* Acceso */
+.login-card { background: var(--panel); backdrop-filter: none; border-radius: 18px; padding: 36px 32px 28px; }
+.brand-mark { width: 56px; height: 56px; border-radius: 16px; box-shadow: none; }
+.brand-mark img { width: 34px; height: 34px; filter: none; }
+.brand h1 { font-size: 24px; font-weight: 700; margin-top: 16px; }
+.auth-title { font-size: 18px; font-weight: 650; margin-top: 4px; }
+.field input { border-radius: 10px; background: var(--panel); }
+.features { gap: 4px 14px; margin-top: 24px; }
+.features li { background: none; border: 0; padding: 0; font-size: 12px; }
+.features li::before { content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 2px; }
+.features b { color: var(--text); font-weight: 600; }
+.disclaimer { color: var(--muted); }
+.corner { box-shadow: none; border: 1px solid var(--line); }
+.state-icon { width: 56px; height: 56px; margin: 0 auto 8px; border-radius: 16px; display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--accent); }
+.state-icon .ico { width: 28px; height: 28px; }
+.verify-step h2, .down-card h2 { font-weight: 650; }
+
+/* Estructura */
+.app { gap: 12px; padding: 12px; }
+.sidebar, .chat { border-radius: 16px; box-shadow: var(--shadow); }
+.me { padding: 16px 12px 12px 16px; }
+.avatar { border-radius: 50%; font-weight: 600; font-size: 15px;
+  background: hsl(var(--h, 150) 32% 42%) !important; background-image: none !important; color: #fff; }
+.avatar.has-photo { background: var(--panel-2) !important; }
+.avatar.xl { border-radius: 50%; }
+.member-list .avatar { border-radius: 50%; }
+.search { border-radius: 10px; background: var(--panel-2); }
+.section-label { font-size: 11px; letter-spacing: .08em; }
+.contacts li button { border-radius: 10px; padding: 10px 10px; }
+.contacts li.active button { background: var(--accent-soft); }
+.contact-name { display: flex; align-items: center; min-width: 0; font-weight: 600; }
+.unread { box-shadow: none; }
+.app-menu { border-radius: 12px; min-width: 260px; }
+.app-menu button { font-size: 14.5px; gap: 12px; }
+.app-menu button .ico { color: var(--muted); }
+.app-menu button.danger .ico { color: var(--error); }
+
+/* Chat */
+.chat-head { min-height: 64px; }
+.peer-btn .avatar, #peer-avatar { width: 40px; height: 40px; }
+.status .lock { color: var(--accent); font-weight: 500; }
+.messages { gap: 2px; }
+.msg { border-radius: 12px; padding: 7px 11px 6px; box-shadow: 0 1px 1px rgb(0 0 0 / .05); animation: none; }
+.msg.mine { background: var(--accent) !important; background-image: none !important; }
+.msg.mine.first { border-top-right-radius: 4px; }
+.msg.theirs.first { border-top-left-radius: 4px; }
+.msg.mine, .msg.mine.cont { border-bottom-right-radius: 12px; }
+.msg.theirs, .msg.theirs.cont { border-bottom-left-radius: 12px; }
+.msg.first { margin-top: 8px; }
+.msg time { font-size: 10.5px; display: flex; align-items: center; justify-content: flex-end; gap: 3px; margin-top: 1px; }
+.msg.jumbo, .msg.sticker { box-shadow: none; }
+.tick { display: inline-flex; letter-spacing: 0; }
+.tick .ico { width: 15px; height: 15px; stroke-width: 2; }
+.tick.sending .ico { width: 13px; height: 13px; }
+.tick.read { color: #4fc3f7; }
+.msg.mine .tick.read { color: #b3ecff; }
+.tick.failed { color: var(--error); }
+.preview .tick { vertical-align: -3px; }
+.preview .tick .ico { width: 14px; height: 14px; }
+.day { border-radius: 8px; text-transform: none; font-weight: 600; box-shadow: 0 1px 1px rgb(0 0 0 / .04); }
+.sys { border-radius: 8px; display: inline-flex; align-items: center; gap: 2px; max-width: min(92%, 520px); line-height: 1.4; }
+.sys .inline-ico { color: var(--accent); flex: none; }
+.sys.warn .inline-ico { color: var(--warn); }
+.msg .quote { border-radius: 8px; border-left-width: 3px; }
+.msg.deleted .body { display: inline-flex; align-items: center; }
+.mic-icon { width: 20px; height: 20px; color: inherit; opacity: .8; }
+.reaction { border-radius: 10px; box-shadow: 0 1px 1px rgb(0 0 0 / .05); }
+.composer { gap: 4px; }
+.composer input { border-radius: 22px; background: var(--panel-2); }
+.reply-bar { border-left: 0; }
+.msg-menu { border-radius: 12px; min-width: 230px; }
+.menu-item { display: flex; align-items: center; gap: 10px; }
+.menu-item .inline-ico { margin: 0; color: var(--muted); width: 18px; height: 18px; }
+.menu-item.danger .inline-ico { color: var(--error); }
+
+/* Diálogos */
+dialog { border-radius: 16px; padding: 24px; }
+dialog h2 { font-size: 18px; font-weight: 650; margin-bottom: 16px; }
+dialog menu button { border-radius: 10px; }
+.about-row { gap: 14px; }
+.about-icon { width: 22px; height: 22px; color: var(--accent); margin-top: 2px; }
+.device-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.device-row .member-name { font-weight: 500; }
+.theme-card { border-radius: 12px; }
+.empty-art { border-radius: 24px; box-shadow: none; width: 84px; height: 84px; }
+.empty-art img { width: 48px; }
+.empty-chat h2 { font-weight: 650; }
+.picker { border-radius: 14px; }
+.picker-tabs button { border-radius: 8px; }
+
+@media (max-width: 760px) {
+  .sidebar, .chat { border-radius: 0; box-shadow: none; border: 0; }
+  .app { padding: 0; gap: 0; }
+}
