@@ -31,7 +31,7 @@ export function decodeContent(plaintext) {
   if (!c || typeof c !== "object" || typeof c.t !== "string") return { t: "text", body: plaintext };
   const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
   const id = (v) => (typeof v === "string" && ID_RE.test(v) ? v : null);
-  const common = { mid: id(c.mid), g: id(c.g) };
+  const common = { mid: id(c.mid), g: id(c.g), fwd: c.fwd === true ? true : null };
   if (c.reply && typeof c.reply === "object" && id(c.reply.mid)) {
     common.reply = { mid: c.reply.mid, from: str(c.reply.from, 32), text: str(c.reply.text, 120) };
   }

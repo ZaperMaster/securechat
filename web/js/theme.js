@@ -1,11 +1,17 @@
 // Temas y preferencias de la interfaz. Script clásico (no módulo) para aplicarse
 // antes de pintar y evitar parpadeos.
 window.SC_THEMES = [
-  { id: "forest", name: "Bosque", desc: "Verde sobrio (predeterminado)", swatch: ["#f3f6f4", "#1f7a52", "#ffffff"] },
+  { id: "mint", name: "Menta", desc: "Verde claro (predeterminado)", swatch: ["#e8f5ee", "#2f9e6e", "#ffffff"] },
+  { id: "forest", name: "Bosque", desc: "Verde sobrio", swatch: ["#f3f6f4", "#1f7a52", "#ffffff"] },
+  { id: "ocean", name: "Océano", desc: "Azul turquesa y fresco", swatch: ["#e8f4f8", "#1b8bb0", "#ffffff"] },
+  { id: "lavender", name: "Lavanda", desc: "Violeta suave", swatch: ["#f2eff9", "#7458c8", "#ffffff"] },
+  { id: "sand", name: "Arena", desc: "Cálido, tierra y café", swatch: ["#f6f0e7", "#a0673a", "#fffdf9"] },
   { id: "system", name: "Sistema", desc: "Claro u oscuro según tu dispositivo", swatch: ["#f6f7fb", "#4f46e5", "#0f1220"] },
   { id: "light", name: "Claro", desc: "Limpio y luminoso", swatch: ["#f6f7fb", "#4f46e5", "#ffffff"] },
   { id: "dark", name: "Oscuro", desc: "Suave para la vista", swatch: ["#0f1220", "#818cf8", "#1a1e30"] },
   { id: "midnight", name: "Medianoche", desc: "Azul profundo y violeta", swatch: ["#070b1d", "#a78bfa", "#131a3a"] },
+  { id: "nightforest", name: "Bosque nocturno", desc: "Verde sobre fondo oscuro", swatch: ["#0c1611", "#4cc38a", "#15241c"] },
+  { id: "graphite", name: "Grafito", desc: "Gris oscuro neutro", swatch: ["#151618", "#e2e4e8", "#212327"] },
   { id: "sunset", name: "Atardecer", desc: "Cálido, coral y melocotón", swatch: ["#fff4ec", "#e8573f", "#ffffff"] },
   { id: "sakura", name: "Sakura", desc: "Rosa pastel", swatch: ["#fdf2f6", "#d63f7a", "#ffffff"] },
   { id: "terminal", name: "Terminal", desc: "Verde fósforo sobre negro", swatch: ["#030803", "#33ff66", "#0a140b"] },
@@ -13,7 +19,7 @@ window.SC_THEMES = [
 ];
 
 window.applyTheme = function (id) {
-  const t = window.SC_THEMES.find((x) => x.id === id) || window.SC_THEMES[0]; // [0] = Bosque
+  const t = window.SC_THEMES.find((x) => x.id === id) || window.SC_THEMES[0]; // [0] = Menta
   const root = document.documentElement;
   // Sin transiciones durante el cambio: el tema nuevo se aplica de golpe y entero
   root.classList.add("theme-switching");
@@ -88,8 +94,8 @@ window.SC_SET_PREFS = function (p) {
 };
 
 (function () {
-  let saved = "forest"; // tema por defecto
-  try { saved = JSON.parse(localStorage.getItem("sc:theme")) || "forest"; } catch { /* sin almacenamiento */ }
+  let saved = "mint"; // tema por defecto
+  try { saved = JSON.parse(localStorage.getItem("sc:theme")) || "mint"; } catch { /* sin almacenamiento */ }
   window.applyTheme(saved);
   window.applyPrefs(readPrefs());
 })();

@@ -187,6 +187,8 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   }
   history = new Vault.History(me, identity.seed);
   loadGroups();
+  chatMeta = store.get(metaKey()) || {};
+  showArchived = false;
   profile = store.get(`sc:profile:${me.toLowerCase()}`) || { name: me, bio: "", avatar: null };
   client.profile = profile;
   store.set("sc:last", me);
@@ -380,6 +382,18 @@ function chat(conv) {
   return c;
 }
 
+// Ajustes de cada chat (fijado, silenciado, archivado…). Solo en este dispositivo.
+const metaKey = () => `sc:chatmeta:${me.toLowerCase()}`;
+let chatMeta = {};
+let showArchived = false;
+const meta = (conv) => chatMeta[conv] || {};
+function setMeta(conv, patch) {
+  const next = { ...meta(conv), ...patch };
+  for (const k of Object.keys(next)) if (next[k] == null || next[k] === false) delete next[k];
+  if (Object.keys(next).length) chatMeta[conv] = next; else delete chatMeta[conv];
+  store.set(metaKey(), chatMeta);
+}
+
 const unreadOf = (conv) => chats.get(conv)?.messages.filter((m) => m.from === "them" && !m.read && !m.deleted).length || 0;
 const convName = (conv) => (isGroup(conv) ? groups.get(gidOf(conv))?.name || "Grupo" : displayName(conv));
 const convAvatar = (conv) => (isGroup(conv) ? groups.get(gidOf(conv))?.avatar || null : avatarOf(conv));
@@ -394,6 +408,7 @@ function targetsOf(conv) {
 /** Añade un mensaje a la conversación, lo pinta y lo guarda cifrado. */
 function addMsg(conv, entry, { persist = true } = {}) {
   const m = { id: newId(), time: new Date(), ...entry };
+  if (!entry.sys && meta(conv).hidden) setMeta(conv, { hidden: null });
   chat(conv).messages.push(m);
   if (conv === active) appendMessage(m);
   renderContacts();
@@ -701,6 +716,7 @@ function markRead(conv) {
 }
 
 function notify(conv, sender, content) {
+  if (meta(conv).mute) return;
   if (!document.hidden || !prefs().notifications || !("Notification" in window) || Notification.permission !== "granted") return;
   // No mostramos el contenido: la notificación podría verse con la pantalla bloqueada.
   const title = isGroup(conv) ? convName(conv) : displayName(sender);
@@ -820,6 +836,8 @@ function showNewChatError(t) {
 
 async function openChat(conv) {
   stopTyping();
+  closeSearch();
+  if (meta(conv).unread) setMeta(conv, { unread: null });
   active = conv;
   if (!isGroup(conv)) e2eNotice(conv);
   cancelReply();
@@ -872,16 +890,19 @@ function cancelReply() {
 }
 
 /** Escribe un mensaje: aparece al momento con 🕓 y sale en cuanto haya conexión. */
-async function send(content, { bytes = null, url = null } = {}) {
-  const conv = active;
-  if (!conv) return;
+async function send(content, opts = {}) {
+  if (active) return sendTo(active, content, opts);
+}
+
+async function sendTo(conv, content, { bytes = null, url = null } = {}) {
   if (isGroup(conv) && !targetsOf(conv).length) {
     addMsg(conv, { sys: groups.get(gidOf(conv))?.left ? "Ya no estás en este grupo." : "El grupo no tiene más miembros.", warn: true }, { persist: false });
     return;
   }
   const mid = newId();
-  const full = { ...content, mid, ...(replyingTo ? { reply: replyingTo } : {}) };
-  cancelReply();
+  const replying = conv === active ? replyingTo : null;
+  const full = { ...content, mid, ...(replying ? { reply: replying } : {}) };
+  if (conv === active) cancelReply();
   const m = addMsg(conv, { id: mid, from: "me", content: { ...full, data: undefined }, status: "sending",
     to: targetsOf(conv), ...(isGroup(conv) ? { receipts: {} } : {}), ...(bytes ? { hasMedia: true, url } : {}) });
   if (bytes) await history?.putMedia(conv, mid, bytes);
@@ -1553,14 +1574,7 @@ function showPeerProfile(peer) {
   }
   const clear = text("Vaciar este chat", "button", "chip danger");
   clear.type = "button";
-  clear.onclick = async () => {
-    if (!confirm(`¿Borrar todos los mensajes con ${displayName(peer)} de este dispositivo? No se puede deshacer.`)) return;
-    await history.deleteChat(peer);
-    chat(peer).messages = [];
-    $("dialog").close();
-    renderChat();
-    renderContacts();
-  };
+  clear.onclick = async () => { if (await clearChat(peer)) $("dialog").close(); };
   body.push(clear);
   dialog("Perfil", body, [["Cerrar", () => { if (nickIn) client.contacts.setNick(peer, nickIn.value); }]]);
 }
@@ -1812,9 +1826,13 @@ function renderContacts() {
   const convs = new Set([...client.contacts.all().map((c) => c.name), ...chats.keys(), ...[...groups.keys()].map((g) => `#${g}`)]);
   const visible = (m) => m.content && !m.sys;
   const lastTime = (n) => chats.get(n)?.messages.filter(visible).at(-1)?.time || 0;
-  const list = [...convs].sort((a, b) => lastTime(b) - lastTime(a) || convName(a).localeCompare(convName(b)));
-  $("contacts-empty").hidden = list.length > 0;
-  $("contacts").replaceChildren(...list.map((conv) => {
+  const all = [...convs].filter((c) => c === active || !meta(c).hidden);
+  const archived = all.filter((c) => meta(c).archived);
+  if (!archived.length) showArchived = false;
+  const list = all.filter((c) => !!meta(c).archived === showArchived)
+    .sort((a, b) => (meta(b).pin || 0) - (meta(a).pin || 0) || lastTime(b) - lastTime(a) || convName(a).localeCompare(convName(b)));
+  $("contacts-empty").hidden = list.length > 0 || archived.length > 0;
+  const rows = list.map((conv) => {
     const last = chats.get(conv)?.messages.filter(visible).at(-1);
     const unread = unreadOf(conv);
     const li = document.createElement("li");
@@ -1840,12 +1858,258 @@ function renderContacts() {
     main.append(nameEl, prev);
     const side = text("", "span", "contact-side");
     if (last) side.append(text(shortTime(last.time), "time"));
-    if (unread) side.append(text(String(unread), "span", "unread"));
+    const badges = text("", "span", "contact-badges");
+    const mt = meta(conv);
+    if (mt.mute) badges.append(icon("bell_off", "row-ico"));
+    if (mt.pin) badges.append(icon("pin", "row-ico"));
+    if (unread) badges.append(text(String(unread), "span", `unread${mt.mute ? " muted" : ""}`));
+    else if (mt.unread) badges.append(text("", "span", "unread dot"));
+    side.append(badges);
     btn.append(setAvatar(text("", "span", "avatar"), convName(conv), convAvatar(conv)), main, side);
     btn.onclick = () => openChat(conv);
+    // Menú del chat: clic derecho en ordenador, mantener pulsado en el móvil
+    btn.oncontextmenu = (e) => { e.preventDefault(); openChatMenu(conv, e.clientX, e.clientY); };
+    longPress(btn, (x, y) => openChatMenu(conv, x, y));
     li.append(btn);
     return li;
-  }));
+  });
+  // Fila de «Archivados» (o volver a los chats)
+  if (showArchived || archived.length) {
+    const li = text("", "li", "archived-row");
+    const b = document.createElement("button");
+    b.type = "button";
+    if (showArchived) {
+      b.append(icon("back", "archived-ico"), text("Archivados", "strong"));
+    } else {
+      const n = archived.reduce((s, c) => s + unreadOf(c), 0);
+      b.append(icon("archive", "archived-ico"), text("Archivados", "strong"),
+        text(n ? String(n) : String(archived.length), "span", n ? "unread muted" : "archived-count"));
+    }
+    b.onclick = () => { showArchived = !showArchived; renderContacts(); };
+    li.append(b);
+    rows.unshift(li);
+  }
+  $("contacts").replaceChildren(...rows);
+}
+
+/** Mantener pulsado (móvil): llama a fn con la posición del dedo. */
+function longPress(el, fn) {
+  let timer = null;
+  el.addEventListener("touchstart", (e) => {
+    const t0 = e.touches[0];
+    timer = setTimeout(() => { navigator.vibrate?.(15); fn(t0.clientX, t0.clientY); }, 450);
+  }, { passive: true });
+  for (const ev of ["touchend", "touchmove", "touchcancel"]) el.addEventListener(ev, () => clearTimeout(timer), { passive: true });
+}
+
+// ------------------------------------------------------- menú de un chat
+
+function placeMenu(menu, x, y) {
+  document.body.append(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, innerWidth - r.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, innerHeight - r.height - 8))}px`;
+  setTimeout(() => document.addEventListener("pointerdown", outsideMenu, { once: true }), 0);
+}
+
+function newMenu() {
+  closeMsgMenu();
+  const menu = text("", "div", "msg-menu");
+  menu.id = "msg-menu";
+  menu.setAttribute("role", "menu");
+  const item = (ic, label, fn, cls = "") => {
+    const b = withIcon(ic, label, "button", `menu-item ${cls}`);
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.onclick = () => { closeMsgMenu(); fn(); };
+    menu.append(b);
+  };
+  return [menu, item];
+}
+
+const MAX_PINNED = 3;
+
+function openChatMenu(conv, x, y) {
+  if (!conv) return;
+  const [menu, item] = newMenu();
+  const mt = meta(conv);
+  if (conv === active) item("search", "Buscar en el chat", openSearch);
+  item(isGroup(conv) ? "users" : "user", isGroup(conv) ? "Info del grupo" : "Ver perfil", () => showPeerProfile(conv));
+  if (!mt.archived) {
+    item("pin", mt.pin ? "Desfijar chat" : "Fijar chat", () => {
+      if (!mt.pin && Object.values(chatMeta).filter((v) => v.pin).length >= MAX_PINNED) {
+        alert(`Solo puedes fijar ${MAX_PINNED} chats. Desfija otro primero.`);
+        return;
+      }
+      setMeta(conv, { pin: mt.pin ? null : Date.now() });
+      renderContacts();
+    });
+  }
+  item(mt.mute ? "bell" : "bell_off", mt.mute ? "Activar notificaciones" : "Silenciar notificaciones", () => {
+    setMeta(conv, { mute: !mt.mute });
+    renderContacts();
+    renderHeader();
+    updateTitle();
+  });
+  if (unreadOf(conv) || mt.unread) {
+    item("checks", "Marcar como leído", () => { setMeta(conv, { unread: null }); markRead(conv); renderContacts(); updateTitle(); });
+  } else {
+    item("mail", "Marcar como no leído", () => { setMeta(conv, { unread: true }); if (active === conv) closeChat(); else renderContacts(); });
+  }
+  item("archive", mt.archived ? "Desarchivar" : "Archivar", () => {
+    setMeta(conv, { archived: !mt.archived, pin: null });
+    if (!mt.archived && active === conv) closeChat(); else renderContacts();
+  });
+  item("eraser", "Vaciar chat", () => clearChat(conv), "danger");
+  item("trash", "Borrar chat", () => deleteChat(conv), "danger");
+  placeMenu(menu, x, y);
+}
+
+function closeChat() {
+  active = null;
+  closeSearch();
+  closePicker();
+  $("app").classList.remove("in-chat");
+  renderContacts();
+  renderChat();
+}
+
+/** Borra los mensajes del chat en este dispositivo (el chat sigue en la lista). */
+async function clearChat(conv, ask = true) {
+  if (ask && !confirm(`¿Vaciar el chat con ${convName(conv)}? Se borran sus mensajes de este dispositivo y no se puede deshacer.`)) return false;
+  await history.deleteChat(conv);
+  chat(conv).messages = [];
+  setMeta(conv, { pinMsg: null });
+  if (active === conv) renderChat();
+  renderContacts();
+  updateTitle();
+  return true;
+}
+
+/** Quita el chat de la lista y borra sus mensajes. Si te vuelven a escribir, reaparece. */
+async function deleteChat(conv) {
+  if (!confirm(`¿Borrar el chat con ${convName(conv)}? Se borran sus mensajes de este dispositivo y desaparece de la lista.`)) return;
+  setMeta(conv, { hidden: true, pin: null, archived: null, unread: null, pinMsg: null });
+  if (active === conv) active = null;
+  await clearChat(conv, false);
+  closeChat();
+}
+
+// ------------------------------------------------------- mensaje fijado
+
+function renderPinned() {
+  const bar = $("pinned-bar");
+  const id = active && meta(active).pinMsg;
+  const m = id && chat(active).messages.find((x) => x.id === id && !x.deleted);
+  bar.hidden = !m;
+  if (!m) return;
+  const body = text("", "button", "pinned-body");
+  body.type = "button";
+  body.append(icon("pin", "pinned-ico"), text("", "span", "pinned-text"));
+  body.lastChild.append(text("Mensaje fijado", "strong"),
+    text(m.content.t === "text" ? m.content.body : previewOf(m.content), "span"));
+  body.onclick = () => jumpTo(m.id);
+  const x = text("", "button", "icon-btn");
+  x.type = "button";
+  x.title = "Desfijar";
+  x.setAttribute("aria-label", "Desfijar mensaje");
+  x.append(icon("close"));
+  x.onclick = () => { setMeta(active, { pinMsg: null }); renderPinned(); };
+  bar.replaceChildren(body, x);
+}
+
+// ------------------------------------------------------- reenviar
+
+function showForward(src, m) {
+  const chosen = new Set();
+  const convs = [...new Set([...chats.keys(), ...client.contacts.all().map((c) => c.name), ...[...groups.keys()].map((g) => `#${g}`)])]
+    .filter((c) => !meta(c).hidden && (!isGroup(c) || targetsOf(c).length))
+    .sort((a, b) => (meta(b).pin || 0) - (meta(a).pin || 0) || convName(a).localeCompare(convName(b), "es", { sensitivity: "base" }));
+  const filter = input("", { placeholder: "Buscar chat" });
+  filter.className = "filter-input";
+  const list = text("", "div", "pick-list tall");
+  const count = text("", "p", "hint");
+  const rows = convs.map((conv) => {
+    const l = text("", "label", "pick-row");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.onchange = () => { if (cb.checked) chosen.add(conv); else chosen.delete(conv); count.textContent = chosen.size ? `${chosen.size} seleccionado${chosen.size > 1 ? "s" : ""}` : ""; };
+    const names = text("", "span", "pick-names");
+    names.append(text(convName(conv), "strong"), text(isGroup(conv) ? "Grupo" : `@${conv}`, "small"));
+    l.append(cb, setAvatar(text("", "span", "avatar"), convName(conv), convAvatar(conv)), names);
+    l.dataset.search = `${convName(conv)} ${conv}`.toLowerCase();
+    list.append(l);
+    return l;
+  });
+  filter.oninput = () => {
+    const q = filter.value.trim().replace(/^@/, "").toLowerCase();
+    for (const l of rows) l.hidden = !!q && !l.dataset.search.includes(q);
+  };
+  dialog("Reenviar a…", [filter, list, count], [["Cancelar"], ["Reenviar", () => forwardTo([...chosen], src, m)]]);
+}
+
+async function forwardTo(targets, src, m) {
+  if (!targets.length) return;
+  let bytes = null;
+  if (m.hasMedia) {
+    bytes = await history.getMedia(src, m.id);
+    if (!bytes) { alert("No se encontró el archivo en este dispositivo."); return; }
+  }
+  const { mid, reply, g, data, fwd, ...rest } = m.content;
+  for (const conv of targets) {
+    const url = bytes ? URL.createObjectURL(new Blob([bytes], { type: rest.mime })) : null;
+    await sendTo(conv, { ...rest, fwd: true }, { bytes, url });
+  }
+  if (targets.length === 1 && targets[0] !== active) openChat(targets[0]);
+}
+
+// ------------------------------------------------------- buscar en el chat
+
+let searchHits = [], searchIdx = -1, searchTimer = null;
+const norm = (s) => s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+
+function openSearch() {
+  $("search-bar").hidden = false;
+  $("search-input").value = "";
+  $("search-count").textContent = "";
+  $("search-input").focus();
+}
+
+function closeSearch() {
+  if ($("search-bar").hidden) return;
+  $("search-bar").hidden = true;
+  clearHits();
+}
+
+function clearHits() {
+  for (const el of $("messages").querySelectorAll(".hit, .hit-current")) el.classList.remove("hit", "hit-current");
+  searchHits = [];
+  searchIdx = -1;
+}
+
+function runSearch() {
+  clearHits();
+  const q = norm($("search-input").value.trim());
+  if (!q || !active) { $("search-count").textContent = ""; return; }
+  searchHits = chat(active).messages.filter((m) => m.el && !m.deleted && m.content?.t === "text" && norm(m.content.body).includes(q));
+  for (const m of searchHits) m.el.classList.add("hit");
+  searchIdx = searchHits.length - 1; // empezamos por el más reciente
+  showHit();
+}
+
+function showHit() {
+  $("search-count").textContent = searchHits.length ? `${searchIdx + 1} de ${searchHits.length}` : "Sin resultados";
+  for (const x of searchHits) x.el.classList.remove("hit-current");
+  const m = searchHits[searchIdx];
+  if (!m) return;
+  m.el.classList.add("hit-current");
+  m.el.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function stepHit(d) {
+  if (!searchHits.length) return;
+  searchIdx = (searchIdx + d + searchHits.length) % searchHits.length;
+  showHit();
 }
 
 function renderHeader() {
@@ -1853,6 +2117,7 @@ function renderHeader() {
   const has = !!active;
   if (has) {
     $("peer-name").textContent = convName(active);
+    if (meta(active).mute) $("peer-name").append(icon("bell_off", "name-ico"));
     setAvatar($("peer-avatar"), convName(active), convAvatar(active));
     const ch = chat(active);
     let status;
@@ -1885,6 +2150,8 @@ function renderChat() {
   $("messages").replaceChildren();
   $("messages").dataset.day = "";
   if (active) for (const m of chat(active).messages) appendMessage(m);
+  renderPinned();
+  if (!$("search-bar").hidden) runSearch();
 }
 
 const segmenter = "Segmenter" in Intl ? new Intl.Segmenter() : null;
@@ -1931,6 +2198,7 @@ function buildMessage(conv, m, prev) {
     n.style.setProperty("--h", nameHue(m.sender || ""));
     li.append(n);
   }
+  if (c.fwd && !m.deleted) li.append(withIcon("forward", "Reenviado", "span", "fwd-label"));
   // Mensaje al que responde
   if (c.reply && !m.deleted) {
     const q = text("", "button", "quote");
@@ -2079,6 +2347,11 @@ function openMsgMenu(conv, m, x, y) {
   const canWrite = !isGroup(conv) || targetsOf(conv).length;
   if (!m.deleted && canWrite) item("reply", "Responder", () => startReply(m));
   if (!m.deleted && m.content.t === "text") item("copy", "Copiar", () => navigator.clipboard?.writeText(m.content.body));
+  if (!m.deleted && m.content.t !== "unsupported") item("forward", "Reenviar", () => showForward(conv, m));
+  if (!m.deleted) {
+    const pinned = meta(conv).pinMsg === m.id;
+    item("pin", pinned ? "Desfijar mensaje" : "Fijar mensaje", () => { setMeta(conv, { pinMsg: pinned ? null : m.id }); renderPinned(); });
+  }
   if (m.from === "me" && !m.deleted && m.content.t === "text" && canWrite) item("edit", "Editar", () => startEdit(m));
   item("trash", "Eliminar para mí", () => myDelete(conv, m, false), "danger");
   if (m.from === "me" && !m.deleted && canWrite) item("trash", "Eliminar para todos", () => myDelete(conv, m, true), "danger");
@@ -2113,7 +2386,7 @@ function viewImage(url, name) {
 }
 
 function updateTitle() {
-  const n = [...chats.keys()].reduce((s, p) => s + unreadOf(p), 0);
+  const n = [...chats.keys()].filter((p) => !meta(p).mute).reduce((s, p) => s + unreadOf(p), 0);
   document.title = n ? `(${n}) SecureChat` : "SecureChat";
   if ("setAppBadge" in navigator) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
 }
@@ -2187,7 +2460,27 @@ async function main() {
   chatEl.addEventListener("dragover", (e) => { if (active && e.dataTransfer.types.includes("Files")) { e.preventDefault(); $("drop-hint").hidden = false; } });
   chatEl.addEventListener("dragleave", (e) => { if (!chatEl.contains(e.relatedTarget)) $("drop-hint").hidden = true; });
   chatEl.addEventListener("drop", (e) => { e.preventDefault(); $("drop-hint").hidden = true; sendFile(e.dataTransfer.files[0]); });
-  $("back-btn").onclick = () => { active = null; closePicker(); $("app").classList.remove("in-chat"); renderContacts(); renderChat(); };
+  $("back-btn").onclick = closeChat;
+  $("search-btn").append(icon("search"));
+  $("chat-menu-btn").append(icon("more"));
+  $("search-prev").append(icon("up"));
+  $("search-next").append(icon("down"));
+  $("search-close").append(icon("close"));
+  $("search-btn").onclick = () => ($("search-bar").hidden ? openSearch() : closeSearch());
+  $("chat-menu-btn").onclick = (e) => {
+    e.stopPropagation();
+    if ($("msg-menu")) return closeMsgMenu();
+    const r = e.currentTarget.getBoundingClientRect();
+    openChatMenu(active, r.right - 240, r.bottom + 6);
+  };
+  $("search-input").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 150); };
+  $("search-input").onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); stepHit(e.shiftKey ? 1 : -1); }
+    if (e.key === "Escape") { e.stopPropagation(); closeSearch(); }
+  };
+  $("search-prev").onclick = () => stepHit(-1);
+  $("search-next").onclick = () => stepHit(1);
+  $("search-close").onclick = closeSearch;
   $("install-btn").onclick = async () => { await installPrompt?.prompt(); installPrompt = null; $("install-btn").hidden = true; };
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
