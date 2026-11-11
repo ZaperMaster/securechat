@@ -32,7 +32,7 @@ def test_message_to_offline_user_survives_server_restart(tmp_path):
         ka, kb = SigningKey.generate(), SigningKey.generate()
         srv, url = await start(RelayServer(db, queue))
         bob = await client(url, "bob", kb, tmp_path)
-        await bob.close()  # Bob publicó su prekey y se fue
+        await bob.close()  # Bob publicó sus prekeys y se fue
 
         alice = await client(url, "alice", ka, tmp_path)
         assert await alice.send_text("bob", "¿estás?") == "queued"
@@ -42,39 +42,43 @@ def test_message_to_offline_user_survives_server_restart(tmp_path):
         await srv.wait_closed()
 
         # El servidor se reinicia: la cola (cifrada) sigue en disco
-        assert list(queue.glob("*.json"))
-        assert "diferido" not in (queue / "bob.json").read_text(encoding="utf-8")
+        files = list(queue.glob("*.json"))
+        assert files and all("diferido" not in f.read_text(encoding="utf-8") for f in files)
         srv, url = await start(RelayServer(db, queue))
         bob = await client(url, "bob", kb, tmp_path)
         assert (await next_event(bob, "message")).text == "¿estás?"
         assert (await next_event(bob, "message")).text == "te escribo en diferido 🕓"
-        assert not list(queue.glob("*.json"))  # entregados: la cola se vacía
+        await asyncio.sleep(0.1)
+        assert not [f for f in queue.glob("bob__*.json")]  # entregados: la cola se vacía
         await bob.close()
         srv.close()
     run(main())
 
 
-def test_presence_renews_sessions_after_reload(tmp_path):
+def test_one_time_prekeys_are_consumed_and_replenished(tmp_path):
     async def main():
-        ka, kb = SigningKey.generate(), SigningKey.generate()
-        srv, url = await start(RelayServer())
-        alice, bob = await client(url, "alice", ka, tmp_path), await client(url, "bob", kb, tmp_path)
-        assert await alice.send_text("bob", "uno") == "delivered"
-        assert (await next_event(bob, "message")).text == "uno"
-        assert "bob" in alice.sessions
-
-        await bob.close()  # Bob recarga la página: pierde su sesión
-        assert (await next_event(alice, "presence")).text == "desconectado"
-        assert "bob" not in alice.sessions
+        relay = RelayServer()
+        srv, url = await start(relay)
+        kb = SigningKey.generate()
         bob = await client(url, "bob", kb, tmp_path)
-        assert (await next_event(alice, "presence")).text == "en línea"
-        assert await alice.send_text("bob", "dos") == "delivered"  # sesión nueva, sin errores
-        assert (await next_event(bob, "message")).text == "dos"
-        await alice.close(); await bob.close(); srv.close()
+        dev = bob.device
+        assert len(relay.registry["bob"]["devices"][dev]["opks"]) == 20
+        await bob.close()
+        for i in range(12):  # 12 personas distintas le escriben por primera vez
+            other = await client(url, f"amigo{i}", SigningKey.generate(), tmp_path)
+            await other.send_text("bob", "hola")
+            await other.close()
+        assert len(relay.registry["bob"]["devices"][dev]["opks"]) == 8  # una por cada inicio
+        bob = await client(url, "bob", kb, tmp_path)  # al volver, repone (quedaban pocas)
+        await asyncio.sleep(0.1)
+        assert len(relay.registry["bob"]["devices"][dev]["opks"]) == 28
+        for _ in range(12):
+            assert (await next_event(bob, "message")).text == "hola"
+        await bob.close(); srv.close()
     run(main())
 
 
-def test_replayed_sealed_message_is_rejected(tmp_path):
+def test_replayed_message_is_rejected(tmp_path):
     async def main():
         ka, kb = SigningKey.generate(), SigningKey.generate()
         relay = RelayServer()
@@ -83,10 +87,11 @@ def test_replayed_sealed_message_is_rejected(tmp_path):
         await bob.close()
         alice = await client(url, "alice", ka, tmp_path)
         await alice.send_text("bob", "una vez")
-        relay.queues["bob"] *= 2  # el servidor (malicioso) duplica el sobre
+        qk = next(k for k in relay.queues if k.startswith("bob|"))
+        relay.queues[qk] *= 2  # el servidor (malicioso) duplica el sobre
         bob = await client(url, "bob", kb, tmp_path)
         assert (await next_event(bob, "message")).text == "una vez"
-        assert "repetido" in (await next_event(bob, "warning")).text
+        assert "No se pudo leer" in (await next_event(bob, "warning")).text
         await alice.close(); await bob.close(); srv.close()
     run(main())
 
@@ -95,7 +100,8 @@ def test_access_code(tmp_path):
     async def main():
         srv, url = await start(RelayServer(access_code="ABCD-2345"))
         status, _, body = await http_get(url, "/config.json")
-        assert status == 200 and json.loads(body) == {"code_required": True, "email_required": False}
+        cfg = json.loads(body)
+        assert status == 200 and cfg["code_required"] is True and cfg["email_required"] is False
         with pytest.raises(ClientError, match="código"):
             await client(url, "eve", SigningKey.generate(), tmp_path)
         with pytest.raises(ClientError, match="código"):
@@ -173,4 +179,36 @@ def test_keystore_backup_allows_login_from_another_device(tmp_path):
             last = (await http_get(url, "/keystore?user=movil&code=CODE-1234"))[0]
         assert last == 429  # límite de descargas por minuto
         srv.close()
+    run(main())
+
+
+def test_push_notification_only_for_real_messages(tmp_path):
+    async def main():
+        relay = RelayServer(tmp_path / "u.json")
+        calls = []
+
+        async def fake_notify(account, subs):
+            calls.append(account)
+            return subs
+        relay.pusher.notify = fake_notify
+        srv, url = await start(relay)
+        kb = SigningKey.generate()
+        bob = await client(url, "bob", kb, tmp_path)
+        sub = {"endpoint": "https://push.example.com/abc", "keys": {"p256dh": "x", "auth": "y"}}
+        await bob._send(type="push-sub", sub=sub)
+        await bob._send(type="push-sub", sub={"endpoint": "http://inseguro", "keys": {}})  # se ignora
+        await asyncio.sleep(0.1)
+        await bob.close()
+        assert relay.registry["bob"]["push"] == [sub]
+
+        alice = await client(url, "alice", SigningKey.generate(), tmp_path)
+        assert await alice.send_text("bob", "¿estás?") == "queued"
+        await asyncio.sleep(0.1)
+        assert calls == ["bob"]  # mensaje real: aviso
+        await alice.send_content("bob", '{"t":"receipt","ids":[],"s":"read"}', silent=True)
+        await alice.send_content("bob", '{"t":"typing","on":true}', ephemeral=True)
+        await asyncio.sleep(0.1)
+        assert calls == ["bob"]  # confirmación silenciosa y "escribiendo…": sin aviso
+        assert relay.pusher.public_key  # clave pública VAPID para el navegador
+        await alice.close(); srv.close()
     run(main())

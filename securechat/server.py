@@ -36,6 +36,8 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 
 from .crypto import CryptoError, b64d, b64e, encode_fields, verify_signature
+from .ratchet import DEVICE_RE, spk_message
+from .push import MAX_SUBS, Pusher, valid_subscription
 from .email_verify import CODE_TTL, MAX_TRIES, EmailHasher, mask, new_code, normalize_email, valid_email
 
 log = logging.getLogger("securechat.server")
@@ -97,7 +99,8 @@ def serve_static(connection: ServerConnection, request: Request) -> Response | N
     if path == "/keystore" and relay is not None:
         return relay.keystore_response(connection, request)
     if path == "/config.json":  # la web pregunta si este servidor pide código de acceso
-        body = json.dumps({"code_required": bool(relay and relay.access_code),
+        body = json.dumps({"push_key": relay.pusher.public_key if relay else None,
+                           "code_required": bool(relay and relay.access_code),
                            "email_required": bool(relay and relay.email_sender)}).encode()
         return _response(200, "OK", body, "application/json")
     if path == "/":
@@ -134,9 +137,8 @@ def canon(name: str) -> str:
     return name.lower()
 
 
-def spk_message(user: str, spk: bytes, created: int) -> bytes:
-    # Igual que securechat.sealed.spk_message (no se importa para no crear un ciclo)
-    return encode_fields(b"securechat-v1", b"spk", user.encode(), spk, created.to_bytes(8, "big"))
+MAX_DEVICES = 6
+MAX_OPKS = 100
 
 
 class RelayServer:
@@ -147,57 +149,68 @@ class RelayServer:
         # Con email_sender, las cuentas nuevas deben confirmar un correo (anti-bots)
         self.email_sender = email_sender
         self.email_hash = EmailHasher(db_path.with_name(db_path.stem + "_secret.key") if db_path else None)
+        self.pusher = Pusher(db_path.with_name(db_path.stem + "_vapid.pem") if db_path else None)
         # Si hay código, solo entra quien lo conozca (el dueño se lo da a sus amigos)
         self.access_code = normalize_code(access_code) or None
         self._code_fails: dict[str, list[float]] = {}
         self._keystore_hits: dict[str, list[float]] = {}
-        # canon(nombre) -> {"name": grafía registrada, "key": bytes, "bundle": dict | None}
+        # canon(nombre) -> {"name", "key", "devices": {id: {"bundle", "opks", "seen"}}, ...}
         self.registry: dict[str, dict] = {}
-        self.online: dict[str, ServerConnection] = {}       # canon -> conexión
-        self.queues: dict[str, list[dict]] = {}             # canon -> sobres en espera
-        self.related: dict[str, set[str]] = {}              # con quién ha hablado cada uno
+        self.online: dict[str, dict[str, ServerConnection]] = {}  # canon -> {dispositivo: conexión}
+        self.queues: dict[str, list[dict]] = {}                   # "canon|dispositivo" -> sobres
+        self.related: dict[str, set[str]] = {}                    # con quién ha hablado cada uno
         if db_path and db_path.exists():
             for name, v in json.loads(db_path.read_text(encoding="utf-8")).items():
                 if isinstance(v, str):  # formato antiguo: {"nombre": "clave"}
                     v = {"name": name, "key": v}
-                self.registry[canon(v["name"])] = {"name": v["name"], "key": b64d(v["key"]),
-                                                   "bundle": v.get("bundle"), "email": v.get("email"),
-                                                   "keystore": v.get("keystore")}
+                self.registry[canon(v["name"])] = {
+                    "name": v["name"], "key": b64d(v["key"]), "email": v.get("email"),
+                    "keystore": v.get("keystore"), "last_seen": v.get("last_seen"),
+                    "hide_last_seen": v.get("hide_last_seen", False), "push": v.get("push", []),
+                    "devices": v.get("devices", {})}
         if queue_dir and queue_dir.exists():
-            for f in queue_dir.glob("*.json"):
-                self.queues[f.stem] = json.loads(f.read_text(encoding="utf-8"))
+            for f in queue_dir.glob("*__*.json"):
+                c, dev = f.stem.split("__", 1)
+                self.queues[f"{c}|{dev}"] = json.loads(f.read_text(encoding="utf-8"))
 
     # ------------------------------------------------------------ persistencia
 
     def _save(self) -> None:
         if not self.db_path:
             return
-        data = {c: {"name": r["name"], "key": b64e(r["key"]), "bundle": r["bundle"], "email": r.get("email"),
-                    "keystore": r.get("keystore")}
+        data = {c: {"name": r["name"], "key": b64e(r["key"]), "email": r.get("email"),
+                    "keystore": r.get("keystore"), "last_seen": r.get("last_seen"),
+                    "hide_last_seen": r.get("hide_last_seen", False), "push": r.get("push", []),
+                    "devices": r.get("devices", {})}
                 for c, r in self.registry.items()}
         tmp = self.db_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.replace(tmp, self.db_path)
 
-    def _save_queue(self, c: str) -> None:
+    def _save_queue(self, qk: str) -> None:
         if not self.queue_dir:
             return
         self.queue_dir.mkdir(parents=True, exist_ok=True)
-        f = self.queue_dir / f"{c}.json"
-        if self.queues.get(c):
+        f = self.queue_dir / (qk.replace("|", "__") + ".json")
+        if self.queues.get(qk):
             tmp = f.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.queues[c]), encoding="utf-8")
+            tmp.write_text(json.dumps(self.queues[qk]), encoding="utf-8")
             os.replace(tmp, f)
         elif f.exists():
             f.unlink()
 
     # ------------------------------------------------------------ conexión
 
-    async def _authenticate(self, ws: ServerConnection) -> str | None:
+    async def _authenticate(self, ws: ServerConnection) -> tuple[str, str] | None:
         hello = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT))
         user, key = hello.get("user", ""), b64d(hello.get("identity_key", ""))
+        device = hello.get("device")
         if hello.get("type") != "hello" or not USERNAME_RE.match(user) or len(key) != 32:
             await _send(ws, type="error", code="bad_hello", message=f"nombre inválido ({USERNAME_HELP})")
+            return None
+        if not isinstance(device, str) or not DEVICE_RE.match(device):
+            await _send(ws, type="error", code="old_client",
+                        message="tu app está desactualizada: recarga la página para usar la versión nueva")
             return None
         if self.access_code:
             ip = client_ip(ws)
@@ -228,14 +241,27 @@ class RelayServer:
                 if canon(user) in self.registry:  # alguien lo registró mientras tanto
                     await _send(ws, type="error", code="name_taken", message="ese nombre de usuario ya está en uso")
                     return None
-            self.registry[canon(user)] = {"name": user, "key": key, "bundle": None, "email": email_hash}
-            self._save()
+            known = self.registry[canon(user)] = {"name": user, "key": key, "email": email_hash, "devices": {}}
             log.info("nuevo usuario registrado: %s", user)
-            return user
-        if known["key"] != key:
+        elif known["key"] != key:
             await _send(ws, type="error", code="name_taken", message="ese nombre de usuario ya está en uso")
             return None
-        return known["name"]  # siempre con la grafía con la que se registró
+        # Dispositivo: se registra (máximo MAX_DEVICES; se olvida el que lleve más sin conectarse)
+        devs = known.setdefault("devices", {})
+        if device not in devs:
+            while len(devs) >= MAX_DEVICES:
+                oldest = min(devs, key=lambda d: devs[d].get("seen", 0))
+                self._forget_device(canon(user), oldest)
+            devs[device] = {"bundle": None, "opks": [], "seen": int(time.time())}
+        devs[device]["seen"] = int(time.time())
+        self._save()
+        return known["name"], device
+
+    def _forget_device(self, c: str, device: str) -> None:
+        self.registry[c].get("devices", {}).pop(device, None)
+        qk = f"{c}|{device}"
+        if self.queues.pop(qk, None) is not None:
+            self._save_queue(qk)
 
     async def _verify_email(self, ws: ServerConnection, email) -> str | None:
         """Envía un código al correo y espera a que el usuario lo escriba."""
@@ -271,27 +297,38 @@ class RelayServer:
         return None
 
     async def handler(self, ws: ServerConnection) -> None:
-        user = None
+        user = device = None
         lookups: list[float] = []
         try:
-            user = await self._authenticate(ws)
-            if user is None:
+            auth = await self._authenticate(ws)
+            if auth is None:
                 return
+            user, device = auth
             c = canon(user)
-            old = self.online.get(c)
-            if old is not None:
+            mine = self.online.setdefault(c, {})
+            old = mine.get(device)
+            if old is not None:  # el mismo dispositivo se conecta otra vez (otra pestaña)
                 await old.close(4000, "sesión iniciada en otro sitio")
-            self.online[c] = ws
-            await _send(ws, type="welcome", user=user)
-            log.info("%s conectado (%d en línea)", user, len(self.online))
-            await self._flush_queue(c, ws)
-            await self._presence(c, True)
+            first = not mine
+            mine[device] = ws
+            r = self.registry[c]
+            await _send(ws, type="welcome", user=user, device=device,
+                        devices=[d for d in r["devices"] if d != device],
+                        opks=len(r["devices"][device].get("opks", [])))
+            log.info("%s conectado desde %s (%d en línea)", user, device, len(self.online))
+            await self._flush_queue(c, device, ws)
+            # Mis otros dispositivos se enteran de que existe este (para mandarle copias)
+            for d, conn in list(mine.items()):
+                if d != device:
+                    await _send(conn, type="my-devices", devices=[x for x in r["devices"] if x != d])
+            if first:
+                await self._presence(c, True)
 
             async for raw in ws:
                 msg = json.loads(raw)
                 t = msg.get("type")
                 if t == "send":
-                    await self._relay(ws, user, msg)
+                    await self._relay(ws, user, device, msg)
                 elif t in ("lookup", "bundle"):
                     now = time.monotonic()
                     lookups[:] = [x for x in lookups if now - x < 60] + [now]
@@ -301,9 +338,42 @@ class RelayServer:
                     elif t == "lookup":
                         await _send(ws, type="lookup", id=msg.get("id"), **self._lookup(msg.get("user")))
                     else:
-                        await _send(ws, type="bundle", id=msg.get("id"), **self._bundle(msg.get("user")))
-                elif t == "prekey":
-                    await self._store_prekey(ws, c, msg)
+                        await _send(ws, type="bundle", id=msg.get("id"), **self._bundle(msg.get("user"), c))
+                elif t == "prekeys":
+                    try:
+                        n = self._store_prekeys(c, device, msg)
+                        await _send(ws, type="prekeys_ok", id=msg.get("id"), opks=n)
+                    except (ValueError, KeyError, TypeError, CryptoError) as exc:
+                        await _send(ws, type="error", code="bad_prekeys", id=msg.get("id"), message=str(exc))
+                elif t == "devices":
+                    devs = self.registry[c]["devices"]
+                    await _send(ws, type="devices", id=msg.get("id"), current=device,
+                                devices=[{"device": d, "seen": v.get("seen"), "online": d in self.online.get(c, {})}
+                                         for d, v in devs.items()])
+                elif t == "remove-device":
+                    d = msg.get("device")
+                    if isinstance(d, str) and d != device and d in self.registry[c]["devices"]:
+                        conn = self.online.get(c, {}).get(d)
+                        if conn is not None:
+                            await conn.close(4001, "dispositivo desvinculado")
+                        self._forget_device(c, d)
+                        self._save()
+                    await _send(ws, type="ack", id=msg.get("id"), status="ok")
+                elif t == "push-sub":
+                    sub = msg.get("sub")
+                    if valid_subscription(sub):
+                        subs = [x for x in self.registry[c].get("push", []) if x["endpoint"] != sub["endpoint"]]
+                        self.registry[c]["push"] = (subs + [sub])[-MAX_SUBS:]
+                        self._save()
+                elif t == "push-unsub":
+                    subs = self.registry[c].get("push", [])
+                    self.registry[c]["push"] = [x for x in subs if x["endpoint"] != msg.get("endpoint")]
+                    self._save()
+                elif t == "privacy":
+                    hide = not bool(msg.get("last_seen", True))
+                    if self.registry[c].get("hide_last_seen") != hide:
+                        self.registry[c]["hide_last_seen"] = hide
+                        self._save()
                 elif t == "keystore":
                     try:
                         self._store_keystore(c, msg.get("blob"))
@@ -321,21 +391,27 @@ class RelayServer:
         except ConnectionClosed:
             pass
         finally:
-            if user and self.online.get(canon(user)) is ws:
-                del self.online[canon(user)]
-                log.info("%s desconectado", user)
-                await self._presence(canon(user), False)
+            if user:
+                c = canon(user)
+                mine = self.online.get(c, {})
+                if mine.get(device) is ws:
+                    del mine[device]
+                    if c in self.registry and device in self.registry[c].get("devices", {}):
+                        self.registry[c]["devices"][device]["seen"] = int(time.time())
+                    log.info("%s desconectado de %s", user, device)
+                    if not mine:
+                        self.online.pop(c, None)
+                        self.registry[c]["last_seen"] = int(time.time())
+                        self._save()
+                        await self._presence(c, False)
 
     async def _presence(self, c: str, online: bool) -> None:
-        """Avisa a quien ha hablado con este usuario de que entra o sale.
-
-        Los clientes descartan entonces la sesión en vivo con él y negocian otra:
-        al recargar la página, el estado de la sesión se pierde.
-        """
-        name = self.registry[c]["name"]
+        """Avisa a quien ha hablado con este usuario de que entra o sale."""
+        r = self.registry[c]
+        last = None if online or r.get("hide_last_seen") else r.get("last_seen")
         for other in self.related.get(c, ()):
-            if other in self.online:
-                await _send(self.online[other], type="presence", user=name, online=online)
+            for conn in list(self.online.get(other, {}).values()):
+                await _send(conn, type="presence", user=r["name"], online=online, last_seen=last)
 
     # ------------------------------------------------------------ directorio
 
@@ -346,15 +422,43 @@ class RelayServer:
         known = self.registry.get(canon(name))
         if known is None:
             return {"exists": False, "user": None, "online": False}
-        return {"exists": True, "user": known["name"], "online": canon(name) in self.online}
+        online = bool(self.online.get(canon(name)))
+        info = {"exists": True, "user": known["name"], "online": online}
+        if not online and not known.get("hide_last_seen") and known.get("last_seen"):
+            info["last_seen"] = known["last_seen"]
+        return info
 
-    def _bundle(self, name) -> dict:
-        """Prekey firmada de un usuario, para escribirle aunque no esté conectado."""
+    def _bundle(self, name, asker: str) -> dict:
+        """Prekeys de cada dispositivo de un usuario. Entrega (y borra) una OPK por dispositivo."""
         info = self._lookup(name)
         if not info["exists"]:
             return info
-        r = self.registry[canon(name)]
-        return {**info, "identity_key": b64e(r["key"]), "prekey": r["bundle"]}
+        c = canon(name)
+        r = self.registry[c]
+        devices = []
+        for d, v in r.get("devices", {}).items():
+            if not v.get("bundle"):
+                continue
+            opks = v.get("opks", [])
+            devices.append({"device": d, **v["bundle"], "opk": opks.pop(0) if opks else None})
+        self._save()
+        self.related.setdefault(c, set()).add(asker)
+        self.related.setdefault(asker, set()).add(c)
+        return {**info, "identity_key": b64e(r["key"]), "devices": devices}
+
+    def _store_prekeys(self, c: str, device: str, msg: dict) -> int:
+        r = self.registry[c]
+        spk, created = b64d(msg["spk"]), int(msg["created"])
+        if len(spk) != 32:
+            raise ValueError("prekey inválida")
+        verify_signature(r["key"], spk_message(r["name"], device, spk, created), b64d(msg["sig"]))
+        d = r["devices"][device]
+        d["bundle"] = {"spk": msg["spk"], "sig": msg["sig"], "created": created}
+        new = [k for k in msg.get("opks", []) if isinstance(k, str) and len(b64d(k)) == 32]
+        known = set(d.get("opks", []))
+        d["opks"] = (d.get("opks", []) + [k for k in new if k not in known])[-MAX_OPKS:]
+        self._save()
+        return len(d["opks"])
 
     # --------------------------------------------- copia cifrada de la clave
 
@@ -402,65 +506,73 @@ class RelayServer:
         body = json.dumps({"user": r["name"], "blob": r["keystore"]}).encode()
         return _response(200, "OK", body, "application/json")
 
-    async def _store_prekey(self, ws: ServerConnection, c: str, msg: dict) -> None:
-        r = self.registry[c]
-        spk, created = b64d(msg["spk"]), int(msg["created"])
-        verify_signature(r["key"], spk_message(r["name"], spk, created), b64d(msg["sig"]))
-        if len(spk) != 32:
-            raise ValueError("prekey inválida")
-        bundle = {"spk": msg["spk"], "sig": msg["sig"], "created": created}
-        if r["bundle"] != bundle:
-            r["bundle"] = bundle
-            self._save()
-
     # --------------------------------------------------------------- reenvío
 
-    async def _relay(self, ws: ServerConnection, sender: str, msg: dict) -> None:
-        to, payload, rid = msg.get("to"), msg.get("payload"), msg.get("id")
-        if not isinstance(to, str) or not isinstance(payload, dict) or canon(to) not in self.registry:
+    async def _relay(self, ws: ServerConnection, sender: str, sender_dev: str, msg: dict) -> None:
+        """Entrega un sobre cifrado a UN dispositivo concreto (o lo guarda si no está)."""
+        to, device, payload, rid = msg.get("to"), msg.get("device"), msg.get("payload"), msg.get("id")
+        ct, cs = canon(to) if isinstance(to, str) else "", canon(sender)
+        if ct not in self.registry or not isinstance(payload, dict):
             await _send(ws, type="error", code="no_user", to=to, id=rid, message=f"el usuario '{to}' no existe")
             return
-        ct, cs = canon(to), canon(sender)
-        self.related.setdefault(ct, set()).add(cs)
-        self.related.setdefault(cs, set()).add(ct)
+        devices = list(self.registry[ct].get("devices", {}))
+        if device not in devices:
+            await _send(ws, type="error", code="no_device", to=to, id=rid, devices=devices,
+                        message="ese dispositivo ya no existe")
+            return
+        if ct != cs:
+            self.related.setdefault(ct, set()).add(cs)
+            self.related.setdefault(cs, set()).add(ct)
         # El remitente lo pone el servidor a partir de la sesión autenticada,
         # nunca se copia de lo que diga el cliente.
-        target = self.online.get(ct)
+        target = self.online.get(ct, {}).get(device)
         if target is not None:
             try:
                 await target.send(json.dumps({"type": "deliver", "from": sender, "payload": payload}))
-                if rid is not None:
-                    await _send(ws, type="ack", id=rid, status="delivered")
+                await _send(ws, type="ack", id=rid, status="delivered", devices=devices)
                 return
             except ConnectionClosed:
                 pass
-        if payload.get("kind") != "sealed":
-            # Los mensajes de sesión en vivo no sirven de nada en diferido.
-            await _send(ws, type="error", code="offline", to=to, id=rid, message=f"'{to}' no está conectado")
+        if msg.get("ephemeral"):  # "escribiendo…": si no está, se descarta
+            await _send(ws, type="ack", id=rid, status="dropped", devices=devices)
             return
-        self._enqueue(ct, {"from": sender, "payload": payload, "at": int(time.time())})
-        if rid is not None:
-            await _send(ws, type="ack", id=rid, status="queued")
+        self._enqueue(f"{ct}|{device}", {"from": sender, "payload": payload, "at": int(time.time())})
+        # Aviso al móvil (sin contenido) si no tiene ningún dispositivo conectado
+        if not msg.get("silent") and ct != cs and not self.online.get(ct) and self.registry[ct].get("push"):
+            asyncio.get_running_loop().create_task(self._push(ct))
+        await _send(ws, type="ack", id=rid, status="queued", devices=devices)
 
-    def _enqueue(self, c: str, item: dict) -> None:
+    async def _push(self, c: str) -> None:
+        r = self.registry.get(c)
+        if not r:
+            return
+        alive = await self.pusher.notify(c, r.get("push", []))
+        if len(alive) != len(r.get("push", [])):
+            r["push"] = alive
+            self._save()
+
+    def _enqueue(self, qk: str, item: dict) -> None:
         now = int(time.time())
-        q = [x for x in self.queues.get(c, []) if now - x["at"] < QUEUE_TTL] + [item]
+        q = [x for x in self.queues.get(qk, []) if now - x["at"] < QUEUE_TTL] + [item]
         while len(q) > QUEUE_MAX_MSGS or sum(len(json.dumps(x["payload"])) for x in q) > QUEUE_MAX_BYTES:
             q.pop(0)  # se descartan los más antiguos
-        self.queues[c] = q
-        self._save_queue(c)
+        self.queues[qk] = q
+        self._save_queue(qk)
 
-    async def _flush_queue(self, c: str, ws: ServerConnection) -> None:
-        q = self.queues.pop(c, [])
+    async def _flush_queue(self, c: str, device: str, ws: ServerConnection) -> None:
+        qk = f"{c}|{device}"
+        q = self.queues.pop(qk, [])
         if not q:
             return
         for item in q:
-            self.related.setdefault(c, set()).add(canon(item["from"]))
-            self.related.setdefault(canon(item["from"]), set()).add(c)
+            other = canon(item["from"])
+            if other != c:
+                self.related.setdefault(c, set()).add(other)
+                self.related.setdefault(other, set()).add(c)
             await ws.send(json.dumps({"type": "deliver", "from": item["from"], "payload": item["payload"],
                                       "queued_at": item["at"]}))
-        self._save_queue(c)
-        log.info("entregados %d mensajes en espera a %s", len(q), self.registry[c]["name"])
+        self._save_queue(qk)
+        log.info("entregados %d mensajes en espera a %s (%s)", len(q), self.registry[c]["name"], device)
 
 
 async def _send(ws: ServerConnection, **msg) -> None:

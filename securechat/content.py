@@ -8,6 +8,15 @@ Cada mensaje cifrado es un JSON con un campo "t" (tipo):
     {"t": "sticker", "id": "🔥"}
     {"t": "profile", "name": "Alejandro", "bio": "…", "avatar": "<base64 jpeg>" | null}
     {"t": "receipt", "ids": ["<mid>", …], "s": "delivered" | "read"}
+    {"t": "audio",   "mime": "audio/webm", "data": "<base64>", "dur": 12.5}  (nota de voz)
+    {"t": "react",   "target": "<mid>", "emoji": "👍"}       (vacío = quitar)
+    {"t": "edit",    "target": "<mid>", "body": "texto nuevo"}
+    {"t": "delete",  "target": "<mid>"}                      (borrar para todos)
+    {"t": "typing",  "on": true}                             (solo en vivo, nunca en cola)
+    {"t": "group",   "g": "<id>", "name", "members", "admin", "v"}   (estado de un grupo)
+    {"t": "group-leave", "g": "<id>"}
+
+Cualquier mensaje visible puede llevar "g" (es de un grupo) y "reply" (responde a otro).
 
 Los mensajes visibles llevan además "mid", un identificador aleatorio que el
 destinatario usa para confirmar la entrega o la lectura (los dos checks).
@@ -23,6 +32,9 @@ import secrets
 
 IMAGE_MIME = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 VIDEO_MIME = {"video/mp4", "video/webm", "video/quicktime"}
+AUDIO_MIME = {"audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/aac"}
+# Tipos que no se muestran como mensaje (acciones o señales)
+SILENT = {"react", "edit", "delete", "typing", "group", "group-leave", "receipt", "profile"}
 MAX_MEDIA = 8 * 1024 * 1024
 MAX_NAME = 64
 
@@ -57,6 +69,8 @@ def describe(c: dict) -> str:
         return str(c.get("body", ""))
     if t == "sticker":
         return f"[sticker {c.get('id', '')}]"
+    if t == "audio":
+        return f"[nota de voz {int(c.get('dur') or 0)} s]"
     if t in ("image", "video"):
         kind = "GIF" if c.get("mime") == "image/gif" else ("imagen" if t == "image" else "vídeo")
         return f"[{kind}: {c.get('name') or 'sin nombre'}]"

@@ -1,9 +1,9 @@
 // Service worker: permite instalar SecureChat como app y abrirla sin red
 // (la interfaz carga; para enviar mensajes hace falta el servidor).
-const CACHE = "securechat-v8";
+const CACHE = "securechat-v11";
 const SHELL = [
   "./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg", "lock.svg", "icon-192.png", "icon-512.png",
-  "js/theme.js", "js/app.js", "js/emoji.js", "js/vault.js", "js/client.js", "js/protocol.js",
+  "js/theme.js", "js/app.js", "js/emoji.js", "js/vault.js", "js/ratchet.js", "js/client.js", "js/protocol.js",
   "vendor/libsodium-sumo.js", "vendor/libsodium-wrappers.js",
 ];
 
@@ -31,6 +31,19 @@ self.addEventListener("fetch", (e) => {
       })
       .catch(() => caches.match(e.request)),
   );
+});
+
+// Aviso con la app cerrada. No lleva contenido: solo "tienes un mensaje nuevo".
+self.addEventListener("push", (e) => {
+  let data = { title: "SecureChat", body: "Tienes un mensaje nuevo 🔒" };
+  try { data = { ...data, ...e.data.json() }; } catch { /* sin datos */ }
+  e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
+    // Si la app está abierta y a la vista, ya lo ve ella: no molestamos
+    if (wins.some((w) => w.visibilityState === "visible")) return;
+    return self.registration.showNotification(data.title, {
+      body: data.body, icon: "icon-192.png", badge: "icon-192.png", tag: "securechat-new", renotify: true,
+    });
+  }));
 });
 
 // Al pulsar una notificación, enfocamos la ventana abierta.

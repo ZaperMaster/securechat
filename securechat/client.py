@@ -1,20 +1,16 @@
 """Lógica de red del cliente, independiente de la interfaz (CLI, GUI o tests).
 
-Cómo se envía un mensaje:
-  * Si hay una sesión en vivo con el contacto (los dos conectados), se usa: cada
-    mensaje lleva una clave nueva del ratchet (secreto hacia adelante fuerte).
-  * Si no la hay y el contacto está conectado, se negocia una (handshake).
-  * Si el contacto está desconectado, se envía un "sobre sellado" con su prekey
-    firmada (ver sealed.py). El servidor lo guarda y se lo entrega al conectarse.
-
-Las sesiones solo viven mientras los dos siguen conectados: al conectarse o
-desconectarse alguien, ambos lados las descartan y negocian otra la próxima vez.
+Protocolo v2 (ver ratchet.py): cada mensaje se cifra con Double Ratchet para CADA
+dispositivo del destinatario, y además se manda una copia ("sync") a mis otros
+dispositivos para que vean lo que he enviado. La primera vez con un dispositivo
+se usa X3DH con sus prekeys, así que no hace falta que esté conectado.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,9 +21,10 @@ from websockets.exceptions import ConnectionClosed
 from . import content
 from .contacts import Contacts
 from .crypto import CryptoError, b64d, b64e
-from .sealed import PrekeyStore, open_sealed, seal, verify_bundle
+from .ratchet import DeviceKeys, IdentityMismatch, decrypt_from, encrypt_for, initiate
 from .server import MAX_FRAME, auth_message
-from .session import IdentityMismatch, Session
+
+DEVICE_CACHE_TTL = 60
 
 
 class ClientError(Exception):
@@ -37,7 +34,7 @@ class ClientError(Exception):
 @dataclass
 class Event:
     """Algo que la interfaz debe mostrar al usuario."""
-    kind: str   # message | profile | session | presence | identity_changed | warning | disconnected
+    kind: str   # message | profile | receipt | sync | presence | identity_changed | warning | disconnected
     peer: str = ""
     text: str = ""
 
@@ -46,21 +43,26 @@ class ChatClient:
     def __init__(self, name: str, identity: SigningKey, contacts: Contacts,
                  prekeys_path: Path | None = None, code: str | None = None):
         self.name = name
-        self.code = code  # código de acceso del servidor, si lo pide
         self.identity = identity
         self.contacts = contacts
-        self.prekeys = PrekeyStore(name, identity, prekeys_path)
-        self.sessions: dict[str, Session] = {}
+        self.code = code  # código de acceso del servidor, si lo pide
+        self.keys = DeviceKeys(name, identity, prekeys_path)
+        self.my_devices: list[str] = []           # mis OTROS dispositivos
         self.online: dict[str, bool] = {}
-        self.profiles: dict[str, str] = {}  # nombre visible que cada contacto nos envía
-        self._pending: dict[str, tuple[Session, asyncio.Future]] = {}
+        self.profiles: dict[str, str] = {}
+        self._devices: dict[str, dict] = {}       # peer -> {"ik", "list", "bundles", "at"}
         self._requests: dict[int, asyncio.Future] = {}
         self._next_id = 0
-        self._known: dict[str, str] = {}  # minúsculas -> grafía oficial
+        self._known: dict[str, str] = {}
         self._who: asyncio.Future | None = None
+        self._send_lock = asyncio.Lock()
         self.events: asyncio.Queue[Event] = asyncio.Queue()
         self.ws: ClientConnection | None = None
         self._task: asyncio.Task | None = None
+
+    @property
+    def device(self) -> str:
+        return self.keys.device
 
     # ------------------------------------------------------------ conexión
 
@@ -68,7 +70,7 @@ class ChatClient:
         """Conecta y se autentica. Si el servidor pide verificar el correo (solo al
         crear la cuenta), `on_verify(destino, error)` debe devolver el código recibido."""
         self.ws = await connect(url, max_size=MAX_FRAME)
-        await self._send(type="hello", user=self.name, code=self.code, email=email,
+        await self._send(type="hello", user=self.name, code=self.code, email=email, device=self.device,
                          identity_key=b64e(bytes(self.identity.verify_key)))
         challenge = json.loads(await self.ws.recv())
         if challenge.get("type") != "challenge":
@@ -76,7 +78,7 @@ class ChatClient:
         sig = self.identity.sign(auth_message(b64d(challenge["nonce"]), self.name)).signature
         await self._send(type="auth", sig=b64e(sig))
         welcome = json.loads(await self.ws.recv())
-        error = None
+        error = target = None
         while welcome.get("type") in ("verify_needed", "verify_failed"):
             if on_verify is None:
                 raise ClientError("este servidor pide verificar un correo al crear la cuenta")
@@ -88,10 +90,11 @@ class ChatClient:
             welcome = json.loads(await self.ws.recv())
         if welcome.get("type") != "welcome":
             raise ClientError(welcome.get("message", "autenticación rechazada"))
-        self.name = self.prekeys.user = welcome["user"]  # grafía oficial
-        self.sessions.clear()  # una conexión nueva empieza sin sesiones en vivo
+        self.name = self.keys.user = welcome["user"]  # grafía oficial
+        self.my_devices = welcome.get("devices", [])
+        self._devices.clear()
         self._task = asyncio.create_task(self._recv_loop())
-        await self._send(type="prekey", **self.prekeys.bundle())
+        await self._request(**self.keys.upload_message(welcome.get("opks", 0)))
 
     async def close(self) -> None:
         if self.ws:
@@ -99,7 +102,7 @@ class ChatClient:
         if self._task:
             await asyncio.gather(self._task, return_exceptions=True)
 
-    # ------------------------------------------------------------- acciones
+    # ------------------------------------------------------------- peticiones
 
     async def _request(self, timeout: float = 15, **msg) -> dict:
         """Envía una petición con id y espera la respuesta del servidor."""
@@ -126,8 +129,8 @@ class ChatClient:
 
     async def resolve(self, name: str) -> str:
         """Devuelve la grafía oficial del usuario o lanza ClientError si no existe."""
-        if name in self.sessions:
-            return name
+        if name.lower() == self.name.lower():
+            return self.name
         if name.lower() in self._known:
             return self._known[name.lower()]
         info = await self.lookup(name)
@@ -135,62 +138,105 @@ class ChatClient:
             raise ClientError(f"el usuario '{name}' no existe")
         return info["user"]
 
-    async def open_session(self, peer: str, timeout: float = 10) -> Session:
-        peer = await self.resolve(peer)
-        if peer.lower() == self.name.lower():
-            raise ClientError("no puedes abrir una sesión contigo mismo")
-        session, hs1 = Session.initiate(self.name, self.identity, peer)
-        fut = asyncio.get_running_loop().create_future()
-        self._pending[peer] = (session, fut)
-        await self._send(type="send", to=peer, payload=hs1)
-        try:
-            return await asyncio.wait_for(fut, timeout)
-        except TimeoutError:
-            raise ClientError(f"'{peer}' no respondió al handshake") from None
-        finally:
-            if self._pending.get(peer, (None, None))[1] is fut:
-                del self._pending[peer]
-
-    async def send_text(self, peer: str, text: str) -> str:
-        return await self.send_content(peer, content.text(text))
-
-    async def send_content(self, peer: str, plaintext: str) -> str:
-        """Envía contenido cifrado. Devuelve "delivered" o "queued" (en espera)."""
-        peer = await self.resolve(peer)
-        if peer.lower() == self.name.lower():
-            raise ClientError("no puedes escribirte a ti mismo")
-        session = self.sessions.get(peer)
-        if session is None and self.online.get(peer, True):
-            try:
-                session = await self.open_session(peer, timeout=5)
-            except IdentityMismatch:
-                raise
-            except ClientError:
-                session = None  # no está o no responde: usamos un sobre sellado
-        if session is not None:
-            try:
-                r = await self._request(type="send", to=peer, payload=session.encrypt(plaintext))
-                return r["status"]
-            except ClientError:
-                self.sessions.pop(peer, None)  # se desconectó justo ahora
-        return await self._send_sealed(peer, plaintext)
-
-    async def _send_sealed(self, peer: str, plaintext: str) -> str:
-        r = await self._request(type="bundle", user=peer)
-        if not r.get("exists"):
-            raise ClientError(f"el usuario '{peer}' no existe")
-        if not r.get("prekey"):
-            raise ClientError(f"'{peer}' no está conectado y aún no admite mensajes en diferido")
-        ident, spk = verify_bundle({**r["prekey"], "user": r["user"], "identity_key": r["identity_key"]},
-                                   self.contacts.pinned_key(peer))
-        self.contacts.pin(peer, ident)
-        payload = seal(self.name, self.identity, peer, ident, spk, plaintext)
-        return (await self._request(type="send", to=peer, payload=payload))["status"]
-
     async def who(self) -> list[str]:
         self._who = asyncio.get_running_loop().create_future()
         await self._send(type="who")
         return await asyncio.wait_for(self._who, 5)
+
+    async def devices(self) -> list[dict]:
+        return (await self._request(type="devices"))["devices"]
+
+    async def _peer_devices(self, peer: str, refresh: bool = False) -> dict:
+        """Dispositivos de un usuario (con sus prekeys). Se cachean un minuto."""
+        info = self._devices.get(peer.lower())
+        if info and not refresh and time.monotonic() - info["at"] < DEVICE_CACHE_TTL:
+            return info
+        r = await self._request(type="bundle", user=peer)
+        if not r.get("exists"):
+            raise ClientError(f"el usuario '{peer}' no existe")
+        ik = b64d(r["identity_key"])
+        if peer.lower() != self.name.lower():
+            pinned = self.contacts.pinned_key(r["user"])
+            if pinned is not None and pinned != ik:
+                raise IdentityMismatch(r["user"], pinned, ik)
+            self.contacts.pin(r["user"], ik)
+        info = {"user": r["user"], "ik": ik, "list": [d["device"] for d in r["devices"]],
+                "bundles": {d["device"]: d for d in r["devices"]}, "at": time.monotonic()}
+        self._devices[peer.lower()] = info
+        return info
+
+    # --------------------------------------------------------------- envío
+
+    async def send_text(self, peer: str, text: str) -> str:
+        return await self.send_content(peer, content.text(text))
+
+    async def send_content(self, peer: str, plaintext: str, *, silent: bool = False,
+                           ephemeral: bool = False, sync: bool = True) -> str:
+        """Cifra y envía a todos los dispositivos de `peer` (y una copia a los míos).
+
+        Devuelve "delivered" si algún dispositivo lo recibió ya, o "queued" si espera.
+        """
+        peer = await self.resolve(peer)
+        if peer.lower() == self.name.lower():
+            raise ClientError("no puedes escribirte a ti mismo")
+        async with self._send_lock:  # el orden importa para el ratchet
+            statuses = await self._send_to_user(peer, plaintext, silent=silent, ephemeral=ephemeral)
+            if sync and not ephemeral and self.my_devices:
+                wrapped = json.dumps({"t": "sync", "to": peer, "c": json.loads(plaintext)}, ensure_ascii=False)
+                await self._send_to_user(self.name, wrapped, silent=True, ephemeral=False)
+        return "delivered" if "delivered" in statuses else "queued"
+
+    async def _send_to_user(self, user: str, plaintext: str, *, silent: bool, ephemeral: bool) -> list[str]:
+        mine = user.lower() == self.name.lower()
+        info = None
+        if mine:
+            targets = list(self.my_devices)
+        else:
+            info = await self._peer_devices(user)
+            targets = list(info["list"])
+        statuses = []
+        tried: set[str] = set()
+        while targets:
+            dev = targets.pop(0)
+            if dev in tried:
+                continue
+            tried.add(dev)
+            r = self.keys.session(user, dev)
+            if r is None:
+                if ephemeral:
+                    continue  # "escribiendo…" no merece abrir sesión
+                if mine:
+                    info = await self._peer_devices(self.name, refresh=True)
+                elif dev not in info["bundles"]:
+                    info = await self._peer_devices(user, refresh=True)
+                bundle = info["bundles"].get(dev)
+                if bundle is None:
+                    continue  # ese dispositivo aún no ha publicado sus prekeys
+                ik = info["ik"]
+                r = initiate(self.name, self.device, self.identity, user if not mine else self.name, dev, ik,
+                             bundle, None if mine else self.contacts.pinned_key(user))
+                self.keys.push_new(user, dev, r)
+            payload = encrypt_for(self.name, self.device, r, plaintext)
+            self.keys.store(user, dev, r)
+            try:
+                ack = await self._request(type="send", to=user, device=dev, payload=payload,
+                                          **({"silent": True} if silent else {}),
+                                          **({"ephemeral": True} if ephemeral else {}))
+            except ClientError as exc:
+                if "dispositivo" in str(exc):
+                    self.keys.drop(user, dev)
+                    continue
+                raise
+            statuses.append(ack["status"])
+            # ¿Tiene dispositivos que no conocíamos? También se lo mandamos a ellos
+            fresh = [d for d in ack.get("devices", []) if d != self.device and d not in tried and d not in targets]
+            if fresh and not mine:
+                info = await self._peer_devices(user, refresh=True)
+                targets += fresh
+            elif fresh and mine:
+                self.my_devices = [d for d in ack["devices"] if d != self.device]
+                targets += fresh
+        return statuses
 
     # ------------------------------------------------------------ recepción
 
@@ -204,7 +250,7 @@ class ChatClient:
         except ConnectionClosed:
             pass
         finally:
-            for fut in [f for _, f in self._pending.values()] + list(self._requests.values()):
+            for fut in list(self._requests.values()):
                 if not fut.done():
                     fut.set_exception(ClientError("conexión cerrada"))
             self._emit("disconnected")
@@ -214,11 +260,12 @@ class ChatClient:
         fut = self._requests.get(msg.get("id")) if msg.get("id") is not None else None
         if t == "deliver":
             await self._on_deliver(msg["from"], msg["payload"])
+        elif t == "my-devices":
+            self.my_devices = [d for d in msg["devices"] if d != self.device]
+            self._devices.pop(self.name.lower(), None)
         elif t == "presence":
-            peer = msg["user"]
-            self.online[peer] = msg["online"]
-            self.sessions.pop(peer, None)  # su estado de sesión ya no es fiable
-            self._emit("presence", peer, "en línea" if msg["online"] else "desconectado")
+            self.online[msg["user"]] = msg["online"]
+            self._emit("presence", msg["user"], "en línea" if msg["online"] else "desconectado")
         elif fut is not None and not fut.done():
             if t == "error":
                 fut.set_exception(ClientError(msg.get("message", "error del servidor")))
@@ -227,53 +274,39 @@ class ChatClient:
         elif t == "who" and self._who and not self._who.done():
             self._who.set_result(msg["users"])
         elif t == "error":
-            pending = self._pending.get(msg.get("to"))
-            if msg.get("code") == "offline" and pending and not pending[1].done():
-                pending[1].set_exception(ClientError(msg.get("message", "usuario no conectado")))
-            else:
-                self._emit("warning", msg.get("to") or "", msg.get("message", "error del servidor"))
+            self._emit("warning", msg.get("to") or "", msg.get("message", "error del servidor"))
 
     async def _on_deliver(self, sender: str, payload: dict) -> None:
-        kind = payload.get("kind")
+        mine = sender.lower() == self.name.lower()
         try:
-            if kind == "hs1":
-                await self._on_hs1(sender, payload)
-            elif kind == "hs2":
-                self._on_hs2(sender, payload)
-            elif kind == "reset":
-                self.sessions.pop(sender, None)
-            elif kind == "msg":
-                session = self.sessions.get(sender)
-                if session is None:
-                    # Su sesión es de antes de que nos reconectáramos: que negocie otra.
-                    await self._send(type="send", to=sender, payload={"kind": "reset"})
-                    raise CryptoError("llegó un mensaje de una sesión caducada; pídele que lo reenvíe")
-                lost_before = session.lost
-                text = session.decrypt(payload)
-                if session.lost > lost_before:
-                    self._emit("warning", sender, f"se perdieron {session.lost - lost_before} "
-                               f"mensaje(s) de {sender} (¿manipulación en el servidor?)")
-                self._on_content(sender, text)
-            elif kind == "sealed":
-                text, ident = open_sealed(self.name, self.identity, sender, payload, self.prekeys,
-                                          self.contacts.pinned_key(sender))
-                self.contacts.pin(sender, ident)
-                self._on_content(sender, text)
-            else:
-                raise CryptoError(f"tipo de payload desconocido: {kind!r}")
+            if payload.get("kind") != "dr":
+                raise CryptoError("formato antiguo: pídele que actualice la app")
+            pinned = bytes(self.identity.verify_key) if mine else self.contacts.pinned_key(sender)
+            text, ik = decrypt_from(self.name, self.keys, sender, payload, pinned)
+            if ik is not None and not mine:
+                self.contacts.pin(sender, ik)
+            if mine and payload.get("dev") not in self.my_devices:
+                self.my_devices.append(payload["dev"])
+            self._on_content(sender, text, mine)
         except IdentityMismatch as exc:
-            self._fail_pending(sender, exc)
             self._emit("identity_changed", sender, str(exc))
         except CryptoError as exc:
-            if kind == "hs2":
-                self._fail_pending(sender, exc)
-            self._emit("warning", sender, f"descartado mensaje de {sender}: {exc}")
+            self._emit("warning", sender, f"No se pudo leer un mensaje de {sender}: {exc}")
 
-    def _on_content(self, sender: str, text: str) -> None:
+    def _on_content(self, sender: str, text: str, mine: bool) -> None:
         c = content.decode(text)
+        if mine:
+            if c["t"] == "sync" and isinstance(c.get("c"), dict):
+                inner = c["c"]
+                self._emit("sync", str(c.get("to", "")), content.describe(inner) if inner.get("t") not in content.SILENT else "")
+            return
+        if c.get("mid") and not self.keys.first_time(c["mid"]):
+            return  # repetido
         if c["t"] == "receipt":
             self._emit("receipt", sender, f"{c.get('s')}:{','.join(c.get('ids', []))}")
             return
+        if c["t"] in content.SILENT and c["t"] != "profile":
+            return  # reacciones, ediciones, "escribiendo…", grupos: la terminal no los muestra
         if isinstance(c.get("mid"), str) and c["t"] != "profile":
             # Como el doble check de WhatsApp: "ya lo tengo" (va cifrado como cualquier mensaje)
             asyncio.get_running_loop().create_task(self._send_receipt(sender, [c["mid"]], "delivered"))
@@ -282,47 +315,14 @@ class ChatClient:
             self.profiles[sender] = name
             self._emit("profile", sender, name)
         else:
-            self._emit("message", sender, content.describe(c))
+            prefix = "[grupo] " if c.get("g") else ""
+            self._emit("message", sender, prefix + content.describe(c))
 
     async def _send_receipt(self, peer: str, ids: list[str], status: str) -> None:
         try:
-            await self.send_content(peer, content.receipt(ids, status))
+            await self.send_content(peer, content.receipt(ids, status), silent=True, sync=False)
         except (ClientError, CryptoError):
             pass  # las confirmaciones son opcionales
-
-    async def _on_hs1(self, sender: str, hs1: dict) -> None:
-        # Si los dos iniciamos a la vez, gana el handshake del nombre menor.
-        if sender in self._pending and self.name < sender:
-            return
-        session, hs2 = Session.accept(self.name, self.identity, sender, hs1,
-                                      self.contacts.pinned_key(sender))
-        self.contacts.pin(sender, session.peer_identity)
-        renewed = sender in self.sessions
-        self.sessions[sender] = session
-        self.online[sender] = True
-        await self._send(type="send", to=sender, payload=hs2)
-        pending = self._pending.pop(sender, None)
-        if pending and not pending[1].done():
-            pending[1].set_result(session)
-        self._emit("session", sender, "sesión renovada" if renewed else "sesión iniciada")
-
-    def _on_hs2(self, sender: str, hs2: dict) -> None:
-        pending = self._pending.get(sender)
-        if pending is None:
-            raise CryptoError("hs2 no solicitado")
-        session, fut = pending
-        session.complete(hs2, self.contacts.pinned_key(sender))
-        self.contacts.pin(sender, session.peer_identity)
-        self.sessions[sender] = session
-        self.online[sender] = True
-        if not fut.done():
-            fut.set_result(session)
-        self._emit("session", sender, "sesión iniciada")
-
-    def _fail_pending(self, peer: str, exc: Exception) -> None:
-        pending = self._pending.get(peer)
-        if pending and not pending[1].done():
-            pending[1].set_exception(exc)
 
     # ------------------------------------------------------------ utilidades
 

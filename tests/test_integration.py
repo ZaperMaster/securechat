@@ -47,46 +47,48 @@ def test_end_to_end_chat():
         seen = []
         original = relay._relay
 
-        async def spy(ws, sender, msg):
+        async def spy(ws, sender, dev, msg):
             seen.append(json.dumps(msg))
-            await original(ws, sender, msg)
+            await original(ws, sender, dev, msg)
         relay._relay = spy
 
-        await alice.send_text("bob", "mensaje secreto 1234")
+        assert await alice.send_text("bob", "mensaje secreto 1234") == "delivered"
         ev = await next_event(bob, "message")
         assert (ev.peer, ev.text) == ("alice", "mensaje secreto 1234")
-
         await bob.send_text("alice", "recibido")
         assert (await next_event(alice, "message")).text == "recibido"
 
         assert not any("secreto" in s for s in seen)
+        assert all('"kind": "dr"' in s for s in seen)  # todo va por Double Ratchet
         assert alice.contacts.pinned_key("bob") == bytes(bob.identity.verify_key)
         assert bob.contacts.pinned_key("alice") == bytes(alice.identity.verify_key)
         assert sorted(await alice.who()) == ["alice", "bob"]
-
         await alice.close(); await bob.close(); srv.close()
     run(main())
 
 
-def test_simultaneous_open():
+def test_simultaneous_first_messages():
     async def main():
         srv, url, _ = await start_server()
         alice, bob = await new_client(url, "alice"), await new_client(url, "bob")
-        await asyncio.gather(alice.open_session("bob"), bob.open_session("alice"))
-        await alice.send_text("bob", "ping")
+        await asyncio.gather(alice.send_text("bob", "ping"), bob.send_text("alice", "pong"))
         assert (await next_event(bob, "message")).text == "ping"
-        await bob.send_text("alice", "pong")
         assert (await next_event(alice, "message")).text == "pong"
+        for i in range(3):
+            await alice.send_text("bob", f"a{i}")
+            assert (await next_event(bob, "message")).text == f"a{i}"
+            await bob.send_text("alice", f"b{i}")
+            assert (await next_event(alice, "message")).text == f"b{i}"
         await alice.close(); await bob.close(); srv.close()
     run(main())
 
 
-def test_offline_peer():
+def test_unknown_user():
     async def main():
         srv, url, _ = await start_server()
         alice = await new_client(url, "alice")
-        with pytest.raises(ClientError):
-            await alice.open_session("nadie")
+        with pytest.raises(ClientError, match="no existe"):
+            await alice.send_text("nadie", "hola")
         await alice.close(); srv.close()
     run(main())
 
@@ -107,11 +109,23 @@ def test_bad_auth_signature_rejected():
         key = SigningKey.generate()
         async with connect(url) as ws:
             from securechat.crypto import b64e
-            await ws.send(json.dumps({"type": "hello", "user": "eve",
+            await ws.send(json.dumps({"type": "hello", "user": "eve", "device": "dispositivo1",
                                       "identity_key": b64e(bytes(key.verify_key))}))
             json.loads(await ws.recv())
             await ws.send(json.dumps({"type": "auth", "sig": b64e(bytes(64))}))
             assert json.loads(await ws.recv())["code"] == "auth_failed"
+        srv.close()
+    run(main())
+
+
+def test_old_clients_are_told_to_update():
+    async def main():
+        srv, url, _ = await start_server()
+        async with connect(url) as ws:
+            from securechat.crypto import b64e
+            await ws.send(json.dumps({"type": "hello", "user": "viejo",
+                                      "identity_key": b64e(bytes(SigningKey.generate().verify_key))}))
+            assert json.loads(await ws.recv())["code"] == "old_client"
         srv.close()
     run(main())
 
@@ -123,17 +137,53 @@ def test_identity_change_is_detected():
         alice_contacts = Contacts(None)
         alice = await new_client(url, "alice", contacts=alice_contacts)
         bob = await new_client(url, "bob")
-        await alice.open_session("bob")
+        await alice.send_text("bob", "hola")
         await bob.close(); await alice.close(); srv.close()
 
         srv, url, _ = await start_server()  # servidor nuevo (o malicioso)
         alice = await new_client(url, "alice", key=alice.identity, contacts=alice_contacts)
         impostor = await new_client(url, "bob")
-        with pytest.raises(ClientError):
-            await impostor.open_session("alice", timeout=1)
-        ev = await next_event(alice, "identity_changed")
-        assert ev.peer == "bob"
+        from securechat.ratchet import IdentityMismatch
+        with pytest.raises(IdentityMismatch):
+            await alice.send_text("bob", "¿eres tú?")  # al enviar
+        await impostor.send_text("alice", "soy bob, de verdad")  # y al recibir
+        assert (await next_event(alice, "identity_changed")).peer == "bob"
         await alice.close(); await impostor.close(); srv.close()
+    run(main())
+
+
+def test_two_devices_same_account(tmp_path):
+    """La misma cuenta en el móvil y el ordenador: los dos reciben, y lo que envía
+    uno aparece también en el otro."""
+    async def main():
+        srv, url, _ = await start_server()
+        key = SigningKey.generate()
+        movil = ChatClient("ana", key, Contacts(None), prekeys_path=tmp_path / "movil.keys")
+        pc = ChatClient("ana", key, Contacts(None), prekeys_path=tmp_path / "pc.keys")
+        await movil.connect(url)
+        await pc.connect(url)
+        assert movil.device != pc.device
+        bob = await new_client(url, "bob")
+
+        await bob.send_text("ana", "hola Ana")
+        assert (await next_event(movil, "message")).text == "hola Ana"
+        assert (await next_event(pc, "message")).text == "hola Ana"
+
+        await movil.send_text("bob", "te escribo desde el móvil")
+        assert (await next_event(bob, "message")).text == "te escribo desde el móvil"
+        sync = await next_event(pc, "sync")
+        assert (sync.peer, sync.text) == ("bob", "te escribo desde el móvil")
+
+        # El ordenador se desconecta; al volver recibe lo que llegó mientras tanto
+        await pc.close()
+        await bob.send_text("ana", "¿me lees en los dos?")
+        assert (await next_event(movil, "message")).text == "¿me lees en los dos?"
+        pc2 = ChatClient("ana", key, Contacts(None), prekeys_path=tmp_path / "pc.keys")
+        await pc2.connect(url)
+        assert pc2.device == pc.device
+        assert (await next_event(pc2, "message")).text == "¿me lees en los dos?"
+        assert len(await movil.devices()) == 2
+        await movil.close(); await pc2.close(); await bob.close(); srv.close()
     run(main())
 
 
@@ -173,7 +223,6 @@ def test_lookup_and_case_insensitive_names():
         await bob.send_text("ALICE.DEV", "hola")
         ev = await next_event(alice, "message")
         assert (ev.peer, ev.text) == ("bob", "hola")
-        assert "Alice.Dev" in bob.sessions
         # Nadie puede registrar el mismo nombre cambiando mayúsculas
         with pytest.raises(ClientError):
             await new_client(url, "alice.dev")

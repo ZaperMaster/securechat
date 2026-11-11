@@ -108,6 +108,12 @@
             <span id="conn" class="conn"></span>
           </span>
         </button>
+        <button id="new-group-btn" class="icon-btn" type="button" title="Nuevo grupo" aria-label="Nuevo grupo">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2" class="ring"/><path d="M3 19c.6-3.2 3-5 6-5s5.4 1.8 6 5"/><path d="M17 8v6M14 11h6"/></svg>
+        </button>
+        <button id="menu-btn" class="icon-btn" type="button" title="Menú" aria-label="Abrir menú" aria-expanded="false" aria-controls="app-menu">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
         <button id="theme-btn" class="icon-btn" type="button" title="Personalizar" aria-label="Personalizar">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.4A4.6 4.6 0 0 0 22 9.8C22 6 17.5 3 12 3Z"/><circle cx="7.5" cy="11" r="1.4"/><circle cx="10.5" cy="7" r="1.4"/><circle cx="15.5" cy="7.5" r="1.4"/></svg>
         </button>
@@ -121,6 +127,16 @@
       <p class="section-label">Conversaciones</p>
       <ul id="contacts" class="contacts"></ul>
       <p id="contacts-empty" class="contacts-empty">Aún no tienes chats.<br>Escribe un usuario arriba para empezar.</p>
+      <nav id="app-menu" class="app-menu" hidden aria-label="Menú de la app">
+        <button type="button" data-action="profile">👤<span>Mi perfil</span></button>
+        <button type="button" data-action="group">👥<span>Nuevo grupo</span></button>
+        <button type="button" data-action="settings">🎨<span>Personalizar y privacidad</span></button>
+        <button type="button" data-action="backup">💾<span>Copia de seguridad</span></button>
+        <button type="button" data-action="install" hidden>📲<span>Instalar app</span></button>
+        <button type="button" data-action="about">🔒<span>Cómo te protege SecureChat</span></button>
+        <hr>
+        <button type="button" data-action="logout" class="danger">🚪<span>Cerrar sesión</span></button>
+      </nav>
       <footer class="sidebar-foot">
         <button id="install-btn" class="chip" type="button" hidden>⬇ Instalar app</button>
         <button id="logout-btn" class="chip" type="button">Cerrar sesión</button>
@@ -159,6 +175,10 @@
         <div id="picker-body" class="picker-body"></div>
       </div>
       <div id="drop-hint" class="drop-hint" hidden>Suelta aquí para enviar cifrado</div>
+      <div id="reply-bar" class="reply-bar" hidden>
+        <div class="reply-body"><strong id="reply-title"></strong><span id="reply-text"></span></div>
+        <button id="reply-cancel" class="icon-btn" type="button" aria-label="Cancelar">✕</button>
+      </div>
       <form id="composer" class="composer">
         <button id="emoji-btn" class="icon-btn" type="button" title="Emojis y stickers" aria-label="Emojis y stickers" disabled>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" class="ring"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5h.01M15 9.5h.01" stroke-width="3"/></svg>
@@ -168,6 +188,17 @@
         </button>
         <input id="file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden>
         <input id="text" placeholder="Escribe un mensaje cifrado…" maxlength="4000" autocomplete="off" disabled>
+        <div id="rec-bar" class="rec-bar" hidden>
+          <button id="rec-cancel" class="icon-btn" type="button" aria-label="Cancelar grabación">🗑️</button>
+          <span class="rec-dot" aria-hidden="true"></span><span id="rec-time">0:00</span>
+          <span class="muted small">Grabando nota de voz…</span>
+          <button id="rec-send" class="send" type="button" aria-label="Enviar nota de voz">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 20 4l-4 16-4-6-8-2Z"/><path d="m12 14 8-10"/></svg>
+          </button>
+        </div>
+        <button id="mic-btn" class="icon-btn" type="button" title="Nota de voz" aria-label="Grabar nota de voz" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        </button>
         <button type="submit" disabled id="send-btn" class="send" aria-label="Enviar">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 20 4l-4 16-4-6-8-2Z"/><path d="m12 14 8-10"/></svg>
         </button>

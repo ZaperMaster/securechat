@@ -64,9 +64,11 @@ async def _show_events(client: ChatClient) -> None:
         badge = "✔" if c and c.verified else "?"
         if ev.kind == "message":
             _print(f"[{ev.peer} {badge}] {ev.text}")
-        elif ev.kind == "session":
-            hint = "" if c and c.verified else f"  (sin verificar: compara /fp {ev.peer})"
-            _print(f"* {ev.peer}: {ev.text}{hint}")
+        elif ev.kind == "sync":
+            if ev.text:
+                _print(f"[tú → {ev.peer}, desde otro dispositivo] {ev.text}")
+        elif ev.kind == "presence":
+            _print(f"* {ev.peer} está {ev.text}")
         elif ev.kind == "identity_changed":
             _print(f"!!! AVISO DE SEGURIDAD: {ev.text}\n"
                    f"!!! Puede ser un ataque man-in-the-middle o que {ev.peer} reinstaló.\n"
@@ -104,8 +106,7 @@ async def _repl(client: ChatClient) -> None:
                 if not USERNAME_RE.match(arg):
                     print("Nombre de usuario inválido.")
                     continue
-                if cmd == "/open" or arg not in client.sessions:
-                    arg = (await client.open_session(arg)).peer  # grafía oficial
+                arg = await client.resolve(arg)  # grafía oficial (o error si no existe)
                 active = arg
                 print(f"Conversación activa: {active}")
             elif cmd == "/who":
@@ -132,7 +133,6 @@ async def _repl(client: ChatClient) -> None:
                     print(f"{arg} marcado como verificado ✔")
             elif cmd == "/forget":
                 client.contacts.forget(arg)
-                client.sessions.pop(arg, None)
                 print(f"Clave de {arg} olvidada. La próxima se fijará de nuevo (TOFU).")
             elif cmd == "/contacts":
                 for c in client.contacts.all():
@@ -146,7 +146,7 @@ async def _repl(client: ChatClient) -> None:
 async def _chat(args, identity: SigningKey) -> None:
     contacts = Contacts(profile_dir(args) / "contacts.json")
     client = ChatClient(args.name, identity, contacts,
-                        prekeys_path=profile_dir(args) / "prekeys.json", code=args.code)
+                        prekeys_path=profile_dir(args) / "device.keys", code=args.code)
     await client.connect(args.server)
     print(f"Conectado a {args.server} como {args.name}.")
     events = asyncio.create_task(_show_events(client))

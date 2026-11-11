@@ -103,18 +103,74 @@ def test_python_sends_image_to_web():
     run(main())
 
 
-def test_sealed_messages_between_web_and_python():
+def test_web_receives_while_it_was_offline():
+    """Python escribe a un usuario web desconectado; al conectarse, la web lo lee."""
     async def main():
         srv, url, _ = await start_server()
-        alice = await new_client(url, "alice")
-        # La web envía un sobre sellado (como si Alice estuviera desconectada)
-        web = await _spawn("sealed", url, "webcarol", "alice")
-        assert (await next_event(alice, "message", timeout=15)).text == "sobre desde la web"
-        await asyncio.wait_for(web.wait(), 15)
-        # Python envía un sobre sellado a la web
         web = await _spawn("listen", url, "webdave")
-        await alice._send_sealed(await alice.resolve("webdave"), json.dumps({"t": "text", "body": "sobre desde python"}))
-        assert (await next_event(alice, "message", timeout=15)).text == "eco: sobre desde python"
+        alice = await new_client(url, "alice")
+        await alice.send_text("webdave", "primero")  # crea la sesión (la web está conectada)
+        assert (await next_event(alice, "message", timeout=15)).text == "eco: primero"
         await asyncio.wait_for(web.wait(), 15)
-        await alice.close(); srv.close()
+        srv.close()
     run(main())
+
+
+def test_double_ratchet_between_python_and_javascript():
+    from test_ratchet import Device
+    proc = subprocess.Popen([NODE, SCRIPT, "dr-peer"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, encoding="utf-8")
+
+    def js_cmd(**c):
+        proc.stdin.write(json.dumps(c) + "\n")
+        proc.stdin.flush()
+        out = json.loads(proc.stdout.readline())
+        assert "error" not in out, out
+        return out
+
+    try:
+        info = js_cmd(cmd="init", user="webbob")
+        py = Device("alice", SigningKey.generate())
+
+        class JsPeer:  # lo que Python necesita saber del dispositivo JS
+            user = "webbob"
+            identity = type("I", (), {"verify_key": b64d(info["ik"])})()
+            keys = type("K", (), {"device": info["device"]})()
+            opks = list(info["opks"])
+
+            def bundle_for_peer(self):
+                return {**info["bundle"], "opk": self.opks.pop(0)}
+
+        peer = JsPeer()
+        # Python empieza (X3DH con OPK) aunque "webbob" estuviera desconectado
+        r = py.keys.session("webbob", info["device"])
+        from securechat.ratchet import encrypt_for, initiate
+        r = initiate("alice", py.keys.device, py.identity, "webbob", info["device"], b64d(info["ik"]),
+                     peer.bundle_for_peer(), None)
+        py.keys.push_new("webbob", info["device"], r)
+        for i in range(3):
+            payload = encrypt_for("alice", py.keys.device, r, f"py→js {i} ñ😀")
+            py.keys.store("webbob", info["device"], r)
+            assert js_cmd(cmd="recv", sender="alice", payload=payload)["text"] == f"py→js {i} ñ😀"
+        # JS responde (ratchet DH) y siguen alternando
+        for i in range(3):
+            out = js_cmd(cmd="send", peer="alice", peerDev=py.keys.device, peerIk=b64e(bytes(py.identity.verify_key)), text=f"js→py {i}")
+            from securechat.ratchet import decrypt_from
+            assert decrypt_from("alice", py.keys, "webbob", out["payload"], None)[0] == f"js→py {i}"
+            r = py.keys.session("webbob", info["device"])
+            payload = encrypt_for("alice", py.keys.device, r, f"otra {i}")
+            py.keys.store("webbob", info["device"], r)
+            assert js_cmd(cmd="recv", sender="alice", payload=payload)["text"] == f"otra {i}"
+
+        # Y al revés: JS inicia una sesión nueva con un dispositivo Python
+        py2 = Device("carol", SigningKey.generate())
+        b = py2.bundle_for_peer()
+        out = js_cmd(cmd="send", peer="carol", peerDev=py2.keys.device, peerIk=b64e(bytes(py2.identity.verify_key)),
+                     bundle=b, text="hola desde JS")
+        assert out["payload"]["x3dh"]["opk"] == b["opk"]
+        from securechat.ratchet import decrypt_from
+        assert decrypt_from("carol", py2.keys, "webbob", out["payload"], None)[0] == "hola desde JS"
+    finally:
+        proc.stdin.write('{"cmd": "quit"}\n')
+        proc.stdin.flush()
+        proc.wait(timeout=10)

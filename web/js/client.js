@@ -1,9 +1,8 @@
 // Lógica de red del cliente web (equivalente a securechat/client.py).
 // No toca el DOM: la interfaz recibe eventos por `onEvent`.
 
-import {
-  b64d, b64e, CryptoError, equal, IdentityMismatch, openSealed, PrekeyStore, seal, Session, signAuth, verifyBundle,
-} from "./protocol.js";
+import { b64d, b64e, CryptoError, equal, IdentityMismatch, signAuth } from "./protocol.js";
+import { decryptFrom, DeviceKeys, encryptFor, initiate } from "./ratchet.js";
 
 export class ClientError extends Error {
   constructor(message, code = null) { super(message); this.code = code; }
@@ -13,30 +12,63 @@ export const IMAGE_MIME = ["image/png", "image/jpeg", "image/gif", "image/webp"]
 export const VIDEO_MIME = ["video/mp4", "video/webm", "video/quicktime"];
 export const MAX_MEDIA = 8 * 1024 * 1024;
 
-/** Valida el contenido descifrado (ver securechat/content.py). Nunca confiamos en él. */
+export const AUDIO_MIME = ["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/aac"];
+const ID_RE = /^[A-Za-z0-9_-]{8,32}$/;
+const NAME_OK = /^[A-Za-z0-9][A-Za-z0-9_.-]{1,30}[A-Za-z0-9_]$/;
+
+/**
+ * Valida el contenido descifrado (ver securechat/content.py). Nunca confiamos en él:
+ * todo lo que no encaja se descarta o se recorta.
+ *
+ * Campos comunes opcionales:
+ *   mid   identificador del mensaje (para checks, respuestas, reacciones…)
+ *   g     id del grupo, si el mensaje es de un grupo
+ *   reply {mid, from, text}: el mensaje al que responde
+ */
 export function decodeContent(plaintext) {
   let c;
   try { c = JSON.parse(plaintext); } catch { return { t: "text", body: plaintext }; }
   if (!c || typeof c !== "object" || typeof c.t !== "string") return { t: "text", body: plaintext };
   const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
-  const mid = /^[A-Za-z0-9_-]{8,32}$/.test(c.mid) ? c.mid : null;
+  const id = (v) => (typeof v === "string" && ID_RE.test(v) ? v : null);
+  const common = { mid: id(c.mid), g: id(c.g) };
+  if (c.reply && typeof c.reply === "object" && id(c.reply.mid)) {
+    common.reply = { mid: c.reply.mid, from: str(c.reply.from, 32), text: str(c.reply.text, 120) };
+  }
+  const out = (o) => Object.fromEntries(Object.entries({ ...o, ...common }).filter(([, v]) => v != null));
   switch (c.t) {
-    case "text": return { t: "text", body: str(c.body, 20000), mid };
-    case "sticker": return { t: "sticker", id: str(c.id, 16), mid };
-    case "image": case "video": {
-      const allowed = c.t === "image" ? IMAGE_MIME : VIDEO_MIME;
-      if (!allowed.includes(c.mime) || typeof c.data !== "string") return { t: "unsupported", mid };
-      return { t: c.t, mime: c.mime, name: str(c.name, 120), data: c.data, mid };
+    case "text": return out({ t: "text", body: str(c.body, 20000) });
+    case "sticker": return out({ t: "sticker", id: str(c.id, 16) });
+    case "image": case "video": case "audio": {
+      const allowed = { image: IMAGE_MIME, video: VIDEO_MIME, audio: AUDIO_MIME }[c.t];
+      const mime = str(c.mime, 60).split(";")[0];
+      if (!allowed.includes(mime) || typeof c.data !== "string") return out({ t: "unsupported" });
+      const dur = Number.isFinite(c.dur) ? Math.max(0, Math.min(3600, c.dur)) : undefined;
+      return out({ t: c.t, mime, name: str(c.name, 120), data: c.data, dur });
     }
     case "profile": {
       const avatar = typeof c.avatar === "string" && c.avatar.length < 200000 ? c.avatar : null;
       return { t: "profile", name: str(c.name, 64).trim(), bio: str(c.bio, 140).trim(), avatar };
     }
     case "receipt": {
-      const ids = Array.isArray(c.ids) ? c.ids.filter((x) => /^[A-Za-z0-9_-]{8,32}$/.test(x)).slice(0, 500) : [];
-      return { t: "receipt", ids, s: c.s === "read" ? "read" : "delivered" };
+      const ids = Array.isArray(c.ids) ? c.ids.filter((x) => ID_RE.test(x)).slice(0, 500) : [];
+      return out({ t: "receipt", ids, s: c.s === "read" ? "read" : "delivered" });
     }
-    default: return { t: "unsupported" };
+    // Acciones sobre un mensaje anterior (target = su mid)
+    case "react": return id(c.target) ? out({ t: "react", target: c.target, emoji: str(c.emoji, 16) }) : { t: "ignore" };
+    case "edit": return id(c.target) ? out({ t: "edit", target: c.target, body: str(c.body, 20000) }) : { t: "ignore" };
+    case "delete": return id(c.target) ? out({ t: "delete", target: c.target }) : { t: "ignore" };
+    case "typing": return out({ t: "typing", on: c.on !== false });
+    // Grupos: el estado del grupo lo manda su administrador a cada miembro
+    case "group": {
+      if (!id(c.g)) return { t: "ignore" };
+      const members = Array.isArray(c.members) ? [...new Set(c.members.filter((m) => NAME_OK.test(m)))].slice(0, 64) : [];
+      const avatar = typeof c.avatar === "string" && c.avatar.length < 200000 ? c.avatar : null;
+      return { t: "group", g: c.g, name: str(c.name, 64).trim() || "Grupo", members, admin: str(c.admin, 32),
+        v: Number.isFinite(c.v) ? c.v : 0, avatar };
+    }
+    case "group-leave": return id(c.g) ? { t: "group-leave", g: c.g } : { t: "ignore" };
+    default: return out({ t: "unsupported" });
   }
 }
 
@@ -80,28 +112,32 @@ export class Contacts {
   save() { this.onChange(this.toJSON()); }
 }
 
+const DEVICE_CACHE_MS = 60_000;
+const SILENT_TYPES = new Set(["receipt", "profile", "typing", "group-leave"]);
+
 /**
- * Cómo se envía un mensaje (igual que securechat/client.py):
- *  - Con sesión en vivo (los dos conectados): ratchet con clave nueva por mensaje.
- *  - Sin sesión y el contacto conectado: se negocia una (handshake).
- *  - Contacto desconectado: "sobre sellado" con su prekey firmada; el servidor lo
- *    guarda y se lo entrega cuando se conecta.
- * Las sesiones solo viven mientras los dos siguen conectados.
+ * Protocolo v2 (ver securechat/ratchet.py): cada mensaje se cifra con Double Ratchet
+ * para CADA dispositivo del destinatario, y se manda una copia ("sync") a mis otros
+ * dispositivos. La primera vez con un dispositivo se usa X3DH con sus prekeys, así
+ * que da igual que esté conectado o no.
  */
 export class ChatClient {
-  constructor(name, identity, contacts, onEvent = () => {}, { prekeys = null, code = null } = {}) {
+  constructor(name, identity, contacts, onEvent = () => {}, { keys = null, code = null } = {}) {
     Object.assign(this, { name, identity, contacts, onEvent, code });
-    this.prekeys = prekeys || new PrekeyStore(name, identity, null);
-    this.sessions = new Map();
-    this.pending = new Map(); // peer -> {session, resolve, reject, timer}
-    this.requests = new Map(); // id -> {resolve, reject}
+    this.keys = keys || new DeviceKeys(name, identity, null);
+    this.myDevices = [];
+    this.requests = new Map();
     this.nextId = 0;
-    this.known = new Map(); // minúsculas -> grafía oficial
-    this.online = new Map(); // peer -> bool
-    this.profileSent = new Set(); // contactos que ya tienen mi perfil en esta conexión
+    this.known = new Map();          // minúsculas -> grafía oficial
+    this.online = new Map();         // peer -> bool
+    this.deviceCache = new Map();    // peer (minúsculas) -> {user, ik, list, bundles, at}
+    this.profileSent = new Set();    // contactos que ya tienen mi perfil en esta conexión
+    this.queue = Promise.resolve();  // los envíos van en orden (el ratchet lo necesita)
     this.ws = null;
-    this.profile = null; // {name, avatar}: se envía cifrado a cada contacto
+    this.profile = null;
   }
+
+  get device() { return this.keys.device; }
 
   /**
    * Conecta y se autentica. Al crear cuenta, si el servidor pide verificar un correo,
@@ -112,35 +148,38 @@ export class ChatClient {
       const ws = new WebSocket(url);
       this.ws = ws;
       let stage = "hello";
-      ws.onopen = () => this.send({ type: "hello", user: this.name, code: this.code, email, identity_key: b64e(this.identity.publicKey) });
+      // Cada conexión habla por su propio canal (por si hubiera otra más nueva en marcha)
+      const own = (msg) => { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); };
+      ws.onopen = () => own({ type: "hello", user: this.name, code: this.code, email, device: this.device,
+        identity_key: b64e(this.identity.publicKey) });
       ws.onerror = () => { if (stage === "hello" || stage === "auth") reject(new ClientError("no se pudo conectar con el servidor", "down")); };
       ws.onclose = (ev) => {
         if (stage === "hello" || stage === "auth") reject(new ClientError("el servidor cerró la conexión", "down"));
-        for (const p of [...this.pending.values(), ...this.requests.values()]) p.reject(new ClientError("conexión cerrada"));
-        this.pending.clear();
+        for (const p of this.requests.values()) p.reject(new ClientError("conexión cerrada"));
         this.requests.clear();
-        // 4000 = el servidor nos echa porque la cuenta se ha abierto en otro sitio
-        if (stage === "ready" && this.ws === ws) this.emit("disconnected", "", ev.code === 4000 ? "replaced" : "");
+        // 4000 = la cuenta se ha abierto otra vez en ESTE dispositivo (otra pestaña)
+        if (stage === "ready" && this.ws === ws) this.emit("disconnected", "", ev.code === 4000 ? "replaced" : ev.code === 4001 ? "removed" : "");
       };
       ws.onmessage = async (ev) => {
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
         if (stage === "hello") {
           if (msg.type !== "challenge") { stage = "failed"; return reject(new ClientError(msg.message || "respuesta inesperada", msg.code)); }
-          this.send({ type: "auth", sig: b64e(signAuth(this.identity, b64d(msg.nonce), this.name)) });
+          own({ type: "auth", sig: b64e(signAuth(this.identity, b64d(msg.nonce), this.name)) });
           stage = "auth";
         } else if (stage === "auth" && (msg.type === "verify_needed" || msg.type === "verify_failed")) {
           if (!onVerify) { stage = "failed"; ws.close(); return reject(new ClientError("este servidor pide verificar tu correo", "email_required")); }
           if (msg.type === "verify_needed") this.verifyTarget = msg.to;
-          try { this.send({ type: "verify", code: await onVerify(this.verifyTarget, msg.type === "verify_failed" ? msg.message : null) }); }
+          try { own({ type: "verify", code: await onVerify(this.verifyTarget, msg.type === "verify_failed" ? msg.message : null) }); }
           catch (e) { stage = "failed"; ws.close(); reject(e); }
         } else if (stage === "auth") {
           if (msg.type !== "welcome") { stage = "failed"; return reject(new ClientError(msg.message || "autenticación rechazada", msg.code)); }
           stage = "ready";
-          this.name = this.prekeys.user = msg.user; // grafía oficial registrada en el servidor
-          this.sessions.clear(); // una conexión nueva empieza sin sesiones en vivo
+          this.name = this.keys.user = msg.user; // grafía oficial registrada en el servidor
+          this.myDevices = msg.devices || [];
+          this.deviceCache.clear();
           this.profileSent.clear();
-          this.send({ type: "prekey", ...this.prekeys.bundle() });
+          this.request(this.keys.uploadMessage(msg.opks || 0)).catch(() => {});
           resolve();
         } else {
           try { await this.dispatch(msg); }
@@ -161,19 +200,19 @@ export class ChatClient {
         resolve: (v) => { clearTimeout(timer); this.requests.delete(id); resolve(v); },
         reject: (e) => { clearTimeout(timer); this.requests.delete(id); reject(e); },
       });
-      try { this.send({ ...msg, id }); } catch (e) { this.requests.get(id).reject(e); }
+      try { this.send({ ...msg, id }); } catch (e) { this.requests.get(id)?.reject(e); }
     });
   }
 
-  /** ¿Existe el usuario? → {exists, user (grafía oficial), online} */
+  /** ¿Existe el usuario? → {exists, user (grafía oficial), online, lastSeen} */
   async lookup(name) {
     const r = await this.request({ type: "lookup", user: name }, 5000);
     if (r.exists) { this.known.set(name.toLowerCase(), r.user); this.online.set(r.user, r.online); }
-    return { exists: r.exists, user: r.user, online: r.online };
+    return { exists: r.exists, user: r.user, online: r.online, lastSeen: r.last_seen ?? null };
   }
 
   async resolve(name) {
-    if (this.sessions.has(name)) return name;
+    if (name.toLowerCase() === this.name.toLowerCase()) return this.name;
     if (this.known.has(name.toLowerCase())) return this.known.get(name.toLowerCase());
     if (this.contacts.get(name)) return name;
     const info = await this.lookup(name);
@@ -181,73 +220,129 @@ export class ChatClient {
     return info.user;
   }
 
-  async openSession(name, timeout = 10000) {
-    const peer = await this.resolve(name);
-    if (peer.toLowerCase() === this.name.toLowerCase()) throw new ClientError("no puedes abrir un chat contigo mismo");
-    const [session, hs1] = Session.initiate(this.name, this.identity, peer);
-    return new Promise((resolve, reject) => {
-      const done = (fn) => (v) => { clearTimeout(entry.timer); if (this.pending.get(peer) === entry) this.pending.delete(peer); fn(v); };
-      const entry = { session, resolve: done(resolve), reject: done(reject) };
-      entry.timer = setTimeout(() => entry.reject(new ClientError(`'${peer}' no respondió al handshake`)), timeout);
-      this.pending.set(peer, entry);
-      this.send({ type: "send", to: peer, payload: hs1 });
-    });
+  async devices() { return (await this.request({ type: "devices" })).devices; }
+  async removeDevice(device) { await this.request({ type: "remove-device", device }); }
+
+  /** Dispositivos de un usuario con sus prekeys (cada petición consume una OPK por dispositivo). */
+  async peerDevices(peer, refresh = false) {
+    const k = peer.toLowerCase();
+    const c = this.deviceCache.get(k);
+    if (c && !refresh && Date.now() - c.at < DEVICE_CACHE_MS) return c;
+    const r = await this.request({ type: "bundle", user: peer });
+    if (!r.exists) throw new ClientError(`El usuario @${peer} no existe`);
+    const ik = b64d(r.identity_key);
+    if (k !== this.name.toLowerCase()) {
+      const pinned = this.contacts.pinned(r.user);
+      if (pinned && !equal(pinned, ik)) throw new IdentityMismatch(r.user, pinned, ik);
+      this.contacts.pin(r.user, ik);
+    }
+    const info = { user: r.user, ik, list: r.devices.map((d) => d.device),
+      bundles: Object.fromEntries(r.devices.map((d) => [d.device, d])), at: Date.now() };
+    this.deviceCache.set(k, info);
+    return info;
   }
 
   sendText(peer, text) { return this.sendContent(peer, { t: "text", body: text }); }
 
   /**
-   * Envía contenido cifrado (texto, imagen, vídeo, sticker o perfil).
-   * Devuelve {peer, status}: status = "delivered" (entregado) o "queued" (en espera).
+   * Cifra y envía a todos los dispositivos de `name` (y una copia a los míos).
+   * Devuelve {peer, status}: "delivered" si algún dispositivo lo tiene ya, si no "queued".
    */
-  async sendContent(name, content) {
+  sendContent(name, content, { ephemeral = false, sync = true } = {}) {
+    const job = this.queue.then(() => this._send(name, content, { ephemeral, sync }));
+    this.queue = job.catch(() => {});
+    return job;
+  }
+
+  async _send(name, content, { ephemeral, sync }) {
     const peer = await this.resolve(name);
     if (peer.toLowerCase() === this.name.toLowerCase()) throw new ClientError("no puedes escribirte a ti mismo");
     const plaintext = JSON.stringify(content);
-    let session = this.sessions.get(peer);
-    if (!session && this.online.get(peer) !== false) {
-      try { session = await this.openSession(peer, 5000); }
-      catch (e) { if (e instanceof IdentityMismatch) throw e; session = null; }
+    const silent = SILENT_TYPES.has(content.t);
+    const statuses = await this.sendToUser(peer, plaintext, { silent, ephemeral });
+    if (sync && !ephemeral && content.t !== "receipt" && this.myDevices.length) {
+      await this.sendToUser(this.name, JSON.stringify({ t: "sync", to: peer, c: content }), { silent: true, ephemeral: false });
     }
-    let status = null;
-    if (session) {
-      try { status = (await this.request({ type: "send", to: peer, payload: session.encrypt(plaintext) })).status; }
-      catch { this.sessions.delete(peer); } // se desconectó justo ahora: va en diferido
+    // La primera vez en esta conexión, le mandamos también nuestro perfil (cifrado)
+    if (!silent && !ephemeral && this.profile && !this.profileSent.has(peer)) {
+      this.profileSent.add(peer);
+      this.sendToUser(peer, JSON.stringify({ t: "profile", ...this.profile }), { silent: true, ephemeral: false }).catch(() => this.profileSent.delete(peer));
     }
-    if (!status) {
-      status = await this.sendSealed(peer, plaintext);
-      if (content.t !== "profile" && !this.profileSent.has(peer) && this.profile) {
-        this.profileSent.add(peer);
-        this.sendSealed(peer, JSON.stringify({ t: "profile", ...this.profile })).catch(() => this.profileSent.delete(peer));
+    return { peer, status: statuses.includes("delivered") ? "delivered" : "queued" };
+  }
+
+  async sendToUser(user, plaintext, { silent, ephemeral }) {
+    const mine = user.toLowerCase() === this.name.toLowerCase();
+    let info = mine ? null : await this.peerDevices(user);
+    const targets = mine ? [...this.myDevices] : [...info.list];
+    const tried = new Set();
+    const statuses = [];
+    while (targets.length) {
+      const dev = targets.shift();
+      if (tried.has(dev)) continue;
+      tried.add(dev);
+      let r = this.keys.session(user, dev);
+      if (!r) {
+        if (ephemeral) continue; // "escribiendo…" no merece abrir sesión
+        if (!info || !info.bundles[dev]) info = await this.peerDevices(user, true);
+        const bundle = info.bundles[dev];
+        if (!bundle) continue; // ese dispositivo aún no ha publicado sus prekeys
+        r = initiate(this.name, this.device, this.identity, mine ? this.name : user, dev, info.ik, bundle,
+          mine ? null : this.contacts.pinned(user));
+        this.keys.pushNew(user, dev, r);
+      }
+      const payload = encryptFor(this.device, r, plaintext);
+      this.keys.store(user, dev, r);
+      let ack;
+      try {
+        ack = await this.request({ type: "send", to: user, device: dev, payload, ...(silent ? { silent: true } : {}), ...(ephemeral ? { ephemeral: true } : {}) });
+      } catch (e) {
+        if (e.code === "no_device") { this.keys.drop(user, dev); continue; }
+        throw e;
+      }
+      statuses.push(ack.status);
+      // ¿Tiene dispositivos que no conocíamos? También se lo mandamos a ellos
+      const fresh = (ack.devices || []).filter((d) => d !== this.device && !tried.has(d) && !targets.includes(d));
+      if (fresh.length) {
+        if (mine) this.myDevices = ack.devices.filter((d) => d !== this.device);
+        else info = await this.peerDevices(user, true);
+        targets.push(...fresh);
       }
     }
-    return { peer, status };
+    return statuses;
   }
 
-  async sendSealed(peer, plaintext) {
-    const r = await this.request({ type: "bundle", user: peer });
-    if (!r.exists) throw new ClientError(`El usuario @${peer} no existe`);
-    if (!r.prekey) throw new ClientError(`@${peer} no está conectado y su app aún no admite mensajes en diferido`);
-    const { ident, spk } = verifyBundle(r.user, r.identity_key, r.prekey, this.contacts.pinned(peer));
-    this.contacts.pin(peer, ident);
-    const payload = seal(this.name, this.identity, peer, ident, spk, plaintext);
-    return (await this.request({ type: "send", to: peer, payload })).status;
+  /** "Escribiendo…": solo a dispositivos con los que ya hay sesión, nunca se guarda en cola. */
+  sendLive(peer, content) {
+    this.sendContent(peer, content, { ephemeral: true, sync: false }).catch(() => {});
+    return true;
   }
 
-  /** Cambia mi perfil y se lo envía (cifrado) a todas las sesiones abiertas. */
-  setProfile(profile) {
+  /** Notificaciones con la app cerrada: registra (o quita) este dispositivo. */
+  setPushSubscription(sub) { try { this.send({ type: "push-sub", sub }); } catch { /* al reconectar */ } }
+  removePushSubscription(endpoint) { try { this.send({ type: "push-unsub", endpoint }); } catch { /* */ } }
+
+  /** Privacidad: si ocultas tu "última vez", el servidor no la comparte con nadie. */
+  setPrivacy({ lastSeen }) {
+    try { this.send({ type: "privacy", last_seen: !!lastSeen }); } catch { /* se envía al reconectar */ }
+  }
+
+  /** Cambia mi perfil y se lo envía (cifrado) a mis contactos. */
+  setProfile(profile, to = []) {
     this.profile = profile;
     this.profileSent.clear();
-    for (const peer of this.sessions.keys()) this.sendProfile(peer);
+    for (const peer of to) {
+      this.profileSent.add(peer);
+      this.sendContent(peer, { t: "profile", ...profile }, { sync: false }).catch(() => this.profileSent.delete(peer));
+    }
   }
 
-  sendProfile(peer) {
-    if (!this.profile) return;
-    const s = this.sessions.get(peer);
-    try {
-      this.send({ type: "send", to: peer, payload: s.encrypt(JSON.stringify({ t: "profile", ...this.profile })) });
-      this.profileSent.add(peer);
-    } catch { /* desconectado: se reenviará la próxima vez */ }
+  who() {
+    return new Promise((resolve, reject) => {
+      this.whoResolve = resolve;
+      setTimeout(() => reject(new ClientError("sin respuesta")), 5000);
+      this.send({ type: "who" });
+    });
   }
 
   async dispatch(msg) {
@@ -255,76 +350,50 @@ export class ChatClient {
     if (msg.type === "deliver") return this.onDeliver(msg.from, msg.payload, msg.queued_at);
     if (msg.type === "presence") {
       this.online.set(msg.user, msg.online);
-      this.sessions.delete(msg.user); // su estado de sesión ya no es fiable
-      return this.emit("presence", msg.user, msg.online ? "online" : "offline");
+      return this.emit("presence", msg.user, msg.online ? "online" : "offline", { lastSeen: msg.last_seen ?? null });
+    }
+    if (msg.type === "my-devices") {
+      this.myDevices = (msg.devices || []).filter((d) => d !== this.device);
+      return;
     }
     if (req) return msg.type === "error" ? req.reject(new ClientError(msg.message || "error del servidor", msg.code)) : req.resolve(msg);
-    if (msg.type === "error") {
-      const p = this.pending.get(msg.to);
-      if (msg.code === "offline" && p) { this.online.set(msg.to, false); p.reject(new ClientError(msg.message || "usuario no conectado")); }
-      else this.emit("warning", msg.to || "", msg.message || "error del servidor");
-    }
+    if (msg.type === "who") return this.whoResolve?.(msg.users);
+    if (msg.type === "error") this.emit("warning", msg.to || "", msg.message || "error del servidor");
   }
 
-  async onDeliver(sender, payload, queuedAt) {
-    const kind = payload?.kind;
+  onDeliver(sender, payload, queuedAt) {
+    const mine = sender.toLowerCase() === this.name.toLowerCase();
     try {
-      if (kind === "hs1") this.onHs1(sender, payload);
-      else if (kind === "hs2") this.onHs2(sender, payload);
-      else if (kind === "reset") this.sessions.delete(sender);
-      else if (kind === "msg") {
-        const s = this.sessions.get(sender);
-        if (!s) {
-          // Su sesión es de antes de que nos reconectáramos: que negocie otra.
-          this.send({ type: "send", to: sender, payload: { kind: "reset" } });
-          throw new CryptoError("llegó un mensaje de una sesión caducada; pídele que lo reenvíe");
-        }
-        const before = s.lost;
-        const text = s.decrypt(payload);
-        if (s.lost > before) this.emit("warning", sender, `se perdieron ${s.lost - before} mensaje(s) de ${sender}`);
-        this.onContent(sender, text, null);
-      } else if (kind === "sealed") {
-        const { text, ident } = openSealed(this.name, this.identity, sender, payload, this.prekeys, this.contacts.pinned(sender));
-        this.contacts.pin(sender, ident);
-        this.onContent(sender, text, queuedAt);
-      } else throw new CryptoError(`tipo de payload desconocido: ${kind}`);
+      if (payload?.kind !== "dr") throw new CryptoError("formato antiguo: pídele que recargue la app");
+      const pinned = mine ? this.identity.publicKey : this.contacts.pinned(sender);
+      const { text, ik } = decryptFrom(this.name, this.keys, sender, payload, pinned);
+      if (ik && !mine) this.contacts.pin(sender, ik);
+      if (mine && !this.myDevices.includes(payload.dev)) this.myDevices.push(payload.dev);
+      this.onContent(sender, text, queuedAt, mine);
     } catch (e) {
       if (!(e instanceof CryptoError)) throw e;
-      if (e instanceof IdentityMismatch || kind === "hs2") this.pending.get(sender)?.reject(e);
       if (e instanceof IdentityMismatch) this.emit("identity_changed", sender, e.message);
-      else this.emit("warning", sender, `No se pudo leer un mensaje de ${sender}: ${e.message}`);
+      else this.emit("warning", mine ? "" : sender, `No se pudo leer un mensaje de ${sender}: ${e.message}`);
     }
   }
 
-  onContent(sender, text, queuedAt) {
-    const c = decodeContent(text);
+  onContent(sender, text, queuedAt, mine) {
+    let c;
+    if (mine) {
+      // Copia de algo que envié desde otro dispositivo
+      let raw;
+      try { raw = JSON.parse(text); } catch { return; }
+      if (raw?.t !== "sync" || typeof raw.to !== "string") return;
+      c = decodeContent(JSON.stringify(raw.c));
+      if (c.t === "ignore" || c.t === "unsupported") return;
+      return this.emit("sync", raw.to, "", c, queuedAt);
+    }
+    c = decodeContent(text);
+    if (c.t === "ignore") return;
+    if (c.mid && !this.keys.firstTime(`${sender}|${c.mid}`) && c.t !== "receipt") return; // repetido
     if (c.t === "receipt") return this.emit("receipt", sender, c.s, c);
-    if (c.t === "profile") this.emit("profile", sender, "", { name: c.name, bio: c.bio, avatar: c.avatar });
-    else this.emit("message", sender, c.t === "text" ? c.body : "", c, queuedAt);
-  }
-
-  onHs1(sender, hs1) {
-    if (this.pending.has(sender) && this.name < sender) return; // apertura simultánea
-    const [session, hs2] = Session.accept(this.name, this.identity, sender, hs1, this.contacts.pinned(sender));
-    this.contacts.pin(sender, session.peerIdentity);
-    this.sessions.set(sender, session);
-    this.online.set(sender, true);
-    this.send({ type: "send", to: sender, payload: hs2 });
-    this.pending.get(sender)?.resolve(session);
-    this.emit("session", sender, "sesión iniciada");
-    this.sendProfile(sender);
-  }
-
-  onHs2(sender, hs2) {
-    const p = this.pending.get(sender);
-    if (!p) throw new CryptoError("hs2 no solicitado");
-    p.session.complete(hs2, this.contacts.pinned(sender));
-    this.contacts.pin(sender, p.session.peerIdentity);
-    this.sessions.set(sender, p.session);
-    this.online.set(sender, true);
-    p.resolve(p.session);
-    this.emit("session", sender, "sesión iniciada");
-    this.sendProfile(sender);
+    if (c.t === "profile") return this.emit("profile", sender, "", { name: c.name, bio: c.bio, avatar: c.avatar });
+    this.emit("message", sender, c.t === "text" ? c.body : "", c, queuedAt);
   }
 
   emit(kind, peer = "", text = "", content = null, queuedAt = null) { this.onEvent({ kind, peer, text, content, queuedAt }); }

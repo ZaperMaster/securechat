@@ -36,6 +36,8 @@ const DEFAULT_PREFS = {
   font: 15,            // px
   radius: null,        // px de las burbujas (null = el del tema)
   readReceipts: true,  // doble check azul
+  typing: true,        // enviar "escribiendo…"
+  lastSeen: true,      // compartir "última vez"
   notifications: true,
   enterSends: true,
 };

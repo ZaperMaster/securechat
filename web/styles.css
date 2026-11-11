@@ -281,7 +281,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .messages {
   list-style: none; margin: 0; padding: 20px clamp(12px, 4vw, 40px); flex: 1; overflow-y: auto;
   display: flex; flex-direction: column; gap: 3px;
-  background: var(--wall, radial-gradient(var(--dots) 1px, transparent 1.4px) 0 0 / 18px 18px), var(--chat-bg);
+  background: transparent;
 }
 .msg {
   max-width: min(72%, 560px); padding: 9px 14px 7px; border-radius: var(--radius);
@@ -587,20 +587,19 @@ dialog { max-height: min(88vh, 900px); overflow-y: auto; }
 .switch small { color: var(--muted); font-size: 12.5px; }
 
 /* Fondos de chat */
-[data-wall="plain"] .messages { --wall: none; }
-[data-wall="grid"] .messages { --wall: linear-gradient(var(--dots) 1px, transparent 1px) 0 0 / 26px 26px, linear-gradient(90deg, var(--dots) 1px, transparent 1px) 0 0 / 26px 26px; }
-[data-wall="diagonal"] .messages { --wall: repeating-linear-gradient(45deg, var(--dots) 0 2px, transparent 2px 16px); }
-[data-wall="bubbles"] .messages {
+[data-wall="plain"] .chat { --wall: none; }
+[data-wall="grid"] .chat { --wall: linear-gradient(var(--dots) 1px, transparent 1px) 0 0 / 26px 26px, linear-gradient(90deg, var(--dots) 1px, transparent 1px) 0 0 / 26px 26px; }
+[data-wall="diagonal"] .chat { --wall: repeating-linear-gradient(45deg, var(--dots) 0 2px, transparent 2px 16px); }
+[data-wall="bubbles"] .chat {
   --wall: radial-gradient(circle at 20% 30%, color-mix(in srgb, var(--accent) 9%, transparent) 0 46px, transparent 47px) 0 0 / 220px 220px,
           radial-gradient(circle at 70% 75%, color-mix(in srgb, var(--accent-2) 8%, transparent) 0 26px, transparent 27px) 0 0 / 160px 160px;
 }
-[data-wall="gradient"] .messages {
+[data-wall="gradient"] .chat {
   --wall: linear-gradient(165deg, color-mix(in srgb, var(--accent) 16%, transparent), transparent 55%, color-mix(in srgb, var(--accent-2) 14%, transparent));
 }
-[data-wall="image"] .messages {
+[data-wall="image"] .chat {
   --wall: linear-gradient(color-mix(in srgb, var(--chat-bg) 30%, transparent), color-mix(in srgb, var(--chat-bg) 30%, transparent)),
           var(--wall-image, none) center / cover no-repeat;
-  background-attachment: local, local;
 }
 
 .offline-banner.replaced { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
@@ -614,3 +613,100 @@ dialog { max-height: min(88vh, 900px); overflow-y: auto; }
 .auth-switch { text-align: center; font-size: 14px; color: var(--muted); margin: 0; }
 button.link-strong { color: var(--accent); font-weight: 700; padding: 2px 4px; background: none; }
 button.link-strong:hover { text-decoration: underline; }
+
+/* Fondo del chat fijo: se pinta en la ventana del chat (tamaño fijo), no en la lista
+   de mensajes, que crece al escribir y hacía que la foto se agrandara */
+.chat::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none; border-radius: inherit;
+  background: var(--wall, radial-gradient(var(--dots) 1px, transparent 1.4px) 0 0 / 18px 18px), var(--chat-bg);
+}
+.chat > :not(.picker):not(.drop-hint):not(.empty-chat) { position: relative; z-index: 1; }
+.empty-chat { z-index: 1; }
+
+/* =====================================================================
+   Responder, reacciones, menú de mensaje, notas de voz, grupos
+   ===================================================================== */
+.typing { color: var(--accent); font-style: italic; }
+.msg .author { display: block; font-size: 12.5px; font-weight: 700; margin-bottom: 2px;
+  color: hsl(var(--h, 240) 65% 55%); }
+[data-theme="dark"] .msg .author, [data-theme="midnight"] .msg .author, [data-theme="terminal"] .msg .author { color: hsl(var(--h, 240) 70% 72%); }
+.msg .quote {
+  display: grid; gap: 1px; text-align: left; width: 100%; margin: 0 0 6px; padding: 6px 10px; border-radius: 10px;
+  border-left: 3px solid currentColor; background: rgb(0 0 0 / .08); font-size: 13px; color: inherit; opacity: .9;
+}
+.msg.mine .quote { background: rgb(255 255 255 / .18); }
+.msg .quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg.deleted .body { font-style: italic; opacity: .75; }
+.msg.flash { animation: flash 1.2s ease-out; }
+@keyframes flash { 0%, 40% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 55%, transparent); } }
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.reaction {
+  font-size: 13px; padding: 1px 7px; border-radius: 999px; background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); line-height: 1.5;
+}
+.reaction.own { border-color: var(--accent); background: var(--accent-soft); }
+.msg.voice { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 6px; min-width: 240px; }
+.msg.voice audio { width: 100%; height: 36px; }
+.msg.voice time, .msg.voice .reactions, .msg.voice .quote, .msg.voice .author { grid-column: 1 / -1; }
+.mic-icon { font-size: 18px; }
+
+.msg-menu {
+  position: fixed; z-index: 60; min-width: 220px; background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 6px; animation: rise .12s ease-out;
+}
+.menu-reactions { display: flex; justify-content: space-between; gap: 2px; padding: 4px 4px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.menu-reactions button { font-size: 24px; padding: 4px; border-radius: 12px; transition: transform .1s; }
+.menu-reactions button:hover { transform: scale(1.2); background: var(--hover); }
+.menu-reactions button.own { background: var(--accent-soft); }
+.menu-item { display: block; width: 100%; text-align: left; padding: 9px 12px; border-radius: 10px; font-size: 14px; color: var(--text); }
+.menu-item:hover { background: var(--hover); }
+.menu-item.danger { color: var(--error); }
+
+.reply-bar {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px 8px 16px; background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.reply-bar[hidden] { display: none; }
+.reply-body { flex: 1; min-width: 0; display: grid; border-left: 3px solid var(--accent); padding-left: 10px; font-size: 13px; }
+.reply-body strong { color: var(--accent); }
+.reply-body span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+
+.rec-bar { display: none; flex: 1; align-items: center; gap: 10px; }
+.composer.recording .rec-bar { display: flex; }
+.composer.recording > :not(.rec-bar) { display: none; }
+.rec-bar .send { margin-left: auto; }
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--error); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: .2; } }
+#rec-time { font-variant-numeric: tabular-nums; font-weight: 700; }
+.small { font-size: 12.5px; }
+
+.member-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.member-list li { display: flex; align-items: center; gap: 10px; }
+.member-list .member-name { flex: 1; font-weight: 600; }
+.member-list .avatar { width: 32px; height: 32px; border-radius: 11px; font-size: 13px; }
+.add-row { display: flex; gap: 8px; }
+.add-row input { flex: 1; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2); }
+.chosen { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+
+/* Menú de hamburguesa */
+#new-group-btn, #theme-btn, .sidebar-foot { display: none !important; }
+.sidebar { position: relative; }
+.app-menu {
+  position: absolute; top: 62px; right: 12px; z-index: 30; min-width: 250px; padding: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow);
+  display: grid; animation: rise .12s ease-out;
+}
+.app-menu[hidden] { display: none; }
+.app-menu button {
+  display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 11px; font-size: 15px;
+  text-align: left; color: var(--text);
+}
+.app-menu button[hidden] { display: none; }
+.app-menu button:hover, .app-menu button:focus-visible { background: var(--hover); }
+.app-menu button.danger { color: var(--error); }
+.app-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; }
+#menu-btn[aria-expanded="true"] { background: var(--hover); color: var(--text); }
+
+.about-row { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+.about-icon { font-size: 22px; line-height: 1.2; }
+#dlg-body > .primary { width: 100%; margin: 6px 0; }

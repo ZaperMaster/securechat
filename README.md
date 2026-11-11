@@ -21,11 +21,11 @@ arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede ent
   (Argon2id + XSalsa20-Poly1305).
 - **Servidor relay** con autenticación por reto firmado: nadie puede conectarse con
   tu nombre sin tu clave privada.
-- **Handshake autenticado** con claves efímeras X25519 firmadas por ambas partes.
-- **Cifrado autenticado** XChaCha20-Poly1305 con una clave distinta por mensaje
-  (ratchet simétrico con BLAKE2b).
-- **Secreto perfecto hacia adelante**: las claves efímeras solo viven en memoria;
-  robar tu clave de identidad no descifra conversaciones pasadas.
+- **X3DH + Double Ratchet** (el diseño de Signal): cada mensaje usa una clave nueva
+  y la sesión se "cura" sola tras un compromiso. Funciona igual esté el otro
+  conectado o no, gracias a las *signed prekeys* y las *one-time prekeys*.
+- **Varios dispositivos por cuenta** (móvil y ordenador a la vez): cada mensaje se
+  cifra para cada dispositivo, y lo que envías desde uno aparece en los demás.
 - **Fotos, GIF, vídeos, stickers y emojis**, cifrados igual que el texto. El tipo
   de contenido también va dentro del cifrado: el servidor no sabe si es una foto.
 - **Perfil cifrado**: nombre visible y foto que solo ven tus contactos. Al
@@ -37,9 +37,15 @@ arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede ent
   fijada; si cambia, el cliente muestra un aviso y rechaza la sesión.
 - **Números de seguridad** (60 dígitos) en *Perfil → Seguridad avanzada*, para quien
   quiera descartar del todo que el propio servidor suplante a un contacto.
-- **Mensajes en diferido**: puedes escribir a alguien desconectado. El mensaje se
-  cifra con su *prekey* firmada (al estilo X3DH de Signal) y el servidor lo guarda
-  cifrado hasta que se conecta.
+- **Mensajes en diferido**: puedes escribir a alguien desconectado; el servidor
+  guarda el mensaje cifrado y se lo entrega a cada dispositivo al conectarse.
+- **Grupos**: el servidor no sabe que existen. Cada mensaje del grupo se cifra por
+  separado para cada miembro (como hacía Signal al principio).
+- **Responder, reaccionar, editar y borrar** (mantener pulsado o clic derecho en un
+  mensaje), **notas de voz**, **"escribiendo…"** y **"última vez"** (ocultables).
+- **Notificaciones con la app cerrada** (Web Push): el aviso no lleva el contenido
+  ni el remitente, solo "tienes un mensaje nuevo".
+- **Copia de seguridad cifrada** del historial (menú ☰), que solo tu cuenta puede abrir.
 - **Checks como WhatsApp**: 🕓 enviando, ✓ enviado, ✓✓ entregado y ✓✓ azul leído.
   Las confirmaciones viajan cifradas y las de lectura se pueden desactivar.
 - **Bandeja de salida**: si te quedas sin conexión (por ejemplo, el móvil corta la
@@ -53,11 +59,10 @@ arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede ent
 - **Verificación por correo** opcional al crear cuenta, para frenar bots.
 - **Personalización**: 9 temas, color propio, fondos de chat (o tu foto), tamaño de
   letra, forma de las burbujas, estado en el perfil y apodos para tus contactos.
-- **Presencia**: ves si tu contacto está en línea, y la sesión se renueva sola
-  cuando alguien recarga la página.
+- **Presencia**: ves si tu contacto está en línea o su "última vez".
 - **Servicio caído**: si el servidor está apagado, la app lo dice ("quien lo gestiona
   tiene que ponerlo en marcha") y se reconecta sola cuando vuelve.
-- Protección contra **repetición, reflexión, manipulación** y claves de orden bajo.
+- Protección contra **repetición, reordenación, manipulación** y claves de orden bajo.
 
 ## Uso rápido
 
@@ -159,91 +164,81 @@ pytest -q
 
 ```
 securechat/
-  crypto.py    almacén de claves, KDF, huellas y números de seguridad
-  sealed.py    mensajes en diferido: prekeys firmadas y sobres sellados
+  crypto.py        almacén de claves, KDF, huellas y números de seguridad
+  ratchet.py       X3DH + Double Ratchet por dispositivo (sin E/S, fácil de testear)
+  content.py       formato del contenido cifrado (texto, foto, audio, reacciones, grupos…)
+  contacts.py      claves fijadas (TOFU) y estado de verificación
   email_verify.py  verificación por correo (SMTP o consola)
-  content.py   formato del contenido cifrado (texto, foto, vídeo, sticker, perfil)
-  session.py   handshake + cifrado de mensajes (sin E/S, fácil de testear)
-  contacts.py  claves fijadas (TOFU) y estado de verificación
-  server.py    relay WebSocket + servidor de la web estática
-  client.py    lógica de red del cliente, independiente de la interfaz
-  cli.py       interfaz de terminal
+  push.py          notificaciones con la app cerrada (Web Push con VAPID)
+  server.py        relay WebSocket por dispositivo + servidor de la web estática
+  client.py        lógica de red del cliente, independiente de la interfaz
+  cli.py           interfaz de terminal
 web/
-  js/protocol.js  port de crypto.py + session.py (mismos bytes)
-  js/client.js    port de client.py
-  js/app.js       interfaz (solo usa textContent: nunca interpreta HTML recibido)
-  js/emoji.js     emojis y stickers
-  js/vault.js     sesión recordada (WebCrypto) e historial cifrado (IndexedDB)
-  sw.js, manifest.webmanifest   PWA instalable
-  vendor/         libsodium.js 0.7.15 (copiado, sin CDN)
+  js/protocol.js   identidad, KDF y huellas (mismos bytes que crypto.py)
+  js/ratchet.js    port de ratchet.py (mismos bytes)
+  js/client.js     port de client.py
+  js/app.js        interfaz (solo usa textContent: nunca interpreta HTML recibido)
+  js/vault.js      sesión recordada (WebCrypto) e historial cifrado (IndexedDB)
+  js/emoji.js      emojis y stickers
+  sw.js, manifest.webmanifest   PWA instalable y notificaciones
+  vendor/          libsodium.js 0.7.15 (copiado, sin CDN)
 tests/
-  test_web_interop.py  ejecuta el JS en Node y chatea con el cliente Python
+  test_ratchet.py      el protocolo, incluido un fuzz de 200 mensajes desordenados
+  test_web_interop.py  ejecuta el JS en Node y conversa con Python mensaje a mensaje
 ```
 
-`session.py` no hace E/S: toda la criptografía de la conversación se prueba sin red.
+`ratchet.py` no hace E/S: toda la criptografía de la conversación se prueba sin red.
 La versión JS se valida contra la Python en los tests: misma derivación de claves,
-mismo número de seguridad, mismo formato de `identity.json` y chat real entre ambas.
+mismo número de seguridad, mismo formato de `identity.json` y conversación real.
 
 ## Protocolo
 
-Mensajes JSON sobre WebSocket. Notación: `A` iniciador, `B` respondedor, `id` clave
-de identidad Ed25519, `eph` clave efímera X25519, `|` concatenación con longitud prefijada.
+Mensajes JSON sobre WebSocket. `IK` es la identidad Ed25519 de la cuenta (convertida
+a X25519 para los DH), `|` concatenación con longitud prefijada.
 
 **Autenticación con el servidor**
 
 ```
-C -> S  hello { user, id }
+C -> S  hello { user, IK, device }
 S -> C  challenge { nonce (32 bytes aleatorios) }
 C -> S  auth { Sig_C("securechat-auth-v1" | nonce | user) }
 ```
 
-El servidor fija `user -> id` la primera vez y rechaza después cualquier otra clave.
+El servidor fija `user -> IK` la primera vez y rechaza después cualquier otra clave.
+Cada cuenta puede tener hasta 6 dispositivos; todos comparten `IK` (se recupera con
+la copia cifrada con tu contraseña) pero cada uno tiene sus propias prekeys.
 
-**Handshake** (inspirado en SIGMA y en el patrón XX de Noise)
-
-```
-A -> B  hs1 { idA, ephA, Sig_A("hs1" | A | B | idA | ephA) }
-B -> A  hs2 { idB, ephB, Sig_B("hs2" | A | B | idA | idB | ephA | ephB) }
-
-th   = BLAKE2b(A | B | idA | idB | ephA | ephB)
-root = BLAKE2b_keyed(X25519(eph, eph'), "sc-root", th)
-ck_AB = KDF(root, "sc-chain-i2r");  ck_BA = KDF(root, "sc-chain-r2i")
-```
-
-Las firmas incluyen los nombres de ambos extremos, así que un `hs1` dirigido a Bob
-no sirve para abrir una sesión con Carol, y el servidor no puede cambiar el remitente.
-
-**Mensajes**
+**Prekeys de cada dispositivo**
 
 ```
-mk_n     = KDF(ck_n, "sc-msg")
-ck_{n+1} = KDF(ck_n, "sc-chain")
-ct       = XChaCha20-Poly1305(mk_n, nonce aleatorio de 24 bytes, aad = th | emisor | n)
+SPK  = X25519 firmada: Sig_IK("spk" | user | device | SPK | fecha)   (se renueva cada 7 días)
+OPK  = 20 X25519 de un solo uso; el servidor entrega una por petición y la borra
 ```
 
-El receptor rechaza contadores ya vistos (repeticiones) y saltos de más de 1000.
-Si falta un mensaje (destruido o manipulado), la sesión sigue y se avisa al usuario.
-
-Las sesiones solo viven mientras los dos siguen conectados. El servidor avisa
-(`presence`) cuando un contacto entra o sale y ambos lados descartan la sesión; la
-siguiente se negocia de nuevo. Así recargar la página nunca deja sesiones a medias.
-
-**Mensajes en diferido** (`sealed.py`, inspirado en X3DH sin *one-time prekeys*)
-
-Cada usuario publica una *signed prekey* que se renueva cada 7 días:
+**X3DH** (para escribir a un dispositivo por primera vez, aunque esté desconectado)
 
 ```
-bundle(B) = { idB, SPK_B, Sig_B("spk" | B | SPK_B | fecha) }
-
-th  = BLAKE2b("sealed" | A | B | idA | idB | SPK_B | eph | id_mensaje)
-sig = Sig_A(th)
-k   = KDF(X25519(eph, SPK_B), th)
-ct  = XChaCha20-Poly1305(k, nonce, aad = th)
+DH1 = DH(IK_A, SPK_B)   DH2 = DH(EK_A, IK_B)   DH3 = DH(EK_A, SPK_B)   DH4 = DH(EK_A, OPK_B)
+AD  = A | dispositivo_A | B | dispositivo_B | IK_A | IK_B
+SK  = KDF(BLAKE2b(DH1 | DH2 | DH3 | DH4), "sc-x3dh", AD)
 ```
 
-El servidor guarda el sobre (cifrado) y lo entrega cuando B se conecta. B comprueba
-la firma de A, rechaza identificadores de mensaje repetidos y descifra con la parte
-privada de su SPK, que guarda cifrada con una clave derivada de su identidad.
+**Double Ratchet** (el algoritmo de Signal, tal cual)
+
+```
+(RK, CK)  = KDF(RK, DH(DHs, DHr))      al cambiar el turno de quién escribe
+(CK, MK)  = (KDF(CK, "sc-ck"), KDF(CK, "sc-mk"))   en cada mensaje
+ct = XChaCha20-Poly1305(MK, nonce, aad = AD | DHs | PN | N)
+```
+
+Se guardan hasta 2000 claves de mensajes saltados (llegan desordenados) y se borran
+al usarse. Si los dos empiezan a escribirse a la vez, cada dispositivo guarda las
+últimas sesiones y "asciende" la que funciona, como hace Signal. El estado de cada
+sesión se guarda en el dispositivo cifrado con una clave derivada de la identidad.
+
+**Varios dispositivos**: cada mensaje se cifra una vez por cada dispositivo del
+destinatario y otra por cada uno de mis otros dispositivos (envuelto como `sync`). El
+servidor entrega a cada dispositivo o lo guarda en su cola si está desconectado.
 
 ## Modelo de amenazas
 
@@ -252,13 +247,14 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 
 | Protegido | Cómo |
 |---|---|
-| Confidencialidad del contenido | AEAD con claves que solo conocen los dos extremos |
-| Integridad y autenticidad | Poly1305 + handshake firmado con Ed25519 |
-| Suplantación de remitente | firmas sobre la transcripción con ambos nombres |
-| Repetición / reflexión de mensajes | contador monótono y emisor en el AAD |
+| Confidencialidad del contenido | AEAD con claves que solo conocen los dispositivos de los dos |
+| Integridad y autenticidad | Poly1305 + X3DH con las identidades de ambos |
+| Suplantación de remitente | el remitente lo fija el servidor tras el reto firmado, y X3DH lo liga a su `IK` |
+| Repetición / reordenación | claves de un solo uso (ratchet y OPK); se borran al usarse |
 | MITM en el primer contacto | **solo si** se comparan los números de seguridad |
 | MITM tras el primer contacto | claves fijadas (TOFU): un cambio dispara una alerta |
-| Robo posterior de la clave de identidad | secreto hacia adelante (claves efímeras) |
+| Robo posterior de la clave de identidad | secreto hacia adelante (claves efímeras y OPK) |
+| Robo del estado de una sesión | "curación": el siguiente DH del ratchet lo deja inservible |
 | Robo del fichero de claves | cifrado con Argon2id; depende de la fuerza de la contraseña |
 
 **No protegido** (limitaciones conocidas):
@@ -279,13 +275,6 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **Disponibilidad**: el servidor puede descartar mensajes o desconectar usuarios.
 - **Dispositivo comprometido**: con malware en tu equipo no hay cifrado que valga.
   Python además no permite borrar claves de memoria de forma fiable.
-- **Secreto hacia atrás (post-compromise security)**: si alguien roba el estado de
-  una sesión activa, puede leer el resto de esa sesión. Signal lo resuelve con el
-  ratchet Diffie-Hellman de Double Ratchet; aquí solo hay ratchet simétrico.
-- **Mensajes en diferido**: tienen un secreto hacia adelante más débil que las
-  sesiones en vivo. Quien robe la SPK privada de Bob (válida 7 días, y se guardan las
-  3 últimas) podría leer los sobres dirigidos a ella. Signal lo mitiga con
-  *one-time prekeys* y Double Ratchet.
 - **Sesión recordada**: la semilla de tu identidad queda cifrada con una clave
   WebCrypto no exportable. Nadie puede copiarla a otro equipo, pero quien use tu
   navegador sí podría abrir la app. "Cerrar sesión" la borra del dispositivo.
@@ -299,8 +288,6 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
   guarda una huella (HMAC con un secreto propio) para impedir cuentas repetidas.
 - **Confirmaciones de entrega y lectura**: van cifradas, pero su tamaño y momento
   revelan al servidor que hubo actividad. Las de lectura se pueden desactivar.
-- **Un dispositivo por cuenta**: las prekeys viven en el navegador donde creaste la
-  cuenta. Si entras desde otro, los mensajes en espera para el primero no se podrán abrir.
 - **Presencia**: el servidor sabe cuándo te conectas y se lo dice a quien ha hablado contigo.
 - **Código de acceso**: unos 40 bits, con un máximo de 10 intentos fallidos por IP y
   minuto. Es un filtro para que no entre cualquiera, no una medida de cifrado.
@@ -312,8 +299,16 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **`localStorage`**: la clave va cifrada, pero cualquier script inyectado en el
   origen podría leerla mientras la sesión está abierta. La CSP estricta y el uso
   exclusivo de `textContent` reducen ese riesgo.
-- **Negación de autoría**: las firmas Ed25519 del handshake son una prueba
-  transferible de que participaste en la conversación (Signal usa X3DH para evitarlo).
+- **Sin one-time prekeys disponibles**: si a alguien se le acaban (por ejemplo, porque
+  un atacante las pide todas), el primer mensaje usa solo la SPK y su secreto hacia
+  adelante depende de que la SPK se renueve (7 días), como en Signal.
+- **Grupos**: el tamaño del envío crece con el número de miembros y el servidor ve a
+  quién va cada copia. Signal usa *sender keys* para grupos grandes.
+- **Varios dispositivos**: comparten la identidad de la cuenta; un dispositivo robado
+  y con la sesión abierta puede leer los mensajes nuevos hasta que lo desvincules desde
+  otro (*Mi perfil → Seguridad avanzada → Tus dispositivos*).
+- **Notificaciones**: el servicio de avisos del navegador (Google, Mozilla o Apple) sabe
+  cuándo te llega algo, aunque no el qué ni de quién.
 
 ## Hoja de ruta
 
@@ -321,10 +316,10 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - [x] Fase 2 – Huellas, números de seguridad y contactos verificados
 - [x] Fase 3 – Claves efímeras por sesión (secreto hacia adelante)
 - [x] Fase 4 – Interfaz web instalable (PWA), temas, perfiles y multimedia cifrada
-- [x] Fase 5a – Mensajes en diferido con prekeys firmadas, presencia y código de acceso
-- [x] Fase 5b – Checks de entrega/lectura, bandeja de salida, historial cifrado, sesión recordada y verificación por correo
-- [ ] Fase 6 – Grupos, *one-time prekeys* y varios dispositivos por cuenta
-- [ ] Double Ratchet completo, TLS en el relay, historial local cifrado
+- [x] Fase 5 – Mensajes en diferido, checks, bandeja de salida, historial cifrado, correo
+- [x] Fase 6 – X3DH + Double Ratchet con one-time prekeys, varios dispositivos, grupos,
+  respuestas/reacciones/ediciones, notas de voz, notificaciones push y copia de seguridad
+- [ ] Siguiente – *Sender keys* para grupos grandes, *padding* de mensajes y llamadas
 
 ## Referencias
 
