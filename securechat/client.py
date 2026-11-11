@@ -121,7 +121,8 @@ class ChatClient:
     async def lookup(self, name: str) -> dict:
         """Pregunta al servidor si existe un usuario: {exists, user, online}."""
         r = await self._request(type="lookup", user=name, timeout=5)
-        info = {"exists": r["exists"], "user": r["user"], "online": r["online"]}
+        info = {"exists": r["exists"], "user": r["user"], "online": r["online"],
+                "away": bool(r.get("away")), "last_seen": r.get("last_seen")}
         if info["exists"]:
             self._known[name.lower()] = info["user"]
             self.online[info["user"]] = info["online"]

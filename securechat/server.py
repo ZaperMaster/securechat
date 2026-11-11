@@ -141,6 +141,10 @@ MAX_DEVICES = 6
 MAX_OPKS = 100
 
 
+# Estado que ven los demás: en línea, ausente o invisible (aparece desconectado)
+STATUSES = ("online", "away", "invisible")
+
+
 class RelayServer:
     def __init__(self, db_path: Path | None = None, queue_dir: Path | None = None,
                  access_code: str | None = None, email_sender=None):
@@ -167,6 +171,7 @@ class RelayServer:
                     "name": v["name"], "key": b64d(v["key"]), "email": v.get("email"),
                     "keystore": v.get("keystore"), "last_seen": v.get("last_seen"),
                     "hide_last_seen": v.get("hide_last_seen", False), "push": v.get("push", []),
+                    "status": v.get("status", "online"),
                     "devices": v.get("devices", {})}
         if queue_dir and queue_dir.exists():
             for f in queue_dir.glob("*__*.json"):
@@ -181,6 +186,7 @@ class RelayServer:
         data = {c: {"name": r["name"], "key": b64e(r["key"]), "email": r.get("email"),
                     "keystore": r.get("keystore"), "last_seen": r.get("last_seen"),
                     "hide_last_seen": r.get("hide_last_seen", False), "push": r.get("push", []),
+                    "status": r.get("status", "online"),
                     "devices": r.get("devices", {})}
                 for c, r in self.registry.items()}
         tmp = self.db_path.with_suffix(".tmp")
@@ -321,7 +327,7 @@ class RelayServer:
             for d, conn in list(mine.items()):
                 if d != device:
                     await _send(conn, type="my-devices", devices=[x for x in r["devices"] if x != d])
-            if first:
+            if first and r.get("status") != "invisible":
                 await self._presence(c, True)
 
             async for raw in ws:
@@ -370,9 +376,19 @@ class RelayServer:
                     self.registry[c]["push"] = [x for x in subs if x["endpoint"] != msg.get("endpoint")]
                     self._save()
                 elif t == "privacy":
+                    reg = self.registry[c]
                     hide = not bool(msg.get("last_seen", True))
-                    if self.registry[c].get("hide_last_seen") != hide:
-                        self.registry[c]["hide_last_seen"] = hide
+                    changed = reg.get("hide_last_seen") != hide
+                    reg["hide_last_seen"] = hide
+                    status = msg.get("status")
+                    if status in STATUSES and reg.get("status", "online") != status:
+                        if status == "invisible":
+                            # Para los demás, se acaba de desconectar
+                            reg["last_seen"] = int(time.time())
+                        reg["status"] = status
+                        changed = True
+                        await self._presence(c, status != "invisible")
+                    if changed:
                         self._save()
                 elif t == "keystore":
                     try:
@@ -401,17 +417,20 @@ class RelayServer:
                     log.info("%s desconectado de %s", user, device)
                     if not mine:
                         self.online.pop(c, None)
-                        self.registry[c]["last_seen"] = int(time.time())
-                        self._save()
-                        await self._presence(c, False)
+                        if self.registry[c].get("status") != "invisible":
+                            # Invisible: la última conexión se queda donde estaba
+                            self.registry[c]["last_seen"] = int(time.time())
+                            self._save()
+                            await self._presence(c, False)
 
     async def _presence(self, c: str, online: bool) -> None:
         """Avisa a quien ha hablado con este usuario de que entra o sale."""
         r = self.registry[c]
         last = None if online or r.get("hide_last_seen") else r.get("last_seen")
+        away = online and r.get("status") == "away"
         for other in self.related.get(c, ()):
             for conn in list(self.online.get(other, {}).values()):
-                await _send(conn, type="presence", user=r["name"], online=online, last_seen=last)
+                await _send(conn, type="presence", user=r["name"], online=online, away=away, last_seen=last)
 
     # ------------------------------------------------------------ directorio
 
@@ -422,8 +441,9 @@ class RelayServer:
         known = self.registry.get(canon(name))
         if known is None:
             return {"exists": False, "user": None, "online": False}
-        online = bool(self.online.get(canon(name)))
-        info = {"exists": True, "user": known["name"], "online": online}
+        status = known.get("status", "online")
+        online = bool(self.online.get(canon(name))) and status != "invisible"
+        info = {"exists": True, "user": known["name"], "online": online, "away": online and status == "away"}
         if not online and not known.get("hide_last_seen") and known.get("last_seen"):
             info["last_seen"] = known["last_seen"]
         return info

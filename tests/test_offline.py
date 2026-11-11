@@ -212,3 +212,32 @@ def test_push_notification_only_for_real_messages(tmp_path):
         assert relay.pusher.public_key  # clave pública VAPID para el navegador
         await alice.close(); srv.close()
     run(main())
+
+
+def test_away_and_invisible_status(tmp_path):
+    async def main():
+        srv, url = await start(RelayServer())
+        alice = await client(url, "alice", SigningKey.generate(), tmp_path)
+        bob = await client(url, "bob", SigningKey.generate(), tmp_path)
+        assert (await alice.lookup("bob"))["online"] is True
+
+        await bob._send(type="privacy", last_seen=True, status="away")
+        await asyncio.sleep(0.05)
+        info = await alice.lookup("bob")
+        assert info["online"] is True and info["away"] is True
+
+        # Invisible: conectado, pero los demás lo ven desconectado
+        await bob._send(type="privacy", last_seen=True, status="invisible")
+        await asyncio.sleep(0.05)
+        info = await alice.lookup("bob")
+        assert info["online"] is False and info["away"] is False
+        seen = info["last_seen"]
+
+        # Al salir siendo invisible, su última conexión no se mueve
+        await asyncio.sleep(1.1)
+        await bob.close()
+        await asyncio.sleep(0.05)
+        assert (await alice.lookup("bob"))["last_seen"] == seen
+        await alice.close()
+        srv.close()
+    run(main())

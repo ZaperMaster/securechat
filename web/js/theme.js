@@ -30,6 +30,7 @@ window.applyTheme = function (id) {
 // ---------------------------------------------------------------- preferencias
 
 const DEFAULT_PREFS = {
+  status: "online",    // online | away | invisible
   accent: null,        // null = el color del tema
   wall: "dots",        // fondo de los chats
   wallImage: null,     // data: URL de la foto de fondo (redimensionada)

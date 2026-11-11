@@ -833,3 +833,22 @@ dialog menu button { border-radius: 10px; }
   .sidebar, .chat { border-radius: 0; box-shadow: none; border: 0; }
   .app { padding: 0; gap: 0; }
 }
+
+/* Estado (en línea / ausente / invisible) y lista de personas al crear grupo */
+.status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--ok, #2f9e6b); }
+.status-dot.away { background: #d99a1e; }
+.status-dot.invisible { background: transparent; box-shadow: inset 0 0 0 2px var(--muted); }
+.status-seg button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+.me-avatar-wrap { position: relative; display: inline-flex; flex: none; }
+.me-avatar-wrap .status-dot { position: absolute; right: -2px; bottom: -2px; width: 11px; height: 11px; border: 2px solid var(--panel); box-sizing: content-box; }
+.me-avatar-wrap .status-dot.invisible { background: var(--panel); }
+.status .away { color: #b7801a; font-weight: 500; }
+.pick-list { display: grid; gap: 2px; max-height: 240px; overflow-y: auto; margin: 8px 0; border: 1px solid var(--line); border-radius: 12px; padding: 4px; background: var(--panel-2); }
+.pick-row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 9px; cursor: pointer; }
+.pick-row[hidden] { display: none; }
+.pick-row:hover { background: var(--panel); }
+.pick-row input { width: 18px; height: 18px; accent-color: var(--accent); flex: none; margin: 0; }
+.pick-row .avatar { width: 32px; height: 32px; border-radius: 11px; font-size: 13px; }
+.pick-names { display: grid; min-width: 0; }
+.pick-names strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-names small { color: var(--muted); font-size: 12px; }

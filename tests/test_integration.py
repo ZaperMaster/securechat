@@ -216,7 +216,8 @@ def test_lookup_and_case_insensitive_names():
         srv, url, _ = await start_server()
         alice = await new_client(url, "Alice.Dev")
         bob = await new_client(url, "bob")
-        assert await bob.lookup("alice.dev") == {"exists": True, "user": "Alice.Dev", "online": True}
+        info = await bob.lookup("alice.dev")
+        assert (info["exists"], info["user"], info["online"], info["away"]) == (True, "Alice.Dev", True, False)
         assert (await bob.lookup("nadie"))["exists"] is False
         assert (await bob.lookup("../etc"))["exists"] is False
         # Escribir el nombre con otras mayúsculas llega a la misma persona

@@ -201,7 +201,10 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   updateTitle();
   if (connected) onConnected();
   else reconnect();
+  if (!store.get(`sc:profile:${me.toLowerCase()}`)) showMyProfile({ welcome: true });
 }
+
+const sendPrivacy = () => client?.setPrivacy({ lastSeen: prefs().lastSeen, status: prefs().status });
 
 const wsUrl = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;
 
@@ -234,7 +237,7 @@ async function reconnect() {
 
 function onConnected() {
   setupPush();
-  client.setPrivacy({ lastSeen: prefs().lastSeen });
+  sendPrivacy();
   // Copia de la clave cifrada con tu contraseña: permite iniciar sesión desde otro dispositivo
   const blob = store.get(idKey(me));
   if (blob) { try { client.send({ type: "keystore", blob }); } catch { /* se reintentará */ } }
@@ -466,6 +469,7 @@ function onEvent(ev) {
       break;
     case "presence":
       chat(ev.peer).online = ev.text === "online";
+      chat(ev.peer).away = !!ev.content?.away;
       if (ev.content?.lastSeen) chat(ev.peer).lastSeen = ev.content.lastSeen;
       if (ev.text === "online") flushAll();
       if (ev.peer === active) renderHeader();
@@ -797,6 +801,7 @@ async function onNewChat(ev) {
     if (!info.exists) return showNewChatError(`No existe ningún usuario @${name}.`);
     input.value = "";
     chat(info.user).online = info.online;
+    chat(info.user).away = info.away;
     chat(info.user).lastSeen = info.lastSeen;
     openChat(info.user);
   } catch (e) {
@@ -828,6 +833,7 @@ async function openChat(conv) {
   // Contacto: miramos si está conectado y su "última vez"
   client.lookup(conv).then((info) => {
     chat(conv).online = info.online;
+    chat(conv).away = info.away;
     chat(conv).lastSeen = info.lastSeen;
     if (active === conv) renderHeader();
   }).catch(() => {});
@@ -1152,7 +1158,7 @@ function input(value, { max = 64, placeholder = "" } = {}) {
   return i;
 }
 
-function showMyProfile() {
+function showMyProfile({ welcome = false } = {}) {
   let avatar = profile.avatar;
   const preview = setAvatar(text("", "span", "avatar xl"), profile.name || me, avatar);
   const fileIn = document.createElement("input");
@@ -1176,6 +1182,22 @@ function showMyProfile() {
   btns.append(change, remove, fileIn);
   head.append(preview, btns);
 
+  const save = () => {
+    profile = { name: nameIn.value.trim().slice(0, 64) || me, bio: bioIn.value.trim().slice(0, 140), avatar };
+    if (!store.set(`sc:profile:${me.toLowerCase()}`, profile)) profile.avatar = null;
+    client.setProfile(profile, client.contacts.all().map((c) => c.name));
+    renderMe();
+  };
+  if (welcome) {
+    // Primera vez: solo nombre visible y foto, sin distraer con lo demás
+    dialog("¡Bienvenido a SecureChat!", [
+      text("Elige cómo te verán los demás. Puedes cambiarlo cuando quieras desde Mi perfil.", "p", "hint"),
+      head,
+      field("Tu nombre", nameIn, `Es el nombre que verá la gente. Tu usuario seguirá siendo @${me}.`),
+    ], [["Ahora no", save], ["Guardar", save]]);
+    nameIn.select();
+    return;
+  }
   dialog("Mi perfil", [
     head,
     field("Nombre visible", nameIn),
@@ -1212,15 +1234,8 @@ async function resizeImage(file, size, square) {
 function advancedSecurityMine() {
   const d = document.createElement("details");
   d.className = "advanced";
-  d.append(text("Seguridad avanzada", "summary"),
-    text("Huella de tu clave:", "p", "hint"),
-    text(P.fingerprint(identity.publicKey), "p", "mono"));
-  const exp = text("Exportar clave (identity.json)", "button", "chip");
-  exp.type = "button";
-  exp.onclick = () => download(`${me}-identity.json`, JSON.stringify(store.get(idKey(me)), null, 2));
-  d.append(exp, text("Sirve para usar tu misma cuenta en la versión de terminal. Va cifrada con tu contraseña.", "p", "hint"));
   const devBox = text("Cargando…", "div", "member-list");
-  d.append(text("Tus dispositivos", "h3", "settings-h"), devBox);
+  d.append(text("Tus dispositivos", "summary"), devBox);
   d.addEventListener("toggle", async () => {
     if (!d.open || !connected) return;
     try {
@@ -1433,7 +1448,7 @@ function showNewGroup() {
   const chosen = [];
   const chips = text("", "div", "chosen");
   const err = text("", "p", "error");
-  const draw = () => chips.replaceChildren(...chosen.map((u) => {
+  let draw = () => chips.replaceChildren(...chosen.map((u) => {
     const b = withIcon("close", displayName(u), "button", "chip removable", true);
     b.type = "button";
     b.onclick = () => { chosen.splice(chosen.indexOf(u), 1); draw(); };
@@ -1459,9 +1474,47 @@ function showNewGroup() {
   memberIn.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } };
   const row = text("", "div", "add-row");
   row.append(memberIn, addBtn);
+
+  // Gente con la que ya has hablado, por orden alfabético: se marca con un clic
+  const known = new Map();
+  for (const c of client.contacts.all()) known.set(c.name.toLowerCase(), c.name);
+  for (const conv of chats.keys()) if (!isGroup(conv)) known.set(conv.toLowerCase(), conv);
+  known.delete(me.toLowerCase());
+  const people = [...known.values()].sort((a, b) => displayName(a).localeCompare(displayName(b), "es", { sensitivity: "base" }));
+  const pick = text("", "div", "pick-list");
+  const pickRows = people.map((u) => {
+    const l = text("", "label", "pick-row");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.onchange = () => {
+      const i = chosen.findIndex((x) => same(x, u));
+      if (cb.checked && i < 0) chosen.push(u);
+      if (!cb.checked && i >= 0) chosen.splice(i, 1);
+      draw();
+    };
+    const names = text("", "span", "pick-names");
+    names.append(text(displayName(u), "strong"), text(`@${u}`, "small"));
+    l.append(cb, setAvatar(text("", "span", "avatar"), displayName(u), avatarOf(u)), names);
+    l.dataset.search = `${displayName(u)} ${u}`.toLowerCase();
+    return [u, l, cb];
+  });
+  pick.append(...pickRows.map((r) => r[1]));
+  // Al escribir, la lista se filtra; si no está, se añade con «Añadir»
+  memberIn.oninput = () => {
+    const q = memberIn.value.trim().replace(/^@/, "").toLowerCase();
+    for (const [, l] of pickRows) l.hidden = !!q && !l.dataset.search.includes(q);
+  };
+  const baseDraw = draw;
+  draw = () => {
+    baseDraw();
+    for (const [u, , cb] of pickRows) cb.checked = chosen.some((x) => same(x, u));
+  };
+
   dialog("Nuevo grupo", [
     field("Nombre del grupo", nameIn),
-    text("Miembros", "h3", "settings-h"), row, err, chips,
+    text("Miembros", "h3", "settings-h"), row, err,
+    people.length ? pick : text("Aún no has hablado con nadie: escribe su @usuario y pulsa Añadir.", "p", "hint"),
+    chips,
     text("Cada mensaje del grupo se cifra por separado para cada miembro: el servidor no sabe que el grupo existe.", "p", "hint"),
   ], [["Cancelar"], ["Crear grupo", () => {
     if (!connected) { alert("Sin conexión: espera a que vuelva."); return; }
@@ -1514,6 +1567,35 @@ function showPeerProfile(peer) {
 
 const ACCENTS = ["#4f46e5", "#7c3aed", "#db2777", "#e11d48", "#ea580c", "#ca8a04", "#16a34a", "#0d9488", "#0284c7", "#475569"];
 const WALLS = [["dots", "Puntos"], ["plain", "Liso"], ["grid", "Cuadrícula"], ["diagonal", "Rayas"], ["bubbles", "Burbujas"], ["gradient", "Degradado"], ["image", "Tu foto"]];
+
+const STATUS_OPTS = [
+  ["online", "En línea", "Los demás ven que estás conectado."],
+  ["away", "Ausente", "Te ven conectado pero marcado como ausente."],
+  ["invisible", "Invisible", "Te ven desconectado aunque uses la app; tu última conexión no se actualiza."],
+];
+
+/** Selector En línea / Ausente / Invisible (se aplica al momento). */
+function statusPicker() {
+  const box = text("", "div");
+  const g = text("", "div", "segmented status-seg");
+  const hint = text("", "p", "hint");
+  const paint = () => {
+    const cur = prefs().status;
+    for (const b of g.children) b.setAttribute("aria-pressed", String(b.value === cur));
+    hint.textContent = STATUS_OPTS.find((o) => o[0] === cur)?.[2] || "";
+  };
+  for (const [value, label] of STATUS_OPTS) {
+    const b = text("", "button");
+    b.type = "button";
+    b.value = value;
+    b.append(text("", "span", `status-dot ${value}`), label);
+    b.onclick = () => { window.SC_SET_PREFS({ ...prefs(), status: value }); sendPrivacy(); paint(); renderMe(); };
+    g.append(b);
+  }
+  paint();
+  box.append(g, hint);
+  return box;
+}
 
 function showSettings() {
   const p = prefs();
@@ -1609,7 +1691,7 @@ function showSettings() {
     cb.checked = !!p[key];
     cb.onchange = () => {
       setPref({ [key]: cb.checked });
-      if (key === "lastSeen") { client?.setPrivacy({ lastSeen: cb.checked }); renderHeader(); }
+      if (key === "lastSeen") { sendPrivacy(); renderHeader(); }
       if (key === "notifications") { if (cb.checked) askNotifications(), setupPush(); else removePush(); }
     };
     const t = text("", "span");
@@ -1619,15 +1701,17 @@ function showSettings() {
   };
 
   dialog("Personalizar", [
+    text("Tu estado", "h3", "settings-h"), statusPicker(),
     text("Tema", "h3", "settings-h"), themes,
     text("Color principal", "h3", "settings-h"), colors,
     text("Fondo de los chats", "h3", "settings-h"), walls,
     text("Tamaño de letra", "h3", "settings-h"), seg([[13, "Pequeña"], [15, "Normal"], [17, "Grande"], [19, "Enorme"]], "font"),
     text("Forma de las burbujas", "h3", "settings-h"), seg([[22, "Redondas"], [14, "Suaves"], [4, "Rectas"]], "radius"),
-    text("Privacidad y avisos", "h3", "settings-h"),
-    toggle("readReceipts", "Confirmaciones de lectura", "Si las desactivas, los demás no verán el doble check azul."),
-    toggle("typing", "Mostrar «escribiendo…»", "Si lo quitas, los demás no verán cuándo escribes."),
-    toggle("lastSeen", "Compartir «última vez»", "Si lo quitas, nadie verá a qué hora te conectaste por última vez (y tú tampoco la de los demás)."),
+    text("Privacidad", "h3", "settings-h"),
+    toggle("typing", "Mostrar que estoy escribiendo", "Si lo quitas, los demás no verán «escribiendo…» cuando escribes."),
+    toggle("readReceipts", "Mostrar que he leído (visto)", "Si lo quitas, los demás no verán el doble check azul cuando leas sus mensajes."),
+    toggle("lastSeen", "Mostrar mi última conexión", "Si lo quitas, nadie verá a qué hora te conectaste por última vez (y tú tampoco la de los demás)."),
+    text("Avisos", "h3", "settings-h"),
     toggle("notifications", "Notificaciones", "Aviso cuando llega un mensaje con la app en segundo plano."),
     toggle("enterSends", "Enviar con Intro", "Si lo quitas, Intro hace salto de línea en el ordenador."),
   ]);
@@ -1682,6 +1766,9 @@ function lastSeenText(ts) {
 function renderMe() {
   $("me-name").textContent = profile.name || me;
   setAvatar($("me-avatar"), profile.name || me, profile.avatar);
+  const st = STATUS_OPTS.find((o) => o[0] === prefs().status) || STATUS_OPTS[0];
+  $("me-status").className = `status-dot ${st[0]}`;
+  $("me-status").title = st[1];
 }
 
 function renderContacts() {
@@ -1742,7 +1829,7 @@ function renderHeader() {
     } else {
       const online = ch.online === true;
       const c = client.contacts.get(active);
-      status = online ? text("en línea", "span", "lock")
+      status = online ? text(ch.away ? "ausente" : "en línea", "span", ch.away ? "away" : "lock")
         : text((prefs().lastSeen && lastSeenText(ch.lastSeen)) || c?.bio || `@${active}`, "span");
     }
     $("peer-status").replaceChildren(status);
@@ -2002,14 +2089,6 @@ function dialog(title, body, actions = [["Cerrar"]]) {
     return b;
   }));
   if (!$("dialog").open) $("dialog").showModal();
-}
-
-function download(name, content) {
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([content], { type: "application/json" }));
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 // ------------------------------------------------------------- arranque

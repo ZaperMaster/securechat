@@ -208,7 +208,7 @@ export class ChatClient {
   async lookup(name) {
     const r = await this.request({ type: "lookup", user: name }, 5000);
     if (r.exists) { this.known.set(name.toLowerCase(), r.user); this.online.set(r.user, r.online); }
-    return { exists: r.exists, user: r.user, online: r.online, lastSeen: r.last_seen ?? null };
+    return { exists: r.exists, user: r.user, online: r.online, away: !!r.away, lastSeen: r.last_seen ?? null };
   }
 
   async resolve(name) {
@@ -323,8 +323,9 @@ export class ChatClient {
   removePushSubscription(endpoint) { try { this.send({ type: "push-unsub", endpoint }); } catch { /* */ } }
 
   /** Privacidad: si ocultas tu "última vez", el servidor no la comparte con nadie. */
-  setPrivacy({ lastSeen }) {
-    try { this.send({ type: "privacy", last_seen: !!lastSeen }); } catch { /* se envía al reconectar */ }
+  /** status: "online" | "away" | "invisible" (invisible = los demás te ven desconectado) */
+  setPrivacy({ lastSeen, status = "online" }) {
+    try { this.send({ type: "privacy", last_seen: !!lastSeen, status }); } catch { /* se envía al reconectar */ }
   }
 
   /** Cambia mi perfil y se lo envía (cifrado) a mis contactos. */
@@ -350,7 +351,7 @@ export class ChatClient {
     if (msg.type === "deliver") return this.onDeliver(msg.from, msg.payload, msg.queued_at);
     if (msg.type === "presence") {
       this.online.set(msg.user, msg.online);
-      return this.emit("presence", msg.user, msg.online ? "online" : "offline", { lastSeen: msg.last_seen ?? null });
+      return this.emit("presence", msg.user, msg.online ? "online" : "offline", { lastSeen: msg.last_seen ?? null, away: !!msg.away });
     }
     if (msg.type === "my-devices") {
       this.myDevices = (msg.devices || []).filter((d) => d !== this.device);
