@@ -864,3 +864,8 @@ dialog menu button { border-radius: 10px; }
 .option-text strong { font-weight: 600; }
 .option-text small { color: var(--muted); font-size: 12.5px; }
 .option-chev { width: 18px; height: 18px; color: var(--muted); flex: none; }
+
+/* @usuario visible bajo el nombre */
+.me-handle { color: var(--accent); font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.me-info .conn { font-size: 11.5px; }
+.peer-sub .handle { color: var(--accent); font-weight: 600; }

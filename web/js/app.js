@@ -95,7 +95,7 @@ async function onLogin(ev) {
       const blob = { ...P.saveIdentity(P.newIdentitySeed(), pass), username: name };
       identity = P.loadIdentity(blob, pass);
       // La cuenta solo se guarda si el servidor acepta el nombre (y el correo)
-      await startApp(name, { mustConnect: true, email: $("login-email").value.trim() || null, blob });
+      await startApp(name, { mustConnect: true, email: $("login-email").value.trim() || null, blob, isNew: true });
     } else {
       const blob = await findKeystore(name);
       if (!blob) throw new Error("Usuario o contraseña incorrectos.");
@@ -168,7 +168,7 @@ function saveDeviceData(username, data) {
   });
 }
 
-async function startApp(username, { mustConnect = false, email = null, blob = null } = {}) {
+async function startApp(username, { mustConnect = false, email = null, blob = null, isNew = false } = {}) {
   const contacts = new Contacts(store.get(`sc:contacts:${username.toLowerCase()}`) || {}, (data) => {
     store.set(`sc:contacts:${(me || username).toLowerCase()}`, data);
     renderContacts();
@@ -201,7 +201,8 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   updateTitle();
   if (connected) onConnected();
   else reconnect();
-  if (!store.get(`sc:profile:${me.toLowerCase()}`)) showMyProfile({ welcome: true });
+  // Solo al crear la cuenta: al volver a entrar o desde otro dispositivo no se pregunta
+  if (isNew) showMyProfile({ welcome: true });
 }
 
 const sendPrivacy = () => client?.setPrivacy({ lastSeen: prefs().lastSeen, status: prefs().status });
@@ -1799,6 +1800,7 @@ function lastSeenText(ts) {
 
 function renderMe() {
   $("me-name").textContent = profile.name || me;
+  $("me-handle").textContent = `@${me}`;
   setAvatar($("me-avatar"), profile.name || me, profile.avatar);
   const st = STATUS_OPTS.find((o) => o[0] === prefs().status) || STATUS_OPTS[0];
   $("me-status").className = `status-dot ${st[0]}`;
@@ -1863,8 +1865,11 @@ function renderHeader() {
     } else {
       const online = ch.online === true;
       const c = client.contacts.get(active);
-      status = online ? text(ch.away ? "ausente" : "en línea", "span", ch.away ? "away" : "lock")
-        : text((prefs().lastSeen && lastSeenText(ch.lastSeen)) || c?.bio || `@${active}`, "span");
+      const detail = online ? text(ch.away ? "ausente" : "en línea", "span", ch.away ? "away" : "lock")
+        : text((prefs().lastSeen && lastSeenText(ch.lastSeen)) || c?.bio || "", "span");
+      status = text("", "span", "peer-sub");
+      status.append(text(`@${active}`, "span", "handle"));
+      if (detail.textContent) status.append(text(" · ", "span"), detail);
     }
     $("peer-status").replaceChildren(status);
   }
