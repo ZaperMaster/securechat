@@ -16,7 +16,7 @@ for (const f of ["libsodium-sumo.js", "libsodium-wrappers.js"]) {
   fn.call(globalThis, undefined, undefined, undefined, req, dir);
 }
 const P = await import("../web/js/protocol.js");
-const { ChatClient, Contacts } = await import("../web/js/client.js");
+const { ChatClient, Contacts, padJson, decodeContent } = await import("../web/js/client.js");
 await P.ready(globalThis.sodium);
 
 const [mode, ...args] = process.argv.slice(2);
@@ -32,6 +32,11 @@ if (mode === "keystore") {
   out(P.b64e(P.loadIdentity(JSON.parse(stdin()), args[0]).publicKey));
 } else if (mode === "safety") {
   out(P.safetyNumber(args[0], P.b64d(args[1]), args[2], P.b64d(args[3])) + "\n" + P.fingerprint(P.b64d(args[1])));
+} else if (mode === "pad") {
+  // Una línea JSON por mensaje; devuelve el relleno de cada uno
+  out(stdin().split(/\r?\n/).filter(Boolean).map((l) => padJson(l)).join("\n"));
+} else if (mode === "decode") {
+  out(decodeContent(stdin()));
 } else if (mode === "kdf") {
   out(P.b64e(P.kdf(P.b64d(args[0]), args[1], P.b64d(args[2]))));
 } else if (mode === "chat" || mode === "listen") {

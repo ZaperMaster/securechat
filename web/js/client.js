@@ -12,6 +12,24 @@ export const IMAGE_MIME = ["image/png", "image/jpeg", "image/gif", "image/webp"]
 export const VIDEO_MIME = ["video/mp4", "video/webm", "video/quicktime"];
 export const MAX_MEDIA = 8 * 1024 * 1024;
 
+// Relleno (padding): todo mensaje cifrado ocupa uno de estos tamaños, para que quien
+// vea el tráfico no pueda distinguir un «ok» de un párrafo por su longitud.
+const PAD_BUCKETS = [256, 1024, 4096, 16384, 65536];
+const PAD_BLOCK = 65536; // a partir de aquí (fotos, archivos), múltiplos de 64 KB
+const PAD_FIELD = 9;     // ,"pad":""
+
+/** Añade un campo "pad" de espacios para que el JSON (en bytes UTF-8) mida justo un tamaño fijo. */
+export function padJson(json) {
+  if (!json.startsWith("{") || !json.endsWith("}") || json.length < 3) return json;
+  const len = new TextEncoder().encode(json).length;
+  const need = len + PAD_FIELD;
+  const target = PAD_BUCKETS.find((b) => b >= need) ?? Math.ceil(need / PAD_BLOCK) * PAD_BLOCK;
+  return `${json.slice(0, -1)},"pad":"${" ".repeat(target - need)}"}`;
+}
+
+export const TIMER_OPTIONS = [0, 86400, 604800, 7776000];
+const CALL_KINDS = new Set(["offer", "answer", "reject", "end", "busy", "taken", "ring", "joined", "here", "left"]);
+
 export const AUDIO_MIME = ["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/aac"];
 const ID_RE = /^[A-Za-z0-9_-]{8,32}$/;
 const NAME_OK = /^[A-Za-z0-9][A-Za-z0-9_.-]{1,30}[A-Za-z0-9_]$/;
@@ -31,7 +49,9 @@ export function decodeContent(plaintext) {
   if (!c || typeof c !== "object" || typeof c.t !== "string") return { t: "text", body: plaintext };
   const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
   const id = (v) => (typeof v === "string" && ID_RE.test(v) ? v : null);
-  const common = { mid: id(c.mid), g: id(c.g), fwd: c.fwd === true ? true : null };
+  const common = { mid: id(c.mid), g: id(c.g), fwd: c.fwd === true ? true : null,
+    exp: Number.isInteger(c.exp) && TIMER_OPTIONS.includes(c.exp) && c.exp > 0 ? c.exp : null,
+    once: c.once === true && (c.t === "image" || c.t === "video") ? true : null };
   if (c.reply && typeof c.reply === "object" && id(c.reply.mid)) {
     common.reply = { mid: c.reply.mid, from: str(c.reply.from, 32), text: str(c.reply.text, 120) };
   }
@@ -45,6 +65,29 @@ export function decodeContent(plaintext) {
       if (!allowed.includes(mime) || typeof c.data !== "string") return out({ t: "unsupported" });
       const dur = Number.isFinite(c.dur) ? Math.max(0, Math.min(3600, c.dur)) : undefined;
       return out({ t: c.t, mime, name: str(c.name, 120), data: c.data, dur });
+    }
+    case "file": {
+      if (typeof c.data !== "string") return out({ t: "unsupported" });
+      const size = Number.isFinite(c.size) ? Math.max(0, Math.min(MAX_MEDIA, Math.round(c.size))) : undefined;
+      return out({ t: "file", mime: str(c.mime, 100).split(";")[0] || "application/octet-stream",
+        name: str(c.name, 120) || "archivo", size, data: c.data });
+    }
+    case "poll": {
+      const opts = Array.isArray(c.opts) ? c.opts.filter((o) => typeof o === "string" && o.trim()).map((o) => o.slice(0, 100)).slice(0, 12) : [];
+      if (opts.length < 2) return out({ t: "unsupported" });
+      return out({ t: "poll", q: str(c.q, 200), opts, multi: c.multi === true });
+    }
+    case "vote": {
+      if (!id(c.target)) return { t: "ignore" };
+      const choices = Array.isArray(c.choices) ? [...new Set(c.choices.filter((n) => Number.isInteger(n) && n >= 0 && n < 12))] : [];
+      return out({ t: "vote", target: c.target, choices });
+    }
+    case "timer": return TIMER_OPTIONS.includes(c.secs) ? out({ t: "timer", secs: c.secs }) : { t: "ignore" };
+    case "join": return id(c.g) && typeof c.token === "string" ? { t: "join", g: c.g, token: c.token.slice(0, 64) } : { t: "ignore" };
+    case "call": {
+      if (!CALL_KINDS.has(c.kind) || !id(c.id)) return { t: "ignore" };
+      return { t: "call", kind: c.kind, id: c.id, sdp: str(c.sdp, 30000), video: c.video === true, dev: str(c.dev, 40),
+        ...(id(c.g) ? { g: c.g } : {}) };
     }
     case "profile": {
       const avatar = typeof c.avatar === "string" && c.avatar.length < 200000 ? c.avatar : null;
@@ -64,8 +107,9 @@ export function decodeContent(plaintext) {
       if (!id(c.g)) return { t: "ignore" };
       const members = Array.isArray(c.members) ? [...new Set(c.members.filter((m) => NAME_OK.test(m)))].slice(0, 64) : [];
       const avatar = typeof c.avatar === "string" && c.avatar.length < 200000 ? c.avatar : null;
+      const inGroup = (list) => (Array.isArray(list) ? [...new Set(list.filter((m) => members.includes(m)))] : []);
       return { t: "group", g: c.g, name: str(c.name, 64).trim() || "Grupo", members, admin: str(c.admin, 32),
-        v: Number.isFinite(c.v) ? c.v : 0, avatar };
+        admins: inGroup(c.admins), muted: inGroup(c.muted), v: Number.isFinite(c.v) ? c.v : 0, avatar };
     }
     case "group-leave": return id(c.g) ? { t: "group-leave", g: c.g } : { t: "ignore" };
     default: return out({ t: "unsupported" });
@@ -113,7 +157,7 @@ export class Contacts {
 }
 
 const DEVICE_CACHE_MS = 60_000;
-const SILENT_TYPES = new Set(["receipt", "profile", "typing", "group-leave"]);
+const SILENT_TYPES = new Set(["receipt", "profile", "typing", "group-leave", "vote", "join"]);
 
 /**
  * Protocolo v2 (ver securechat/ratchet.py): cada mensaje se cifra con Double Ratchet
@@ -275,6 +319,7 @@ export class ChatClient {
     const mine = user.toLowerCase() === this.name.toLowerCase();
     let info = mine ? null : await this.peerDevices(user);
     const targets = mine ? [...this.myDevices] : [...info.list];
+    plaintext = padJson(plaintext);
     const tried = new Set();
     const statuses = [];
     while (targets.length) {
@@ -354,7 +399,10 @@ export class ChatClient {
       return this.emit("presence", msg.user, msg.online ? "online" : "offline", { lastSeen: msg.last_seen ?? null, away: !!msg.away });
     }
     if (msg.type === "my-devices") {
+      const before = new Set(this.myDevices);
       this.myDevices = (msg.devices || []).filter((d) => d !== this.device);
+      const added = this.myDevices.filter((d) => !before.has(d));
+      if (added.length) this.emit("new_device", "", added.join(","));
       return;
     }
     if (req) return msg.type === "error" ? req.reject(new ClientError(msg.message || "error del servidor", msg.code)) : req.resolve(msg);

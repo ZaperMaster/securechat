@@ -429,6 +429,8 @@ class RelayServer:
         last = None if online or r.get("hide_last_seen") else r.get("last_seen")
         away = online and r.get("status") == "away"
         for other in self.related.get(c, ()):
+            if other == c:
+                continue  # las copias a mis otros dispositivos no me hacen "contacto" de mí mismo
             for conn in list(self.online.get(other, {}).values()):
                 await _send(conn, type="presence", user=r["name"], online=online, away=away, last_seen=last)
 

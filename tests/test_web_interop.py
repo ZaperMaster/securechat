@@ -174,3 +174,35 @@ def test_double_ratchet_between_python_and_javascript():
         proc.stdin.write('{"cmd": "quit"}\n')
         proc.stdin.flush()
         proc.wait(timeout=10)
+
+
+def test_padding_matches_python_and_hides_length():
+    from securechat.content import pad_json
+    samples = [{"t": "text", "body": "ok", "mid": "abcdefgh12"},
+               {"t": "text", "body": "un mensaje bastante más largo con tildes y ñ " * 6, "mid": "abcdefgh12"},
+               {"t": "text", "body": "x" * 5000},
+               {"t": "image", "mime": "image/png", "data": "A" * 70000}]
+    lines = [json.dumps(s, ensure_ascii=False) for s in samples]
+    web = js("pad", stdin="\n".join(lines)).split("\n")
+    py = [pad_json(line) for line in lines]
+    assert web == py
+    sizes = [len(x.encode("utf-8")) for x in py]
+    assert sizes == [256, 1024, 16384, 131072]
+    # Los dos mensajes de texto cortos miden lo mismo aunque el contenido sea distinto
+    assert len(pad_json(json.dumps({"t": "text", "body": "sí"})).encode()) == len(pad_json(json.dumps({"t": "text", "body": "hola, ¿qué tal?"})).encode())
+    # El relleno no cambia lo que se lee
+    assert json.loads(js("decode", stdin=web[0]))["body"] == "ok"
+
+
+def test_new_content_types_are_validated():
+    poll = json.loads(js("decode", stdin=json.dumps({"t": "poll", "q": "¿Pizza?", "opts": ["sí", "no", 3], "multi": True})))
+    assert poll == {"t": "poll", "q": "¿Pizza?", "opts": ["sí", "no"], "multi": True}
+    assert json.loads(js("decode", stdin=json.dumps({"t": "poll", "q": "x", "opts": ["solo una"]})))["t"] == "unsupported"
+    f = json.loads(js("decode", stdin=json.dumps({"t": "file", "mime": "text/html", "name": "a.html", "size": 10, "data": "QQ=="})))
+    assert f["t"] == "file" and f["name"] == "a.html"
+    assert json.loads(js("decode", stdin=json.dumps({"t": "timer", "secs": 123})))["t"] == "ignore"
+    assert json.loads(js("decode", stdin=json.dumps({"t": "text", "body": "hola", "exp": 86400})))["exp"] == 86400
+    assert "exp" not in json.loads(js("decode", stdin=json.dumps({"t": "text", "body": "hola", "exp": 5})))
+    call = json.loads(js("decode", stdin=json.dumps({"t": "call", "kind": "offer", "id": "abcdefgh12", "sdp": "v=0", "video": True})))
+    assert call["kind"] == "offer" and call["video"] is True
+    assert json.loads(js("decode", stdin=json.dumps({"t": "call", "kind": "hack", "id": "abcdefgh12"})))["t"] == "ignore"

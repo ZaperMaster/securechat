@@ -1,7 +1,7 @@
 // Interfaz web. Toda la criptografía ocurre aquí, en el navegador:
 // el servidor solo recibe mensajes ya cifrados (texto, fotos, vídeos y perfiles).
 
-import { ChatClient, ClientError, Contacts, IMAGE_MIME, MAX_MEDIA, VIDEO_MIME } from "./client.js";
+import { ChatClient, ClientError, Contacts, IMAGE_MIME, MAX_MEDIA, TIMER_OPTIONS, VIDEO_MIME } from "./client.js";
 import { EMOJIS, STICKERS } from "./emoji.js";
 import * as P from "./protocol.js";
 import { DeviceKeys } from "./ratchet.js";
@@ -205,6 +205,11 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   else reconnect();
   // Solo al crear la cuenta: al volver a entrar o desde otro dispositivo no se pregunta
   if (isNew) showMyProfile({ welcome: true });
+  if (isNew) seclog("Has creado tu cuenta en este dispositivo.");
+  else if (blob) seclog("Has iniciado sesión en este dispositivo.");
+  sweepExpired();
+  checkInvite();
+  runScheduled();
 }
 
 const sendPrivacy = () => client?.setPrivacy({ lastSeen: prefs().lastSeen, status: prefs().status });
@@ -484,6 +489,7 @@ function onEvent(ev) {
       if (ev.peer === active) renderHeader();
       break;
     case "presence":
+      if (same(ev.peer, me)) break; // mi propia presencia (por mis otros dispositivos): no es un chat
       chat(ev.peer).online = ev.text === "online";
       chat(ev.peer).away = !!ev.content?.away;
       if (ev.content?.lastSeen) chat(ev.peer).lastSeen = ev.content.lastSeen;
@@ -495,7 +501,12 @@ function onEvent(ev) {
       sysOnce(ev.peer, "Los mensajes y archivos de este chat están cifrados de extremo a extremo.");
       if (ev.peer === active) renderHeader();
       break;
+    case "new_device":
+      seclog("Se ha vinculado un dispositivo nuevo a tu cuenta.");
+      toast("Se ha vinculado un dispositivo nuevo a tu cuenta. Si no has sido tú, desvincúlalo en Mi perfil → Tus dispositivos.");
+      break;
     case "identity_changed":
+      seclog(`La clave de seguridad de @${ev.peer} ha cambiado.`);
       addMsg(ev.peer, { sys: `La clave de seguridad de @${ev.peer} ha cambiado. Si no ha cambiado de dispositivo, alguien podría estar suplantándole. Confírmalo con esa persona por otro medio.`, warn: true });
       break;
     case "warning":
@@ -532,8 +543,8 @@ function onSync(ev) {
   if (c.t === "group") {
     const existing = groups.get(c.g);
     if (!existing || c.v > existing.v) {
-      groups.set(c.g, { id: c.g, name: c.name, members: c.members, admin: c.admin, v: c.v, avatar: c.avatar,
-        left: !c.members.some((x) => same(x, me)) });
+      groups.set(c.g, { id: c.g, name: c.name, members: c.members, admin: c.admin, admins: c.admins, muted: c.muted, v: c.v, avatar: c.avatar,
+        left: !c.members.some((x) => same(x, me)), ...(existing?.invite ? { invite: existing.invite } : {}) });
       saveGroups();
       renderContacts();
     }
@@ -546,15 +557,19 @@ function onSync(ev) {
   }
   if (c.g && !groups.has(c.g)) return;
   const conv = c.g ? `#${c.g}` : peer;
-  if (c.t === "react" || c.t === "edit" || c.t === "delete") return applyAction(conv, me, c);
+  if (c.t === "react" || c.t === "edit" || c.t === "delete" || c.t === "vote") return applyAction(conv, me, c);
+  if (c.t === "timer") return setTimer(conv, c.secs);
+  if (c.t === "call" || c.t === "join") return;
   if (c.t === "typing" || c.t === "receipt" || c.t === "profile") return;
   if (c.mid && chat(conv).messages.some((m) => m.id === c.mid)) return; // ya lo tenemos
   const entry = { from: "me", content: { ...c, data: undefined }, status: "sent", to: [],
     ...(c.mid ? { id: c.mid } : {}), ...(ev.queuedAt ? { time: new Date(ev.queuedAt * 1000) } : {}),
     ...(isGroup(conv) ? { receipts: {} } : {}) };
-  if (c.t === "image" || c.t === "video" || c.t === "audio") {
+  if (c.exp) entry.expires = (entry.time ? entry.time.getTime() : Date.now()) + c.exp * 1000;
+  if (c.once) { addMsg(conv, entry); return; } // ver una vez: mis otros dispositivos no guardan la foto
+  if (MEDIA_TYPES.has(c.t)) {
     const bytes = sodium.from_base64(c.data, sodium.base64_variants.ORIGINAL);
-    entry.url = URL.createObjectURL(new Blob([bytes], { type: c.mime }));
+    entry.url = URL.createObjectURL(new Blob([bytes], { type: c.t === "file" ? "application/octet-stream" : c.mime }));
     entry.hasMedia = true;
     const m = addMsg(conv, entry);
     history?.putMedia(conv, m.id, bytes);
@@ -571,12 +586,16 @@ function memberOf(gid, user) {
 async function onIncoming(ev) {
   const c = ev.content;
   const sender = ev.peer;
+  if (c.t === "call") return onCallSignal(sender, c, ev.queuedAt);
+  if (c.t === "join") return onJoinRequest(sender, c);
   if (c.t === "group") return onGroupState(sender, c);
   if (c.t === "group-leave") return onGroupLeave(sender, c.g);
   if (c.g && !memberOf(c.g, sender)) return; // grupo desconocido o no es miembro: se ignora
+  if (c.g && isMutedIn(groups.get(c.g), sender) && !["typing", "receipt", "react", "vote", "delete"].includes(c.t)) return;
   const conv = c.g ? `#${c.g}` : sender;
   if (c.t === "typing") return showTyping(conv, sender, c.on);
-  if (c.t === "react" || c.t === "edit" || c.t === "delete") return applyAction(conv, sender, c);
+  if (c.t === "react" || c.t === "edit" || c.t === "delete" || c.t === "vote") return applyAction(conv, sender, c);
+  if (c.t === "timer") return setTimer(conv, c.secs, { who: sender });
   showTyping(conv, sender, false);
   if (c.mid && chat(conv).messages.some((m) => m.id === c.mid)) {
     sendReceipt(sender, [c.mid], "delivered", c.g); // repetido (se reenvió): solo confirmamos
@@ -588,9 +607,10 @@ async function onIncoming(ev) {
   }
   const entry = { from: "them", sender, content: { ...c, data: undefined }, read: false,
     ...(c.mid ? { id: c.mid } : {}), ...(ev.queuedAt ? { time: new Date(ev.queuedAt * 1000) } : {}) };
-  if (c.t === "image" || c.t === "video" || c.t === "audio") {
+  if (c.exp) entry.expires = (entry.time ? entry.time.getTime() : Date.now()) + c.exp * 1000;
+  if (MEDIA_TYPES.has(c.t)) {
     const bytes = sodium.from_base64(c.data, sodium.base64_variants.ORIGINAL);
-    entry.url = URL.createObjectURL(new Blob([bytes], { type: c.mime }));
+    entry.url = URL.createObjectURL(new Blob([bytes], { type: c.t === "file" ? "application/octet-stream" : c.mime }));
     entry.hasMedia = true;
     const m = addMsg(conv, entry);
     history?.putMedia(conv, m.id, bytes);
@@ -631,7 +651,13 @@ function applyAction(conv, sender, c) {
   const m = chat(conv).messages.find((x) => x.id === c.target);
   if (!m) return;
   const author = m.from === "me" ? me : (m.sender || conv);
-  if (c.t === "react") {
+  if (c.t === "vote") {
+    if (m.content?.t !== "poll") return;
+    const valid = c.choices.filter((n) => n < m.content.opts.length);
+    const v = m.content.multi ? valid : valid.slice(0, 1);
+    m.votes ??= {};
+    if (v.length) m.votes[sender.toLowerCase()] = v; else delete m.votes[sender.toLowerCase()];
+  } else if (c.t === "react") {
     m.reactions ??= {};
     if (c.emoji) m.reactions[sender.toLowerCase()] = c.emoji; else delete m.reactions[sender.toLowerCase()];
   } else if (!same(author, sender)) {
@@ -716,32 +742,48 @@ function markRead(conv) {
 }
 
 function notify(conv, sender, content) {
-  if (meta(conv).mute) return;
+  const mentioned = isGroup(conv) && content.t === "text" && mentionsMe(content.body);
+  if (meta(conv).mute && !mentioned) return;
   if (!document.hidden || !prefs().notifications || !("Notification" in window) || Notification.permission !== "granted") return;
   // No mostramos el contenido: la notificación podría verse con la pantalla bloqueada.
   const title = isGroup(conv) ? convName(conv) : displayName(sender);
   const who = isGroup(conv) ? `${displayName(sender)}: ` : "";
-  new Notification(title, { body: who + (content.t === "text" ? "Nuevo mensaje" : previewOf(content)), tag: conv });
+  new Notification(title, { body: who + (mentioned ? "Te ha mencionado" : content.t === "text" ? "Nuevo mensaje" : previewOf(content)), tag: conv });
 }
 
 // ------------------------------------------------------------------- grupos
 
 function groupState(g) {
-  return { t: "group", g: g.id, name: g.name, members: g.members, admin: g.admin, v: g.v, avatar: g.avatar || null };
+  return { t: "group", g: g.id, name: g.name, members: g.members, admin: g.admin, admins: adminsOf(g), muted: g.muted || [],
+    v: g.v, avatar: g.avatar || null };
 }
+
+/** Administradores del grupo (los grupos antiguos solo tenían uno). */
+const adminsOf = (g) => (g.admins?.length ? g.admins : g.admin ? [g.admin] : []);
+const isAdminOf = (g, u) => !!g && adminsOf(g).some((x) => same(x, u));
+const isMutedIn = (g, u) => !!g && (g.muted || []).some((x) => same(x, u));
+/** ¿Puedo escribir en esta conversación? (en un grupo me pueden haber silenciado) */
+const mutedHere = (conv) => isGroup(conv) && isMutedIn(groups.get(gidOf(conv)), me);
 
 /** Estado de un grupo recibido: solo lo acepta del administrador. */
 function onGroupState(sender, c) {
   const existing = groups.get(c.g);
   const valid = existing
-    ? same(sender, existing.admin) && c.v > existing.v
-    : same(sender, c.admin) && c.members.some((x) => same(x, sender));
+    ? isAdminOf(existing, sender) && c.v > existing.v
+    : (same(sender, c.admin) || c.admins.some((x) => same(x, sender))) && c.members.some((x) => same(x, sender));
   if (!valid) return;
   const conv = `#${c.g}`;
   const inside = c.members.some((x) => same(x, me));
   const wasInside = existing && !existing.left;
-  groups.set(c.g, { id: c.g, name: c.name, members: c.members, admin: c.admin, v: c.v, avatar: c.avatar, left: !inside });
+  groups.set(c.g, { id: c.g, name: c.name, members: c.members, admin: c.admin, admins: c.admins, muted: c.muted, v: c.v,
+    avatar: c.avatar, left: !inside, ...(existing?.invite ? { invite: existing.invite } : {}) });
   saveGroups();
+  if (existing && inside) {
+    const was = (list, u) => (list || []).some((x) => same(x, u));
+    for (const u of c.admins) if (!was(adminsOf(existing), u)) addMsg(conv, { sys: `${same(u, me) ? "Ahora eres" : `${displayName(u)} ahora es`} administrador del grupo.` });
+    for (const u of c.muted) if (!was(existing.muted, u)) addMsg(conv, { sys: same(u, me) ? `${displayName(sender)} te ha silenciado: solo puedes leer.` : `${displayName(sender)} ha silenciado a ${displayName(u)}.` });
+    for (const u of existing.muted || []) if (!was(c.muted, u) && c.members.some((x) => same(x, u))) addMsg(conv, { sys: same(u, me) ? "Ya puedes volver a escribir en el grupo." : `${displayName(u)} ya puede escribir.` });
+  }
   if (!existing && inside) addMsg(conv, { sys: `${displayName(sender)} te ha añadido al grupo «${c.name}».` });
   else if (wasInside && !inside) addMsg(conv, { sys: `${displayName(sender)} te ha sacado del grupo.`, warn: true });
   else if (existing && existing.name !== c.name) addMsg(conv, { sys: `${displayName(sender)} ha cambiado el nombre a «${c.name}».` });
@@ -761,10 +803,13 @@ function onGroupLeave(sender, gid) {
   g.members = g.members.filter((x) => !same(x, sender));
   addMsg(`#${gid}`, { sys: `${displayName(sender)} ha salido del grupo.` });
   // Si se fue el administrador, lo hereda el primer miembro (en orden alfabético)
-  if (same(sender, g.admin) && g.members.length) {
-    g.admin = [...g.members].sort((a, b) => a.localeCompare(b))[0];
-    if (same(g.admin, me) && !g.left) { g.v = Date.now(); queueAction(`#${gid}`, groupState(g)); }
+  g.admins = adminsOf(g).filter((x) => !same(x, sender));
+  g.muted = (g.muted || []).filter((x) => !same(x, sender));
+  if (!g.admins.length && g.members.length) {
+    g.admins = [[...g.members].sort((a, b) => a.localeCompare(b))[0]];
+    if (same(g.admins[0], me) && !g.left) { g.v = Date.now(); queueAction(`#${gid}`, groupState(g)); }
   }
+  g.admin = g.admins[0] || g.admin;
   saveGroups();
   renderContacts();
   if (active === `#${gid}`) renderChat();
@@ -901,9 +946,11 @@ async function sendTo(conv, content, { bytes = null, url = null } = {}) {
   }
   const mid = newId();
   const replying = conv === active ? replyingTo : null;
-  const full = { ...content, mid, ...(replying ? { reply: replying } : {}) };
+  const timer = meta(conv).timer || 0;
+  const full = { ...content, mid, ...(timer ? { exp: timer } : {}), ...(replying ? { reply: replying } : {}) };
   if (conv === active) cancelReply();
   const m = addMsg(conv, { id: mid, from: "me", content: { ...full, data: undefined }, status: "sending",
+    ...(timer ? { expires: Date.now() + timer * 1000 } : {}),
     to: targetsOf(conv), ...(isGroup(conv) ? { receipts: {} } : {}), ...(bytes ? { hasMedia: true, url } : {}) });
   if (bytes) await history?.putMedia(conv, mid, bytes);
   stopTyping();
@@ -972,7 +1019,10 @@ async function flushOutbox() {
           if (!isGroup(conv)) { setStatus(conv, m, "failed"); break; }
         }
       }
-      if (!m.to.length && m.status === "sending") setStatus(conv, m, "sent");
+      if (!m.to.length && m.status === "sending") {
+        setStatus(conv, m, "sent");
+        if (m.content.once) { history?.removeMedia(conv, m.id); if (m.url) URL.revokeObjectURL(m.url); delete m.url; m.hasMedia = false; save(conv, m); }
+      }
     }
   }
 }
@@ -1022,14 +1072,837 @@ function myDelete(conv, m, forAll) {
   renderContacts();
 }
 
-async function sendFile(file) {
+async function sendFile(file, asDoc = false, once = false) {
   if (!file || !active) return;
-  const isImage = IMAGE_MIME.includes(file.type), isVideo = VIDEO_MIME.includes(file.type);
-  if (!isImage && !isVideo) return addMsg(active, { sys: "Solo puedes enviar fotos (PNG, JPG, GIF, WebP) o vídeos (MP4, WebM, MOV).", warn: true }, { persist: false });
   if (file.size > MAX_MEDIA) return addMsg(active, { sys: `El archivo pesa ${(file.size / 1048576).toFixed(1)} MB. El máximo es 8 MB.`, warn: true }, { persist: false });
+  const isImage = IMAGE_MIME.includes(file.type), isVideo = VIDEO_MIME.includes(file.type);
   const bytes = new Uint8Array(await file.arrayBuffer());
-  await send({ t: isImage ? "image" : "video", mime: file.type, name: file.name.slice(0, 120) },
-    { bytes, url: URL.createObjectURL(file) });
+  if (!asDoc && (isImage || isVideo)) {
+    await send({ t: isImage ? "image" : "video", mime: file.type, name: file.name.slice(0, 120), ...(once ? { once: true } : {}) },
+      { bytes, url: URL.createObjectURL(file) });
+    return;
+  }
+  // Cualquier otro archivo viaja como documento: nunca se abre dentro de la app, solo se descarga
+  await send({ t: "file", mime: file.type || "application/octet-stream", name: file.name.slice(0, 120) || "archivo", size: file.size },
+    { bytes, url: null });
+}
+
+const MEDIA_TYPES = new Set(["image", "video", "audio", "file"]);
+
+function fmtSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1048576).toFixed(1).replace(".", ",")} MB`;
+}
+
+function downloadBytes(bytes, name) {
+  // Siempre como binario genérico: un HTML recibido nunca se ejecuta en nuestra web
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+// ------------------------------------------------------------- encuestas
+
+function showNewPoll() {
+  if (!active) return;
+  const q = input("", { max: 200, placeholder: "¿Qué quieres preguntar?" });
+  const optsBox = text("", "div", "poll-edit");
+  const more = withIcon("plus", "Añadir opción", "button", "chip");
+  more.type = "button";
+  const addOpt = () => {
+    const i = input("", { max: 100, placeholder: `Opción ${optsBox.children.length + 1}` });
+    optsBox.append(i);
+    more.hidden = optsBox.children.length >= 12;
+    return i;
+  };
+  addOpt();
+  addOpt();
+  more.onclick = () => addOpt().focus();
+  const multi = text("", "label", "switch");
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  const sp = text("", "span");
+  sp.append(text("Permitir varias respuestas", "strong"), text("Cada persona podrá marcar más de una opción.", "small"));
+  multi.append(cb, sp);
+  const err = text("", "p", "error");
+  dialog("Nueva encuesta", [field("Pregunta", q), text("Opciones", "h3", "settings-h"), optsBox, more, multi, err],
+    [["Cancelar"], ["Enviar encuesta", () => {
+      const opts = [...new Set([...optsBox.querySelectorAll("input")].map((i) => i.value.trim()).filter(Boolean))];
+      if (!q.value.trim() || opts.length < 2) {
+        err.textContent = "Escribe la pregunta y al menos dos opciones distintas.";
+        setTimeout(() => $("dialog").showModal());
+        return;
+      }
+      send({ t: "poll", q: q.value.trim().slice(0, 200), opts: opts.slice(0, 12), multi: cb.checked });
+    }]]);
+  q.focus();
+}
+
+function buildPoll(conv, m, c) {
+  const box = text("", "div", "poll");
+  box.append(withIcon("poll", "Encuesta", "span", "poll-tag"), text(c.q, "strong", "poll-q"));
+  const votes = m.votes || {};
+  const voters = Object.keys(votes).filter((u) => votes[u]?.length);
+  const mine = votes[me.toLowerCase()] || [];
+  c.opts.forEach((opt, i) => {
+    const who = voters.filter((u) => votes[u].includes(i));
+    const b = text("", "button", `poll-opt${mine.includes(i) ? " chosen" : ""}`);
+    b.type = "button";
+    const bar = text("", "span", "poll-bar");
+    bar.style.width = voters.length ? `${Math.round((who.length / voters.length) * 100)}%` : "0%";
+    const check = text("", "span", `poll-check${c.multi ? " multi" : ""}`);
+    if (mine.includes(i)) check.append(icon("check"));
+    b.append(bar, check, text(opt, "span", "poll-label"), text(String(who.length), "span", "poll-count"));
+    b.title = who.map((u) => (same(u, me) ? "Tú" : displayName(u))).join(", ") || "Nadie todavía";
+    b.onclick = (e) => { e.stopPropagation(); myVote(conv, m, i); };
+    box.append(b);
+  });
+  box.append(text(`${voters.length} ${voters.length === 1 ? "voto" : "votos"}${c.multi ? " · varias respuestas" : ""}`, "small", "poll-total"));
+  return box;
+}
+
+function myVote(conv, m, i) {
+  m.votes ??= {};
+  const k = me.toLowerCase();
+  let cur = m.votes[k] || [];
+  if (m.content.multi) cur = cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i];
+  else cur = cur[0] === i ? [] : [i];
+  if (cur.length) m.votes[k] = cur; else delete m.votes[k];
+  save(conv, m);
+  queueAction(conv, { t: "vote", target: m.id, choices: cur });
+}
+
+// ------------------------------------------------------------- mensajes temporales
+
+const TIMER_LABEL = { 86400: "24 horas", 604800: "7 días", 7776000: "90 días" };
+
+function showTimer(conv) {
+  const cur = meta(conv).timer || 0;
+  const box = text("", "div", "timer-options");
+  for (const secs of TIMER_OPTIONS) {
+    const l = text("", "label", "switch");
+    const r = document.createElement("input");
+    r.type = "radio";
+    r.name = "timer";
+    r.checked = secs === cur;
+    r.onchange = () => { $("dialog").close(); setTimer(conv, secs, { send: true }); };
+    const sp = text("", "span");
+    sp.append(text(secs ? TIMER_LABEL[secs] : "Desactivados", "strong"));
+    l.append(r, sp);
+    box.append(l);
+  }
+  dialog("Mensajes temporales", [
+    text("Los mensajes nuevos de este chat se borrarán solos de todos los dispositivos cuando pase el tiempo elegido. Los que ya hay no cambian.", "p", "hint"),
+    box,
+    text("Ojo: nada impide que alguien haga una captura de pantalla antes de que se borren.", "p", "hint"),
+  ]);
+}
+
+function setTimer(conv, secs, { who = me, send: share = false } = {}) {
+  if ((meta(conv).timer || 0) === secs) return;
+  setMeta(conv, { timer: secs || null });
+  const what = secs ? `activado los mensajes temporales (${TIMER_LABEL[secs]})` : "desactivado los mensajes temporales";
+  addMsg(conv, { sys: `${same(who, me) ? "Has" : `${displayName(who)} ha`} ${what}.` });
+  if (share) queueAction(conv, { t: "timer", secs });
+  if (conv === active) renderHeader();
+}
+
+/** Borra los mensajes caducados (de la pantalla y del historial cifrado). */
+function sweepExpired() {
+  const now = Date.now();
+  let changed = false;
+  for (const [conv, ch] of chats) {
+    const gone = ch.messages.filter((m) => m.expires && m.expires <= now);
+    if (!gone.length) continue;
+    ch.messages = ch.messages.filter((m) => !(m.expires && m.expires <= now));
+    for (const m of gone) {
+      if (m.url) URL.revokeObjectURL(m.url);
+      m.el?.remove();
+      history?.remove(conv, m.id);
+    }
+    if (gone.some((m) => m.id === meta(conv).pinMsg)) setMeta(conv, { pinMsg: null });
+    changed = true;
+  }
+  if (changed) { renderContacts(); updateTitle(); renderPinned(); }
+}
+
+// ------------------------------------------------------------- destacados
+
+function showStarred(only = null) {
+  const rows = [];
+  for (const [conv, ch] of chats) {
+    if (only && conv !== only) continue;
+    for (const m of ch.messages) if (m.starred && !m.deleted) rows.push([conv, m]);
+  }
+  rows.sort((a, b) => b[1].time - a[1].time);
+  const list = text("", "div", "starred-list");
+  if (!rows.length) list.append(text("No hay mensajes destacados. Mantén pulsado un mensaje (o clic derecho) y elige «Destacar».", "p", "hint"));
+  for (const [conv, m] of rows) {
+    const b = text("", "button", "starred-row");
+    b.type = "button";
+    const who = m.from === "me" ? "Tú" : displayName(m.sender || conv);
+    const head = text("", "span", "starred-head");
+    head.append(text(isGroup(conv) ? `${who} · ${convName(conv)}` : m.from === "me" ? `Tú → ${convName(conv)}` : who, "strong"),
+      text(shortTime(m.time), "time"));
+    b.append(head, text(previewOf(m.content), "span", "starred-text"));
+    b.onclick = () => { $("dialog").close(); openChat(conv); setTimeout(() => jumpTo(m.id), 250); };
+    list.append(b);
+  }
+  dialog(only ? "Destacados de este chat" : "Mensajes destacados", [list], only ? [["Cerrar"]] : subActions());
+}
+
+// ------------------------------------------------------------- registro de seguridad
+
+const seclogKey = () => `sc:seclog:${me.toLowerCase()}`;
+
+function seclog(msg) {
+  if (!me) return;
+  const list = store.get(seclogKey()) || [];
+  list.unshift({ t: Date.now(), text: msg });
+  store.set(seclogKey(), list.slice(0, 200));
+}
+
+function showSecLog() {
+  const list = store.get(seclogKey()) || [];
+  const box = text("", "div", "seclog");
+  if (!list.length) box.append(text("Todavía no hay nada registrado.", "p", "hint"));
+  for (const e of list) {
+    const row = text("", "div", "seclog-row");
+    row.append(text(new Date(e.t).toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" }), "time"), text(e.text, "span"));
+    box.append(row);
+  }
+  const clear = text("Borrar registro", "button", "chip danger");
+  clear.type = "button";
+  clear.onclick = () => { store.set(seclogKey(), []); showSecLog(); };
+  dialog("Registro de seguridad", [
+    text("Lo importante que pasa con tu cuenta y tus claves. Se guarda solo en este dispositivo.", "p", "hint"),
+    box, ...(list.length ? [clear] : []),
+  ], subActions());
+}
+
+function toast(msg) {
+  const t = text(msg, "div", "toast");
+  t.setAttribute("role", "status");
+  document.body.append(t);
+  setTimeout(() => t.classList.add("out"), 7000);
+  setTimeout(() => t.remove(), 7600);
+}
+
+// ------------------------------------------------------------- enlaces de invitación
+
+const INVITE_RE = /^#unirse=([A-Za-z0-9_-]{8,32})~([0-9a-f]{32})~([^~]{1,80})$/;
+const inviteUrl = (g) => `${location.origin}${location.pathname}#unirse=${g.id}~${g.invite}~${encodeURIComponent(me)}`;
+
+function inviteBox(g) {
+  const box = text("", "div", "invite-box");
+  const draw = () => {
+    box.replaceChildren();
+    if (!g.invite) {
+      const mk = withIcon("link", "Crear enlace de invitación", "button", "chip");
+      mk.type = "button";
+      mk.onclick = () => { g.invite = sodium.to_hex(sodium.randombytes_buf(16)); saveGroups(); draw(); };
+      box.append(mk, text("Quien abra el enlace podrá pedir unirse y entrará automáticamente.", "p", "hint"));
+      return;
+    }
+    const url = inviteUrl(g);
+    const out = input(url);
+    out.readOnly = true;
+    out.className = "filter-input";
+    out.onclick = () => out.select();
+    const copy = withIcon("copy", "Copiar", "button", "chip");
+    copy.type = "button";
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(url); copy.replaceChildren(icon("check", "inline-ico"), "Copiado"); }
+      catch { out.select(); }
+    };
+    const row = text("", "div", "chip-row");
+    row.append(copy);
+    if (navigator.share) {
+      const sh = withIcon("share", "Compartir", "button", "chip");
+      sh.type = "button";
+      sh.onclick = () => navigator.share({ title: `Únete a «${g.name}» en SecureChat`, url }).catch(() => {});
+      row.append(sh);
+    }
+    const reset = text("Anular enlace", "button", "chip danger");
+    reset.type = "button";
+    reset.onclick = () => { delete g.invite; saveGroups(); draw(); };
+    row.append(reset);
+    box.append(out, row, text("Entrarán cuando tengas la app abierta. Si el enlace llega a quien no debe, anúlalo y crea otro.", "p", "hint"));
+  };
+  draw();
+  return box;
+}
+
+/** ¿Hemos llegado con un enlace de invitación? Pedimos unirnos (cifrado) al admin. */
+async function checkInvite() {
+  const m = INVITE_RE.exec(location.hash);
+  if (!m || !client) return;
+  window.history.replaceState(null, "", location.pathname + location.search);
+  const [, gid, token, rawAdmin] = m;
+  let admin;
+  try { admin = decodeURIComponent(rawAdmin); } catch { return; }
+  if (!NAME_RE.test(admin) || same(admin, me)) return;
+  if (memberOf(gid, me)) { openChat(`#${gid}`); return; }
+  dialog("Invitación a un grupo", [
+    text(`@${admin} te ha invitado a un grupo de SecureChat.`, "p"),
+    text("Si aceptas, se le envía tu petición cifrada y entrarás en cuanto tenga la app abierta.", "p", "hint"),
+  ], [["Ahora no"], ["Pedir unirme", async () => {
+    try {
+      const info = await client.lookup(admin);
+      if (!info.exists) { toast(`No existe @${admin}.`); return; }
+      queueAction(info.user, { t: "join", g: gid, token }, [info.user]);
+      addMsg(info.user, { sys: "Has pedido unirte a su grupo con un enlace de invitación." });
+      toast("Petición enviada. Entrarás en el grupo en cuanto la acepte su app.");
+    } catch (e) { toast(e.message); }
+  }]]);
+}
+
+function onJoinRequest(sender, c) {
+  const g = groups.get(c.g);
+  if (!g || g.left || !isAdminOf(g, me) || !g.invite || c.token !== g.invite) return;
+  if (g.members.some((x) => same(x, sender))) return;
+  updateGroup(c.g, { members: [...g.members, sender] });
+  addMsg(`#${c.g}`, { sys: `${displayName(sender)} se ha unido con el enlace de invitación.` });
+}
+
+// ------------------------------------------------------------- llamadas (WebRTC)
+// La señalización (oferta y respuesta) viaja cifrada de extremo a extremo por el chat.
+// El audio y el vídeo van directos entre los dos dispositivos, cifrados con DTLS-SRTP.
+
+const ICE_SERVERS = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
+const RING_MS = 45000;
+let call = null;
+let ringTimer = null, ringCtx = null;
+
+function callSignal(peer, content, queue = false) {
+  return client.sendContent(peer, { t: "call", ...content }, queue ? { sync: false } : { ephemeral: true, sync: false }).catch(() => {});
+}
+
+function iceGathered(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { if (pc.iceGatheringState === "complete") resolve(); };
+    pc.addEventListener("icegatheringstatechange", done);
+    setTimeout(resolve, 3000);
+  });
+}
+
+async function getCallMedia(video) {
+  if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) throw new Error("Este navegador no permite llamadas aquí (hace falta HTTPS).");
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+      video: video ? { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } } : false,
+    });
+  } catch {
+    throw new Error(video ? "No hay permiso para usar la cámara y el micrófono." : "No hay permiso para usar el micrófono.");
+  }
+}
+
+function newPeerConnection(c) {
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  pc.ontrack = (e) => { if (call === c) { c.remote = e.streams[0]; renderCall(); } };
+  pc.onconnectionstatechange = () => {
+    if (call !== c) return;
+    if (pc.connectionState === "connected" && c.state !== "active") {
+      c.state = "active";
+      c.startedAt = Date.now();
+      stopRing();
+      clearTimeout(c.timeout);
+      c.tick = setInterval(updateCallTime, 1000);
+      renderCall();
+    } else if (pc.connectionState === "failed") {
+      callSignal(c.peer, { kind: "end", id: c.id });
+      endCall("No se pudo conectar la llamada: la red no permite la conexión directa.");
+    }
+  };
+  return pc;
+}
+
+async function startCall(video) {
+  const peer = active;
+  if (!peer || isGroup(peer) || call || gcall) return;
+  if (!connected) { alert("Sin conexión: espera a que vuelva."); return; }
+  let local;
+  try { local = await getCallMedia(video); } catch (e) { alert(e.message); return; }
+  const c = { id: newId(), peer, video, local, role: "out", state: "calling", muted: false, camOff: false };
+  call = c;
+  c.pc = newPeerConnection(c);
+  for (const tr of local.getTracks()) c.pc.addTrack(tr, local);
+  renderCall();
+  startRing("out");
+  try {
+    await c.pc.setLocalDescription(await c.pc.createOffer());
+    await iceGathered(c.pc);
+    if (call !== c) return;
+    // La oferta sí se guarda en cola: si el otro tiene la app cerrada le llega un aviso
+    await callSignal(peer, { kind: "offer", id: c.id, sdp: c.pc.localDescription.sdp, video }, true);
+  } catch {
+    endCall("No se pudo iniciar la llamada.");
+    return;
+  }
+  c.timeout = setTimeout(() => {
+    if (call === c && c.state === "calling") { callSignal(peer, { kind: "end", id: c.id }); endCall("No contesta"); }
+  }, RING_MS);
+}
+
+function onCallSignal(sender, c, queuedAt) {
+  if (c.g) return onGroupCallSignal(sender, c, queuedAt);
+  if (c.kind === "offer") {
+    if (queuedAt && Date.now() / 1000 - queuedAt > RING_MS / 1000) {
+      addMsg(sender, { sys: `${c.video ? "Videollamada perdida" : "Llamada perdida"} de ${displayName(sender)}` });
+      return;
+    }
+    if (call || gcall) { if (call?.id !== c.id) callSignal(sender, { kind: "busy", id: c.id }); return; }
+    const inc = { id: c.id, peer: sender, video: c.video, role: "in", state: "incoming", offer: c.sdp, muted: false, camOff: false };
+    call = inc;
+    renderCall();
+    startRing("in");
+    if (document.hidden && prefs().notifications && "Notification" in window && Notification.permission === "granted") {
+      new Notification(`${c.video ? "Videollamada" : "Llamada"} de ${displayName(sender)}`, { tag: "call", body: "Abre SecureChat para contestar" });
+    }
+    inc.timeout = setTimeout(() => {
+      if (call === inc && inc.state === "incoming") endCall(`${c.video ? "Videollamada perdida" : "Llamada perdida"} de ${displayName(sender)}`);
+    }, RING_MS);
+    return;
+  }
+  if (!call || call.id !== c.id || !same(call.peer, sender)) return;
+  const cur = call;
+  if (c.kind === "answer" && cur.role === "out" && cur.state === "calling") {
+    cur.state = "connecting";
+    stopRing();
+    clearTimeout(cur.timeout);
+    cur.pc.setRemoteDescription({ type: "answer", sdp: c.sdp }).catch(() => endCall("No se pudo conectar la llamada."));
+    callSignal(sender, { kind: "taken", id: c.id, dev: c.dev }); // sus otros dispositivos dejan de sonar
+    cur.timeout = setTimeout(() => {
+      if (call === cur && cur.state === "connecting") { callSignal(sender, { kind: "end", id: cur.id }); endCall("No se pudo conectar la llamada."); }
+    }, 25000);
+    renderCall();
+  } else if (c.kind === "taken" && cur.role === "in" && cur.state === "incoming" && c.dev !== client.device) {
+    endCall(null); // he contestado desde otro dispositivo
+  } else if (c.kind === "reject" && cur.role === "out") {
+    callSignal(sender, { kind: "end", id: cur.id });
+    endCall("Llamada rechazada");
+  } else if (c.kind === "busy" && cur.role === "out" && cur.state === "calling") {
+    endCall(`${displayName(sender)} está en otra llamada`);
+  } else if (c.kind === "end") {
+    const missed = cur.role === "in" && cur.state === "incoming";
+    endCall(missed ? `${cur.video ? "Videollamada perdida" : "Llamada perdida"} de ${displayName(sender)}` : cur.startedAt ? null : "Llamada cancelada");
+  }
+}
+
+async function acceptCall() {
+  const c = call;
+  if (!c || c.state !== "incoming") return;
+  stopRing();
+  clearTimeout(c.timeout);
+  c.state = "connecting";
+  renderCall();
+  try {
+    c.local = await getCallMedia(c.video);
+    if (call !== c) { c.local.getTracks().forEach((t) => t.stop()); return; }
+    c.pc = newPeerConnection(c);
+    for (const tr of c.local.getTracks()) c.pc.addTrack(tr, c.local);
+    await c.pc.setRemoteDescription({ type: "offer", sdp: c.offer });
+    await c.pc.setLocalDescription(await c.pc.createAnswer());
+    await iceGathered(c.pc);
+    if (call !== c) return;
+    callSignal(c.peer, { kind: "answer", id: c.id, sdp: c.pc.localDescription.sdp, dev: client.device });
+    renderCall();
+    c.timeout = setTimeout(() => {
+      if (call === c && c.state === "connecting") { callSignal(c.peer, { kind: "end", id: c.id }); endCall("No se pudo conectar la llamada."); }
+    }, 25000);
+  } catch (e) {
+    callSignal(c.peer, { kind: "reject", id: c.id });
+    endCall(e.message || "No se pudo contestar.");
+  }
+}
+
+function rejectCall() {
+  if (!call) return;
+  callSignal(call.peer, { kind: "reject", id: call.id });
+  endCall(`Has rechazado una ${call.video ? "videollamada" : "llamada"} de ${displayName(call.peer)}`);
+}
+
+function hangUp() {
+  if (!call) return;
+  callSignal(call.peer, { kind: "end", id: call.id });
+  endCall(call.startedAt ? null : "Llamada cancelada");
+}
+
+function endCall(notice = null) {
+  const c = call;
+  if (!c) return;
+  call = null;
+  stopRing();
+  clearTimeout(c.timeout);
+  clearInterval(c.tick);
+  c.local?.getTracks().forEach((t) => t.stop());
+  try { c.pc?.close(); } catch { /* ya cerrada */ }
+  const line = c.startedAt ? `${c.video ? "Videollamada" : "Llamada de voz"} · ${fmtDur(Math.round((Date.now() - c.startedAt) / 1000))}` : notice;
+  if (line) addMsg(c.peer, { sys: line });
+  $("call-screen")?.remove();
+}
+
+function renderCall() {
+  const c = call;
+  if (!c) return;
+  let el = $("call-screen");
+  if (!el) {
+    el = text("", "div", "call-screen");
+    el.id = "call-screen";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-label", "Llamada");
+    const remote = document.createElement("video");
+    remote.id = "call-remote";
+    remote.autoplay = remote.playsInline = true;
+    const local = document.createElement("video");
+    local.id = "call-local";
+    local.autoplay = local.playsInline = local.muted = true;
+    const info = text("", "div", "call-info");
+    info.id = "call-info";
+    const btns = text("", "div", "call-buttons");
+    btns.id = "call-buttons";
+    el.append(remote, local, info, btns);
+    document.body.append(el);
+  }
+  const remote = $("call-remote"), local = $("call-local");
+  if (c.remote && remote.srcObject !== c.remote) remote.srcObject = c.remote;
+  if (c.local && local.srcObject !== c.local) local.srcObject = c.local;
+  el.dataset.video = c.video ? "1" : "";
+  el.dataset.state = c.state;
+  el.classList.toggle("cam-off", !!c.camOff);
+  const status = {
+    calling: "Llamando…", incoming: c.video ? "Videollamada entrante" : "Llamada entrante",
+    connecting: "Conectando…", active: "",
+  }[c.state];
+  const st = text(status, "p", "call-status");
+  st.id = "call-status";
+  $("call-info").replaceChildren(setAvatar(text("", "span", "avatar xl"), displayName(c.peer), avatarOf(c.peer)),
+    text(displayName(c.peer), "h2"), st, text("Cifrada de extremo a extremo", "p", "call-e2e"));
+  const b = (ic, label, fn, cls = "") => {
+    const x = text("", "button", `call-btn ${cls}`);
+    x.type = "button";
+    x.title = label;
+    x.setAttribute("aria-label", label);
+    x.append(icon(ic));
+    x.onclick = fn;
+    return x;
+  };
+  if (c.state === "incoming") {
+    $("call-buttons").replaceChildren(b("call", "Rechazar", rejectCall, "hang"), b(c.video ? "video" : "call", "Contestar", acceptCall, "accept"));
+  } else {
+    $("call-buttons").replaceChildren(
+      b(c.muted ? "mic_off" : "mic", c.muted ? "Activar micrófono" : "Silenciar micrófono", toggleMute, c.muted ? "off" : ""),
+      ...(c.video ? [b(c.camOff ? "video_off" : "video", c.camOff ? "Encender cámara" : "Apagar cámara", toggleCam, c.camOff ? "off" : "")] : []),
+      b("call", "Colgar", hangUp, "hang"));
+  }
+  updateCallTime();
+}
+
+function updateCallTime() {
+  if (call?.state === "active" && $("call-status")) $("call-status").textContent = fmtDur(Math.round((Date.now() - call.startedAt) / 1000));
+}
+
+function toggleMute() {
+  call.muted = !call.muted;
+  call.local?.getAudioTracks().forEach((t) => { t.enabled = !call.muted; });
+  renderCall();
+}
+
+function toggleCam() {
+  call.camOff = !call.camOff;
+  call.local?.getVideoTracks().forEach((t) => { t.enabled = !call.camOff; });
+  renderCall();
+}
+
+// ------------------------------------------------------------- llamadas en grupo
+// Malla: cada participante se conecta directamente con cada uno de los demás (hasta 4 personas).
+// Para cada pareja, ofrece la conexión quien tiene el @usuario menor (así nunca se cruzan dos ofertas).
+// Señales: ring (el que llama avisa a todos), joined (alguien entra), here (ya estoy dentro),
+// offer/answer (por pareja) y left (alguien cuelga). Todas viajan cifradas por el chat.
+
+const GROUP_CALL_MAX = 4;
+let gcall = null;
+const gkey = (u) => u.toLowerCase();
+
+function gSignal(u, content, queue = false) {
+  return callSignal(u, { ...content, id: gcall?.id || content.id, g: gcall?.g || content.g }, queue);
+}
+
+async function startGroupCall(video) {
+  const conv = active;
+  if (!conv || !isGroup(conv) || call || gcall) return;
+  const members = targetsOf(conv);
+  if (!members.length) return;
+  if (members.length > GROUP_CALL_MAX - 1) { alert(`Las llamadas en grupo son de hasta ${GROUP_CALL_MAX} personas.`); return; }
+  if (!connected) { alert("Sin conexión: espera a que vuelva."); return; }
+  let local;
+  try { local = await getCallMedia(video); } catch (e) { alert(e.message); return; }
+  gcall = { id: newId(), g: gidOf(conv), video, local, state: "calling", peers: new Map(), muted: false, camOff: false };
+  const c = gcall;
+  renderGroupCall();
+  startRing("out");
+  for (const u of members) gSignal(u, { kind: "ring", video }, true);
+  c.timeout = setTimeout(() => {
+    if (gcall === c && !c.startedAt) { for (const u of members) gSignal(u, { kind: "left" }); endGroupCall("Nadie ha contestado"); }
+  }, RING_MS);
+}
+
+function onGroupCallSignal(sender, c, queuedAt) {
+  if (!memberOf(c.g, sender) || !memberOf(c.g, me)) return;
+  const conv = `#${c.g}`;
+  if (c.kind === "ring") {
+    if (queuedAt && Date.now() / 1000 - queuedAt > RING_MS / 1000) {
+      addMsg(conv, { sys: `${c.video ? "Videollamada" : "Llamada"} perdida de ${displayName(sender)}` });
+      return;
+    }
+    if (call || gcall) return; // ya estoy en otra llamada
+    gcall = { id: c.id, g: c.g, video: c.video, from: sender, state: "incoming", peers: new Map(), muted: false, camOff: false };
+    const inc = gcall;
+    renderGroupCall();
+    startRing("in");
+    if (document.hidden && prefs().notifications && "Notification" in window && Notification.permission === "granted") {
+      new Notification(`${c.video ? "Videollamada" : "Llamada"} en ${convName(conv)}`, { tag: "call", body: `${displayName(sender)} te está llamando` });
+    }
+    inc.timeout = setTimeout(() => {
+      if (gcall === inc && inc.state === "incoming") endGroupCall(`${c.video ? "Videollamada" : "Llamada"} perdida de ${displayName(sender)}`);
+    }, RING_MS);
+    return;
+  }
+  const cur = gcall;
+  if (!cur || cur.id !== c.id) return;
+  if (c.kind === "left") {
+    dropPeer(sender);
+    if (cur.state === "incoming" && same(sender, cur.from)) endGroupCall(`${cur.video ? "Videollamada" : "Llamada"} perdida de ${displayName(sender)}`);
+    else if (cur.startedAt && !cur.peers.size) endGroupCall(null);
+    return;
+  }
+  if (cur.state === "incoming") return; // aún no he contestado
+  if (c.kind === "joined" || c.kind === "here") {
+    if (c.kind === "joined") gSignal(sender, { kind: "here" });
+    if (me.toLowerCase() < sender.toLowerCase()) connectPeer(sender);
+  } else if (c.kind === "offer") {
+    answerPeer(sender, c.sdp);
+  } else if (c.kind === "answer") {
+    const p = cur.peers.get(gkey(sender));
+    p?.pc.setRemoteDescription({ type: "answer", sdp: c.sdp }).catch(() => dropPeer(sender));
+  }
+}
+
+function groupPeer(u) {
+  const c = gcall;
+  const k = gkey(u);
+  if (c.peers.has(k)) return null;
+  if (c.peers.size >= GROUP_CALL_MAX - 1) return null;
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const p = { user: u, pc, stream: null, connected: false };
+  c.peers.set(k, p);
+  for (const tr of c.local.getTracks()) pc.addTrack(tr, c.local);
+  pc.ontrack = (e) => { if (gcall === c) { p.stream = e.streams[0]; renderGroupCall(); } };
+  pc.onconnectionstatechange = () => {
+    if (gcall !== c || c.peers.get(k) !== p) return;
+    if (pc.connectionState === "connected") {
+      p.connected = true;
+      if (!c.startedAt) {
+        c.startedAt = Date.now();
+        c.state = "active";
+        stopRing();
+        clearTimeout(c.timeout);
+        c.tick = setInterval(updateGroupCallTime, 1000);
+      }
+      renderGroupCall();
+    } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      dropPeer(u);
+      if (c.startedAt && !c.peers.size) endGroupCall(null);
+    }
+  };
+  renderGroupCall();
+  return p;
+}
+
+async function connectPeer(u) {
+  const c = gcall;
+  const p = groupPeer(u);
+  if (!p) return;
+  try {
+    await p.pc.setLocalDescription(await p.pc.createOffer());
+    await iceGathered(p.pc);
+    if (gcall === c) gSignal(u, { kind: "offer", sdp: p.pc.localDescription.sdp });
+  } catch { dropPeer(u); }
+}
+
+async function answerPeer(u, sdp) {
+  const c = gcall;
+  const p = groupPeer(u);
+  if (!p) return;
+  try {
+    await p.pc.setRemoteDescription({ type: "offer", sdp });
+    await p.pc.setLocalDescription(await p.pc.createAnswer());
+    await iceGathered(p.pc);
+    if (gcall === c) gSignal(u, { kind: "answer", sdp: p.pc.localDescription.sdp });
+  } catch { dropPeer(u); }
+}
+
+function dropPeer(u) {
+  const c = gcall;
+  const p = c?.peers.get(gkey(u));
+  if (!p) return;
+  c.peers.delete(gkey(u));
+  try { p.pc.close(); } catch { /* ya cerrada */ }
+  renderGroupCall();
+}
+
+async function acceptGroupCall() {
+  const c = gcall;
+  if (!c || c.state !== "incoming") return;
+  stopRing();
+  clearTimeout(c.timeout);
+  try { c.local = await getCallMedia(c.video); }
+  catch (e) { endGroupCall(e.message); return; }
+  if (gcall !== c) { c.local.getTracks().forEach((t) => t.stop()); return; }
+  c.state = "joining";
+  renderGroupCall();
+  for (const u of targetsOf(`#${c.g}`)) gSignal(u, { kind: "joined" });
+  c.timeout = setTimeout(() => { if (gcall === c && !c.startedAt) hangUpGroup("No se pudo conectar la llamada."); }, 30000);
+}
+
+function hangUpGroup(notice = null) {
+  const c = gcall;
+  if (!c) return;
+  if (c.state !== "incoming") for (const u of targetsOf(`#${c.g}`)) gSignal(u, { kind: "left" });
+  endGroupCall(c.state === "incoming" ? null : notice);
+}
+
+function endGroupCall(notice = null) {
+  const c = gcall;
+  if (!c) return;
+  gcall = null;
+  stopRing();
+  clearTimeout(c.timeout);
+  clearInterval(c.tick);
+  c.local?.getTracks().forEach((t) => t.stop());
+  for (const p of c.peers.values()) { try { p.pc.close(); } catch { /* ya cerrada */ } }
+  const line = c.startedAt ? `${c.video ? "Videollamada" : "Llamada"} de grupo · ${fmtDur(Math.round((Date.now() - c.startedAt) / 1000))}` : notice;
+  if (line) addMsg(`#${c.g}`, { sys: line });
+  $("call-screen")?.remove();
+}
+
+function renderGroupCall() {
+  const c = gcall;
+  if (!c) return;
+  let el = $("call-screen");
+  if (!el) {
+    el = text("", "div", "call-screen group");
+    el.id = "call-screen";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-label", "Llamada de grupo");
+    const info = text("", "div", "call-info");
+    info.id = "call-info";
+    const grid = text("", "div", "call-grid");
+    grid.id = "call-grid";
+    const btns = text("", "div", "call-buttons");
+    btns.id = "call-buttons";
+    el.append(info, grid, btns);
+    document.body.append(el);
+  }
+  el.dataset.video = c.video ? "1" : "";
+  el.dataset.state = c.state;
+  const conv = `#${c.g}`;
+  const status = { calling: "Llamando al grupo…", incoming: `${displayName(c.from)} te está llamando`, joining: "Entrando…", active: "" }[c.state];
+  const st = text(status, "p", "call-status");
+  st.id = "call-status";
+  $("call-info").replaceChildren(text(convName(conv), "h2"), st,
+    text(`${c.video ? "Videollamada" : "Llamada"} de grupo · cifrada de extremo a extremo`, "p", "call-e2e"));
+  // Mosaico: yo y cada participante conectado
+  c.videos ??= new Map();
+  const tile = (name, avatar, stream, mine = false) => {
+    const t = text("", "div", `call-tile${mine ? " mine" : ""}`);
+    const key = mine ? " yo" : name;
+    let v = c.videos.get(key);
+    if (!v) {
+      v = document.createElement("video");
+      v.autoplay = true;
+      v.playsInline = true;
+      if (mine) v.muted = true;
+      c.videos.set(key, v);
+    }
+    if (stream && v.srcObject !== stream) v.srcObject = stream;
+    if (v.paused && v.srcObject) v.play().catch(() => {});
+    const showVideo = c.video && stream && !(mine && c.camOff);
+    v.hidden = !showVideo;
+    t.append(v);
+    if (!showVideo) t.append(setAvatar(text("", "span", "avatar xl"), name, avatar));
+    t.append(text(name, "span", "tile-name"));
+    return t;
+  };
+  const tiles = [];
+  if (c.state !== "incoming") tiles.push(tile("Tú", profile.avatar, c.local, true));
+  for (const p of c.peers.values()) tiles.push(tile(displayName(p.user), avatarOf(p.user), p.stream));
+  if (c.state === "incoming") tiles.push(tile(displayName(c.from), avatarOf(c.from), null));
+  // Los <video> se reutilizan entre repintados para no cortar el audio
+  const grid = $("call-grid");
+  grid.dataset.n = String(tiles.length);
+  grid.replaceChildren(...tiles);
+  const b = (ic, label, fn, cls = "") => {
+    const x = text("", "button", `call-btn ${cls}`);
+    x.type = "button";
+    x.title = label;
+    x.setAttribute("aria-label", label);
+    x.append(icon(ic));
+    x.onclick = fn;
+    return x;
+  };
+  if (c.state === "incoming") {
+    $("call-buttons").replaceChildren(b("call", "Rechazar", () => hangUpGroup(), "hang"),
+      b(c.video ? "video" : "call", "Unirme", acceptGroupCall, "accept"));
+  } else {
+    $("call-buttons").replaceChildren(
+      b(c.muted ? "mic_off" : "mic", c.muted ? "Activar micrófono" : "Silenciar micrófono", () => {
+        c.muted = !c.muted; c.local?.getAudioTracks().forEach((t) => { t.enabled = !c.muted; }); renderGroupCall();
+      }, c.muted ? "off" : ""),
+      ...(c.video ? [b(c.camOff ? "video_off" : "video", c.camOff ? "Encender cámara" : "Apagar cámara", () => {
+        c.camOff = !c.camOff; c.local?.getVideoTracks().forEach((t) => { t.enabled = !c.camOff; }); renderGroupCall();
+      }, c.camOff ? "off" : "")] : []),
+      b("call", "Colgar", () => hangUpGroup(), "hang"));
+  }
+  updateGroupCallTime();
+}
+
+function updateGroupCallTime() {
+  if (gcall?.startedAt && $("call-status")) {
+    $("call-status").textContent = `${fmtDur(Math.round((Date.now() - gcall.startedAt) / 1000))} · ${gcall.peers.size + 1} personas`;
+  }
+}
+
+function startRing(dir) {
+  stopRing();
+  const beep = () => {
+    try {
+      ringCtx ??= new AudioContext();
+      const t0 = ringCtx.currentTime;
+      const o = ringCtx.createOscillator(), g = ringCtx.createGain();
+      o.frequency.value = dir === "in" ? 660 : 425;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.12, t0 + 0.04);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + (dir === "in" ? 0.8 : 1.1));
+      o.connect(g).connect(ringCtx.destination);
+      o.start(t0);
+      o.stop(t0 + 1.2);
+    } catch { /* sin audio */ }
+    if (dir === "in") navigator.vibrate?.([300, 150, 300]);
+  };
+  beep();
+  ringTimer = setInterval(beep, dir === "in" ? 2000 : 3000);
+}
+
+function stopRing() {
+  clearInterval(ringTimer);
+  ringTimer = null;
+  navigator.vibrate?.(0);
 }
 
 // ------------------------------------------------------------- notas de voz
@@ -1274,6 +2147,7 @@ function advancedSecurityMine() {
           rm.onclick = async () => {
             if (!confirm("¿Desvincular este dispositivo? Tendrá que volver a iniciar sesión.")) return;
             await client.removeDevice(x.device);
+            seclog("Has desvinculado un dispositivo de tu cuenta.");
             row.remove();
           };
           row.append(rm);
@@ -1288,7 +2162,7 @@ function advancedSecurityMine() {
 function showGroupInfo(conv) {
   const gid = gidOf(conv), g = groups.get(gid);
   if (!g) return;
-  const isAdmin = same(g.admin, me) && !g.left;
+  const isAdmin = isAdminOf(g, me) && !g.left;
   const head = text("", "div", "profile-view");
   head.append(setAvatar(text("", "span", "avatar xl"), g.name, g.avatar), text(g.name, "h3"),
     text(`${g.members.length} miembros${g.left ? " · ya no estás en este grupo" : ""}`, "p", "muted"));
@@ -1298,13 +2172,28 @@ function showGroupInfo(conv) {
   const list = text("", "ul", "member-list");
   for (const u of g.members) {
     const li = document.createElement("li");
+    const tags = [isAdminOf(g, u) ? "admin" : "", isMutedIn(g, u) ? "silenciado" : ""].filter(Boolean).join(" · ");
     li.append(setAvatar(text("", "span", "avatar"), same(u, me) ? (profile.name || me) : displayName(u), same(u, me) ? profile.avatar : avatarOf(u)),
-      text(same(u, me) ? "Tú" : displayName(u), "span", "member-name"), text(same(u, g.admin) ? "admin" : "", "small", "muted"));
+      text(same(u, me) ? "Tú" : displayName(u), "span", "member-name"), text(tags, "small", "muted"));
     if (isAdmin && !same(u, me)) {
-      const rm = text("Quitar", "button", "chip danger");
-      rm.type = "button";
-      rm.onclick = () => { updateGroup(gid, { members: g.members.filter((x) => !same(x, u)) }); showGroupInfo(conv); };
-      li.append(rm);
+      const act = (ic, label, fn, cls = "") => {
+        const b = text("", "button", `icon-btn member-act ${cls}`);
+        b.type = "button";
+        b.title = label;
+        b.setAttribute("aria-label", `${label}: ${displayName(u)}`);
+        b.append(icon(ic));
+        b.onclick = () => { fn(); showGroupInfo(conv); };
+        li.append(b);
+      };
+      const adm = isAdminOf(g, u), mut = isMutedIn(g, u);
+      act("shield", adm ? "Quitar de administrador" : "Hacer administrador", () =>
+        updateGroup(gid, adm ? { admins: adminsOf(g).filter((x) => !same(x, u)) }
+          : { admins: [...adminsOf(g), u], muted: (g.muted || []).filter((x) => !same(x, u)) }), adm ? "on" : "");
+      if (!adm) act(mut ? "mic_off" : "mic", mut ? "Permitir que escriba" : "Silenciar (solo podrá leer)", () =>
+        updateGroup(gid, { muted: mut ? g.muted.filter((x) => !same(x, u)) : [...(g.muted || []), u] }), mut ? "on" : "");
+      act("close", "Quitar del grupo", () => updateGroup(gid, {
+        members: g.members.filter((x) => !same(x, u)), admins: adminsOf(g).filter((x) => !same(x, u)),
+        muted: (g.muted || []).filter((x) => !same(x, u)) }), "danger");
     }
     list.append(li);
   }
@@ -1329,6 +2218,7 @@ function showGroupInfo(conv) {
     const row = text("", "div", "add-row");
     row.append(addIn, addBtn);
     body.push(text("Añadir miembro", "h3", "settings-h"), row, addErr);
+    body.push(text("Enlace de invitación", "h3", "settings-h"), inviteBox(g));
   }
   if (!g.left) {
     const leave = text("Salir del grupo", "button", "chip danger");
@@ -1425,7 +2315,7 @@ function showBackup(back = false) {
   exp.onclick = async () => {
     exp.disabled = true;
     status.textContent = "Preparando la copia…";
-    try { status.textContent = `Copia descargada con ${await exportBackup()} mensajes.`; }
+    try { status.textContent = `Copia descargada con ${await exportBackup()} mensajes.`; seclog("Has descargado una copia de seguridad."); }
     catch (e) { status.textContent = `No se pudo crear: ${e.message}`; }
     finally { exp.disabled = false; }
   };
@@ -1435,7 +2325,7 @@ function showBackup(back = false) {
   fileIn.hidden = true;
   fileIn.onchange = async () => {
     status.textContent = "Restaurando…";
-    try { status.textContent = `Restaurados ${await importBackup(fileIn.files[0])} mensajes nuevos.`; }
+    try { status.textContent = `Restaurados ${await importBackup(fileIn.files[0])} mensajes nuevos.`; seclog("Has restaurado una copia de seguridad."); }
     catch (e) { status.textContent = e.message; }
   };
   const imp = withIcon("upload", "Restaurar una copia", "button", "chip");
@@ -1565,7 +2455,11 @@ function showPeerProfile(peer) {
     for (const g of P.safetyNumber(me, identity.publicKey, peer, c.key).split(" ")) grid.append(text(g, "span"));
     const toggle = text(c.verified ? "Quitar verificación" : "Coinciden: marcar como verificado", "button", "chip");
     toggle.type = "button";
-    toggle.onclick = () => { client.contacts.setVerified(peer, !c.verified); showPeerProfile(peer); };
+    toggle.onclick = () => {
+      client.contacts.setVerified(peer, !c.verified);
+      seclog(c.verified ? `Has quitado la verificación de @${peer}.` : `Has verificado la clave de @${peer}.`);
+      showPeerProfile(peer);
+    };
     d.append(text(`Seguridad avanzada${c.verified ? " · verificado" : ""}`, "summary"),
       text("El servidor solo reenvía mensajes, pero si alguien lo controlara podría intentar hacerse pasar por este contacto. "
         + "Para descartarlo del todo, comparad estos números en persona o por otra app: si coinciden, nadie está en medio.", "p", "hint"),
@@ -1617,6 +2511,8 @@ const OPTIONS = [
   ["sliders", "Apariencia", "Tema, colores, fondo y tamaño de letra", () => showSettings("appearance")],
   ["lock", "Privacidad", "Escribiendo, visto y última conexión", () => showSettings("privacy")],
   ["mail", "Chats y notificaciones", "Avisos y tecla Intro", () => showSettings("chats")],
+  ["star", "Mensajes destacados", "Los mensajes que has marcado con estrella", () => showStarred()],
+  ["key", "Registro de seguridad", "Dispositivos nuevos, cambios de clave…", () => showSecLog()],
   ["download", "Copia de seguridad", "Guarda o restaura tu historial cifrado", () => showBackup(true)],
   ["shield", "Cómo te protege SecureChat", "Qué ve y qué no ve el servidor", () => showAbout(true)],
 ];
@@ -1796,10 +2692,13 @@ function previewOf(c) {
   if (!c) return "";
   if (c.t === "text") return c.body;
   if (c.t === "sticker") return `Sticker ${c.id}`;
+  if (c.once) return c.t === "image" ? "Foto · ver una vez" : "Vídeo · ver una vez";
   if (c.t === "image") return c.mime === "image/gif" ? "GIF" : "Foto";
   if (c.t === "video") return "Vídeo";
   if (c.t === "audio") return `Nota de voz${c.dur ? ` · ${fmtDur(c.dur)}` : ""}`;
   if (c.t === "deleted") return "Mensaje eliminado";
+  if (c.t === "file") return `Documento · ${c.name || "archivo"}`;
+  if (c.t === "poll") return `Encuesta · ${c.q}`;
   return "";
 }
 
@@ -1826,7 +2725,7 @@ function renderContacts() {
   const convs = new Set([...client.contacts.all().map((c) => c.name), ...chats.keys(), ...[...groups.keys()].map((g) => `#${g}`)]);
   const visible = (m) => m.content && !m.sys;
   const lastTime = (n) => chats.get(n)?.messages.filter(visible).at(-1)?.time || 0;
-  const all = [...convs].filter((c) => c === active || !meta(c).hidden);
+  const all = [...convs].filter((c) => !same(c, me) && (c === active || !meta(c).hidden));
   const archived = all.filter((c) => meta(c).archived);
   if (!archived.length) showArchived = false;
   const list = all.filter((c) => !!meta(c).archived === showArchived)
@@ -1862,6 +2761,9 @@ function renderContacts() {
     const mt = meta(conv);
     if (mt.mute) badges.append(icon("bell_off", "row-ico"));
     if (mt.pin) badges.append(icon("pin", "row-ico"));
+    if (unread && isGroup(conv) && chats.get(conv)?.messages.some((x) => x.from === "them" && !x.read && x.content?.t === "text" && mentionsMe(x.content.body))) {
+      badges.append(text("@", "span", "unread mention"));
+    }
     if (unread) badges.append(text(String(unread), "span", `unread${mt.mute ? " muted" : ""}`));
     else if (mt.unread) badges.append(text("", "span", "unread dot"));
     side.append(badges);
@@ -1960,6 +2862,9 @@ function openChatMenu(conv, x, y) {
     setMeta(conv, { archived: !mt.archived, pin: null });
     if (!mt.archived && active === conv) closeChat(); else renderContacts();
   });
+  item("clock", `Mensajes temporales${mt.timer ? ` · ${TIMER_LABEL[mt.timer]}` : ""}`, () => showTimer(conv));
+  item("star", "Mensajes destacados", () => showStarred(conv));
+  item("image", "Fotos, documentos y enlaces", () => showGallery(conv));
   item("eraser", "Vaciar chat", () => clearChat(conv), "danger");
   item("trash", "Borrar chat", () => deleteChat(conv), "danger");
   placeMenu(menu, x, y);
@@ -2057,7 +2962,7 @@ async function forwardTo(targets, src, m) {
   }
   const { mid, reply, g, data, fwd, ...rest } = m.content;
   for (const conv of targets) {
-    const url = bytes ? URL.createObjectURL(new Blob([bytes], { type: rest.mime })) : null;
+    const url = bytes && rest.t !== "file" ? URL.createObjectURL(new Blob([bytes], { type: rest.mime })) : null;
     await sendTo(conv, { ...rest, fwd: true }, { bytes, url });
   }
   if (targets.length === 1 && targets[0] !== active) openChat(targets[0]);
@@ -2118,6 +3023,9 @@ function renderHeader() {
   if (has) {
     $("peer-name").textContent = convName(active);
     if (meta(active).mute) $("peer-name").append(icon("bell_off", "name-ico"));
+    if (meta(active).timer) $("peer-name").append(icon("clock", "name-ico"));
+    const smallGroup = isGroup(active) && targetsOf(active).length >= 1 && targetsOf(active).length <= GROUP_CALL_MAX - 1;
+    $("call-btn").hidden = $("video-btn").hidden = isGroup(active) && !smallGroup;
     setAvatar($("peer-avatar"), convName(active), convAvatar(active));
     const ch = chat(active);
     let status;
@@ -2139,7 +3047,9 @@ function renderHeader() {
     $("peer-status").replaceChildren(status);
   }
   // Se puede escribir siempre que haya un chat abierto (sin conexión, el mensaje espera con 🕓)
-  for (const id of ["text", "send-btn", "emoji-btn", "attach-btn", "mic-btn"]) $(id).disabled = !has;
+  const silenced = has && mutedHere(active);
+  for (const id of ["text", "send-btn", "emoji-btn", "attach-btn", "mic-btn"]) $(id).disabled = !has || silenced;
+  $("text").placeholder = silenced ? "Un administrador te ha silenciado: solo puedes leer" : "Escribe un mensaje cifrado…";
   $("chat").classList.toggle("is-empty", !has);
   $("empty-chat").hidden = has;
 }
@@ -2151,6 +3061,7 @@ function renderChat() {
   $("messages").dataset.day = "";
   if (active) for (const m of chat(active).messages) appendMessage(m);
   renderPinned();
+  renderSchedBar();
   if (!$("search-bar").hidden) runSearch();
 }
 
@@ -2212,7 +3123,34 @@ function buildMessage(conv, m, prev) {
     del.append(icon("ban", "inline-ico"), m.from === "me" ? "Has eliminado este mensaje" : "Mensaje eliminado");
     li.append(del);
   } else if (c.t === "text") {
-    li.append(text(c.body, "span", "body"));
+    li.append(richText(c.body));
+    const card = linkCard(c.body);
+    if (card) li.append(card);
+  } else if (c.t === "file") {
+    const card = text("", "button", "file-card");
+    card.type = "button";
+    card.title = "Descargar";
+    const info = text("", "span", "file-meta");
+    const ext = (c.name || "").includes(".") ? c.name.split(".").pop().toUpperCase().slice(0, 6) : "";
+    info.append(text(c.name || "archivo", "strong"), text([ext, c.size ? fmtSize(c.size) : ""].filter(Boolean).join(" · "), "small"));
+    card.append(icon("file", "file-ico"), info, icon("download", "file-dl"));
+    card.onclick = async (e) => {
+      e.stopPropagation();
+      const bytes = await history?.getMedia(conv, m.id);
+      if (!bytes) { alert("Este archivo ya no está en este dispositivo."); return; }
+      downloadBytes(bytes, c.name || "archivo");
+    };
+    li.append(card);
+  } else if (c.once && (c.t === "image" || c.t === "video")) {
+    const what = c.t === "image" ? "Foto" : "Vídeo";
+    const b = text("", "button", `once-card${m.opened || m.from === "me" ? " used" : ""}`);
+    b.type = "button";
+    b.append(text("1", "span", "once-badge"), text(m.from === "me" ? `${what} · ver una vez` : m.opened ? "Abierta" : `${what} · ver una vez`, "span"));
+    b.disabled = m.from === "me" || !!m.opened;
+    b.onclick = (e) => { e.stopPropagation(); openOnce(conv, m); };
+    li.append(b);
+  } else if (c.t === "poll") {
+    li.append(buildPoll(conv, m, c));
   } else if (c.t === "sticker") {
     li.append(text(c.id, "span", "sticker-face"));
   } else if (c.t === "audio") {
@@ -2220,7 +3158,17 @@ function buildMessage(conv, m, prev) {
     a.controls = true;
     a.preload = "metadata";
     mediaUrl(conv, m).then((u) => { if (u) a.src = u; else li.classList.add("missing"); });
-    li.append(icon("mic", "mic-icon"), a);
+    a.defaultPlaybackRate = a.playbackRate = voiceRate;
+    const sp = text(rateLabel(voiceRate), "button", "speed-btn");
+    sp.type = "button";
+    sp.title = "Velocidad de reproducción";
+    sp.onclick = (e) => {
+      e.stopPropagation();
+      voiceRate = { 1: 1.5, 1.5: 2, 2: 1 }[voiceRate] || 1;
+      a.defaultPlaybackRate = a.playbackRate = voiceRate;
+      sp.textContent = rateLabel(voiceRate);
+    };
+    li.append(icon("mic", "mic-icon"), a, sp);
   } else {
     const el = document.createElement(c.t === "image" ? "img" : "video");
     if (c.t === "image") {
@@ -2236,6 +3184,8 @@ function buildMessage(conv, m, prev) {
     li.append(el);
   }
   const t = text((m.edited && !m.deleted ? "editado · " : "") + hhmm(m.time), "time");
+  if (m.expires && !m.deleted) t.prepend(icon("clock_small", "time-ico"));
+  if (m.starred && !m.deleted) t.prepend(icon("star", "time-ico star"));
   if (m.from === "me" && !m.deleted) {
     const tick = text("", "span");
     paintTick(tick, statusOf(conv, m));
@@ -2258,6 +3208,7 @@ function buildMessage(conv, m, prev) {
     }
     li.append(box);
   }
+  if (!m.deleted) swipeToReply(li, conv, m);
   // Menú: clic derecho en ordenador, mantener pulsado en el móvil
   li.oncontextmenu = (e) => { e.preventDefault(); openMsgMenu(conv, m, e.clientX, e.clientY); };
   let pressTimer = null;
@@ -2308,6 +3259,360 @@ function rerenderMessage(m) {
   old.replaceWith(li);
 }
 
+// ------------------------------------------------------------- varios archivos a la vez
+
+let sendOnce = false;
+
+async function sendFiles(files, once = false, asDoc = false) {
+  for (const f of files.slice(0, 10)) await sendFile(f, asDoc, once);
+}
+
+// ------------------------------------------------------------- ver una vez
+
+async function openOnce(conv, m) {
+  if (m.opened || m.from === "me") return;
+  const url = await mediaUrl(conv, m);
+  m.opened = true;
+  delete m.url;
+  m.hasMedia = false;
+  save(conv, m);
+  history?.removeMedia(conv, m.id);
+  if (!url) { alert("Esta foto ya no está disponible."); return; }
+  const el = document.createElement(m.content.t === "image" ? "img" : "video");
+  el.src = url;
+  el.className = "viewer";
+  if (m.content.t === "video") { el.controls = true; el.autoplay = true; el.playsInline = true; }
+  el.oncontextmenu = (e) => e.preventDefault();
+  dialog(m.content.t === "image" ? "Foto de ver una vez" : "Vídeo de ver una vez",
+    [el, text("Cuando cierres esta ventana, desaparecerá de este dispositivo.", "p", "hint")]);
+  $("dialog").addEventListener("close", () => { el.removeAttribute("src"); URL.revokeObjectURL(url); }, { once: true });
+}
+
+// ------------------------------------------------------------- velocidad de las notas de voz
+
+let voiceRate = 1;
+const rateLabel = (r) => `${String(r).replace(".", ",")}×`;
+
+// ------------------------------------------------------------- deslizar para responder (móvil)
+
+function swipeToReply(li, conv, m) {
+  let sx = null, sy = 0, dx = 0;
+  li.addEventListener("touchstart", (e) => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; }, { passive: true });
+  li.addEventListener("touchmove", (e) => {
+    if (sx == null) return;
+    const ddx = e.touches[0].clientX - sx, ddy = e.touches[0].clientY - sy;
+    if (Math.abs(ddy) > 24 && Math.abs(ddy) > Math.abs(ddx)) { sx = null; li.style.transform = ""; return; }
+    dx = Math.max(0, Math.min(80, ddx));
+    li.style.transform = dx > 6 ? `translateX(${dx}px)` : "";
+    li.classList.toggle("swipe-ready", dx > 60);
+  }, { passive: true });
+  const end = () => {
+    if (sx == null && !dx) return;
+    sx = null;
+    li.style.transition = "transform .18s ease";
+    li.style.transform = "";
+    li.classList.remove("swipe-ready");
+    setTimeout(() => { li.style.transition = ""; }, 200);
+    const canWrite = (!isGroup(conv) || targetsOf(conv).length) && !mutedHere(conv);
+    if (dx > 60 && canWrite && conv === active) { navigator.vibrate?.(10); startReply(m); $("text").focus(); }
+    dx = 0;
+  };
+  li.addEventListener("touchend", end, { passive: true });
+  li.addEventListener("touchcancel", end, { passive: true });
+}
+
+// ------------------------------------------------------------- mensajes programados
+// Se guardan solo en este dispositivo y se envían cuando llega la hora con la app abierta:
+// el servidor no sabe nada de ellos hasta ese momento.
+
+const schedKey = () => `sc:scheduled:${me.toLowerCase()}`;
+const scheduled = () => store.get(schedKey()) || [];
+
+function showSchedule() {
+  if (!active || mutedHere(active)) return;
+  const conv = active;
+  const body = document.createElement("textarea");
+  body.className = "filter-input sched-text";
+  body.rows = 3;
+  body.maxLength = 4000;
+  body.placeholder = "Escribe el mensaje";
+  body.value = $("text").value;
+  const when = document.createElement("input");
+  when.type = "datetime-local";
+  when.className = "filter-input";
+  const pad = (n) => String(n).padStart(2, "0");
+  const local = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const soon = new Date(Date.now() + 3600000);
+  soon.setSeconds(0, 0);
+  when.value = local(soon);
+  when.min = local(new Date());
+  const err = text("", "p", "error");
+  dialog(`Programar para ${convName(conv)}`, [
+    field("Mensaje", body), field("Cuándo", when),
+    text("Se enviará a esa hora si tienes la app abierta (o en cuanto la abras después). Hasta entonces solo está en este dispositivo.", "p", "hint"),
+    err,
+  ], [["Cancelar"], ["Programar", () => {
+    const at = new Date(when.value).getTime();
+    if (!body.value.trim() || !Number.isFinite(at) || at <= Date.now()) {
+      err.textContent = !body.value.trim() ? "Escribe el mensaje." : "Elige una hora futura.";
+      setTimeout(() => $("dialog").showModal());
+      return;
+    }
+    store.set(schedKey(), [...scheduled(), { id: newId(), conv, body: body.value, at }]);
+    if ($("text").value === body.value) $("text").value = "";
+    toast(`Mensaje programado para ${new Date(at).toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" })}.`);
+    renderSchedBar();
+  }]]);
+  body.focus();
+}
+
+function renderSchedBar() {
+  const bar = $("sched-bar");
+  const list = active && me ? scheduled().filter((s) => s.conv === active) : [];
+  bar.hidden = !list.length;
+  if (!list.length) return;
+  const b = text("", "button", "pinned-body");
+  b.type = "button";
+  const t = text("", "span", "pinned-text");
+  const next = Math.min(...list.map((s) => s.at));
+  t.append(text(list.length === 1 ? "1 mensaje programado" : `${list.length} mensajes programados`, "strong"),
+    text(`El próximo: ${new Date(next).toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" })}`, "span"));
+  b.append(icon("clock", "pinned-ico"), t);
+  b.onclick = () => showScheduledList(active);
+  bar.replaceChildren(b);
+}
+
+function showScheduledList(conv) {
+  const list = scheduled().filter((s) => s.conv === conv).sort((a, b) => a.at - b.at);
+  const box = text("", "div", "starred-list");
+  for (const s of list) {
+    const row = text("", "div", "sched-row");
+    const info = text("", "div", "sched-info");
+    info.append(text(new Date(s.at).toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" }), "time"), text(s.body, "p"));
+    const now = text("Enviar ya", "button", "chip");
+    now.type = "button";
+    now.onclick = () => { dropScheduled(s.id); sendTo(s.conv, { t: "text", body: s.body }); $("dialog").close(); };
+    const del = text("Cancelar", "button", "chip danger");
+    del.type = "button";
+    del.onclick = () => { dropScheduled(s.id); showScheduledList(conv); };
+    const btns = text("", "div", "chip-row");
+    btns.append(now, del);
+    row.append(info, btns);
+    box.append(row);
+  }
+  if (!list.length) box.append(text("No hay mensajes programados en este chat.", "p", "hint"));
+  dialog("Mensajes programados", [box]);
+}
+
+function dropScheduled(id) {
+  store.set(schedKey(), scheduled().filter((s) => s.id !== id));
+  renderSchedBar();
+}
+
+function runScheduled() {
+  if (!me || !client) return;
+  const due = scheduled().filter((s) => s.at <= Date.now());
+  if (!due.length) return;
+  store.set(schedKey(), scheduled().filter((s) => s.at > Date.now()));
+  for (const s of due) {
+    if (mutedHere(s.conv) || (isGroup(s.conv) && !targetsOf(s.conv).length)) continue;
+    sendTo(s.conv, { t: "text", body: s.body });
+  }
+  renderSchedBar();
+}
+
+// ------------------------------------------------------------- galería del chat
+
+function showGallery(conv) {
+  const msgs = chat(conv).messages.filter((m) => !m.deleted && !m.sys && m.content && !m.content.once);
+  const media = msgs.filter((m) => (m.content.t === "image" || m.content.t === "video") && (m.hasMedia || m.url)).reverse();
+  const docs = msgs.filter((m) => m.content.t === "file").reverse();
+  const links = [];
+  for (const m of [...msgs].reverse()) {
+    if (m.content.t !== "text") continue;
+    for (const u of m.content.body.match(/https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]']/g) || []) links.push([m, u]);
+  }
+  const panes = {
+    media: () => {
+      const grid = text("", "div", "gallery-grid");
+      if (!media.length) return text("No hay fotos ni vídeos en este chat.", "p", "hint");
+      for (const m of media) {
+        const cell = text("", "button", "gallery-cell");
+        cell.type = "button";
+        const el = document.createElement(m.content.t === "image" ? "img" : "video");
+        if (m.content.t === "video") { el.muted = true; el.preload = "metadata"; cell.classList.add("is-video"); }
+        el.alt = m.content.name || "";
+        mediaUrl(conv, m).then((u) => { if (u) el.src = u; });
+        cell.append(el);
+        cell.onclick = async () => {
+          const u = await mediaUrl(conv, m);
+          if (!u) return;
+          if (m.content.t === "image") viewImage(u, m.content.name);
+          else {
+            const v = document.createElement("video");
+            v.src = u; v.controls = true; v.autoplay = true; v.playsInline = true; v.className = "viewer";
+            dialog(m.content.name || "Vídeo", [v]);
+          }
+        };
+        grid.append(cell);
+      }
+      return grid;
+    },
+    docs: () => {
+      if (!docs.length) return text("No hay documentos en este chat.", "p", "hint");
+      const box = text("", "div", "starred-list");
+      for (const m of docs) {
+        const b = text("", "button", "starred-row");
+        b.type = "button";
+        const head = text("", "span", "starred-head");
+        head.append(text(m.content.name || "archivo", "strong"), text(shortTime(m.time), "time"));
+        b.append(head, text(m.content.size ? fmtSize(m.content.size) : "", "span", "starred-text"));
+        b.onclick = async () => {
+          const bytes = await history?.getMedia(conv, m.id);
+          if (bytes) downloadBytes(bytes, m.content.name || "archivo"); else alert("Este archivo ya no está en este dispositivo.");
+        };
+        box.append(b);
+      }
+      return box;
+    },
+    links: () => {
+      if (!links.length) return text("No hay enlaces en este chat.", "p", "hint");
+      const box = text("", "div", "starred-list");
+      for (const [m, u] of links) {
+        const a = document.createElement("a");
+        a.className = "starred-row";
+        a.href = u;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer nofollow";
+        const head = text("", "span", "starred-head");
+        let host = u;
+        try { host = new URL(u).hostname.replace(/^www\./, ""); } catch { /* se deja tal cual */ }
+        head.append(text(host, "strong"), text(shortTime(m.time), "time"));
+        a.append(head, text(u, "span", "starred-text"));
+        box.append(a);
+      }
+      return box;
+    },
+  };
+  const tabs = text("", "div", "segmented");
+  const area = text("", "div", "gallery-area");
+  const show = (k) => {
+    for (const b of tabs.children) b.setAttribute("aria-pressed", String(b.value === k));
+    area.replaceChildren(panes[k]());
+  };
+  for (const [k, label, n] of [["media", "Fotos y vídeos", media.length], ["docs", "Documentos", docs.length], ["links", "Enlaces", links.length]]) {
+    const b = text(`${label} (${n})`, "button");
+    b.type = "button";
+    b.value = k;
+    b.onclick = () => show(k);
+    tabs.append(b);
+  }
+  dialog(`Archivos de ${convName(conv)}`, [tabs, area]);
+  show(media.length || (!docs.length && !links.length) ? "media" : docs.length ? "docs" : "links");
+}
+
+// ------------------------------------------------------------- menciones (@usuario) en grupos
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const mentionsMe = (body) => !!me && new RegExp(`(^|[^\\p{L}\\p{N}@])@${escapeRe(me)}(?![A-Za-z0-9_.-]*[A-Za-z0-9_])`, "iu").test(body || "");
+let mentionList = [];
+
+function onMentionInput() {
+  const box = $("mention-box");
+  if (!active || !isGroup(active)) return hideMentions();
+  const ta = $("text");
+  const before = ta.value.slice(0, ta.selectionStart);
+  const m = /(^|\s)@([A-Za-z0-9_.-]{0,32})$/.exec(before);
+  if (!m) return hideMentions();
+  const q = m[2].toLowerCase();
+  mentionList = targetsOf(active)
+    .filter((u) => u.toLowerCase().startsWith(q) || displayName(u).toLowerCase().includes(q))
+    .sort((a, b) => displayName(a).localeCompare(displayName(b), "es"))
+    .slice(0, 6);
+  if (!mentionList.length) return hideMentions();
+  const el = box || (() => { const d = text("", "div", "mention-box"); d.id = "mention-box"; d.setAttribute("role", "listbox"); $("composer").before(d); return d; })();
+  el.replaceChildren(...mentionList.map((u, i) => {
+    const b = text("", "button", `mention-item${i === 0 ? " first" : ""}`);
+    b.type = "button";
+    b.append(setAvatar(text("", "span", "avatar"), displayName(u), avatarOf(u)), text(displayName(u), "strong"), text(`@${u}`, "small"));
+    b.onmousedown = (e) => { e.preventDefault(); insertMention(u); };
+    return b;
+  }));
+  el.hidden = false;
+}
+
+function onMentionKey(e) {
+  if (!$("mention-box") || $("mention-box").hidden || !mentionList.length) return;
+  if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); e.stopImmediatePropagation(); insertMention(mentionList[0]); }
+  else if (e.key === "Escape") hideMentions();
+}
+
+function insertMention(u) {
+  const ta = $("text");
+  const pos = ta.selectionStart;
+  const before = ta.value.slice(0, pos).replace(/@([A-Za-z0-9_.-]{0,32})$/, `@${u} `);
+  ta.value = before + ta.value.slice(pos);
+  ta.selectionStart = ta.selectionEnd = before.length;
+  ta.focus();
+  hideMentions();
+}
+
+function hideMentions() {
+  const b = $("mention-box");
+  if (b) b.hidden = true;
+  mentionList = [];
+}
+
+// *negrita*  _cursiva_  ~tachado~  `código`  y enlaces (solo http/https). Siempre con el DOM, nunca innerHTML.
+const RICH_RE = /(https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'])|`([^`\n]+)`|(?<![\p{L}\p{N}*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\p{L}\p{N}*])|(?<![\p{L}\p{N}_])_(?!\s)([^_\n]+?)(?<!\s)_(?![\p{L}\p{N}_])|(?<![\p{L}\p{N}~])~(?!\s)([^~\n]+?)(?<!\s)~(?![\p{L}\p{N}~])|(?<![\p{L}\p{N}@])@([A-Za-z0-9][A-Za-z0-9_.-]{1,30}[A-Za-z0-9_])/gu;
+
+function richText(body) {
+  const span = text("", "span", "body");
+  let last = 0;
+  for (const m of body.matchAll(RICH_RE)) {
+    if (m.index > last) span.append(body.slice(last, m.index));
+    let el;
+    if (m[1]) {
+      el = document.createElement("a");
+      el.href = m[1];
+      el.textContent = m[1];
+      el.target = "_blank";
+      el.rel = "noopener noreferrer nofollow";
+      el.onclick = (e) => e.stopPropagation();
+    } else if (m[2]) el = text(m[2], "code");
+    else if (m[3]) el = text(m[3], "strong");
+    else if (m[4]) el = text(m[4], "em");
+    else if (m[5]) el = text(m[5], "s");
+    else {
+      el = text(`@${m[6]}`, "span", `mention${same(m[6], me) ? " me" : ""}`);
+      el.title = same(m[6], me) ? "Tú" : displayName(m[6]);
+    }
+    span.append(el);
+    last = m.index + m[0].length;
+  }
+  if (last < body.length) span.append(body.slice(last));
+  return span;
+}
+
+/** Tarjeta del primer enlace: solo con lo que ya está en el texto (no se visita la web: no se filtra tu IP). */
+function linkCard(body) {
+  const raw = body.match(/https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]']/)?.[0];
+  if (!raw) return null;
+  let u;
+  try { u = new URL(raw); } catch { return null; }
+  const a = document.createElement("a");
+  a.className = "link-card";
+  a.href = raw;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer nofollow";
+  a.onclick = (e) => e.stopPropagation();
+  const info = text("", "span", "link-meta");
+  const path = decodeURIComponent(u.pathname + u.search).replace(/\/$/, "");
+  info.append(text(u.hostname.replace(/^www\./, ""), "strong"), text(path || "Abrir enlace", "small"));
+  a.append(icon("link", "link-ico"), info);
+  return a;
+}
+
 function jumpTo(mid) {
   const m = chat(active).messages.find((x) => x.id === mid);
   if (!m?.el) return;
@@ -2347,7 +3652,8 @@ function openMsgMenu(conv, m, x, y) {
   const canWrite = !isGroup(conv) || targetsOf(conv).length;
   if (!m.deleted && canWrite) item("reply", "Responder", () => startReply(m));
   if (!m.deleted && m.content.t === "text") item("copy", "Copiar", () => navigator.clipboard?.writeText(m.content.body));
-  if (!m.deleted && m.content.t !== "unsupported") item("forward", "Reenviar", () => showForward(conv, m));
+  if (!m.deleted && m.content.t !== "unsupported" && !m.content.once) item("forward", "Reenviar", () => showForward(conv, m));
+  if (!m.deleted) item("star", m.starred ? "Quitar destacado" : "Destacar", () => { m.starred = !m.starred; save(conv, m); });
   if (!m.deleted) {
     const pinned = meta(conv).pinMsg === m.id;
     item("pin", pinned ? "Desfijar mensaje" : "Fijar mensaje", () => { setMeta(conv, { pinMsg: pinned ? null : m.id }); renderPinned(); });
@@ -2449,17 +3755,43 @@ async function main() {
   $("theme-btn").onclick = () => showSettings("appearance");
   $("login-theme-btn").onclick = () => showSettings("appearance", false);
   $("emoji-btn").onclick = togglePicker;
-  $("attach-btn").onclick = () => $("file-input").click();
-  $("file-input").onchange = () => { sendFile($("file-input").files[0]); $("file-input").value = ""; };
+  $("attach-btn").onclick = (e) => {
+    e.stopPropagation();
+    if ($("msg-menu")) return closeMsgMenu();
+    const [menu, item] = newMenu();
+    item("image", "Foto o vídeo", () => { sendOnce = false; $("file-input").click(); });
+    item("eye", "Foto o vídeo de ver una vez", () => { sendOnce = true; $("file-input").click(); });
+    item("file", "Documento", () => $("doc-input").click());
+    item("poll", "Encuesta", showNewPoll);
+    item("clock", "Programar mensaje", () => showSchedule());
+    const r = e.currentTarget.getBoundingClientRect();
+    placeMenu(menu, r.left, r.top - 230);
+  };
+  $("doc-input").multiple = true;
+  $("doc-input").onchange = () => { sendFiles([...$("doc-input").files], false, true); $("doc-input").value = ""; };
+  $("call-btn").append(icon("call"));
+  $("video-btn").append(icon("video"));
+  $("call-btn").onclick = () => (isGroup(active) ? startGroupCall(false) : startCall(false));
+  $("video-btn").onclick = () => (isGroup(active) ? startGroupCall(true) : startCall(true));
+  setInterval(sweepExpired, 30000);
+  window.addEventListener("hashchange", () => checkInvite());
+  $("file-input").multiple = true;
+  $("file-input").onchange = () => { sendFiles([...$("file-input").files], sendOnce); sendOnce = false; $("file-input").value = ""; };
+  $("text").addEventListener("input", onMentionInput);
+  $("text").addEventListener("keydown", onMentionKey, true);
+  $("text").addEventListener("blur", () => setTimeout(hideMentions, 150));
+  $("send-btn").addEventListener("contextmenu", (e) => { e.preventDefault(); showSchedule(); });
+  longPress($("send-btn"), () => showSchedule());
+  setInterval(runScheduled, 15000);
   for (const b of document.querySelectorAll(".picker-tabs button")) b.onclick = () => { pickerTab = b.dataset.tab; renderPicker(); };
   $("text").addEventListener("paste", (e) => {
-    const f = e.clipboardData?.files?.[0];
-    if (f) { e.preventDefault(); sendFile(f); }
+    const files = [...(e.clipboardData?.files || [])];
+    if (files.length) { e.preventDefault(); sendFiles(files); }
   });
   const chatEl = $("chat");
   chatEl.addEventListener("dragover", (e) => { if (active && e.dataTransfer.types.includes("Files")) { e.preventDefault(); $("drop-hint").hidden = false; } });
   chatEl.addEventListener("dragleave", (e) => { if (!chatEl.contains(e.relatedTarget)) $("drop-hint").hidden = true; });
-  chatEl.addEventListener("drop", (e) => { e.preventDefault(); $("drop-hint").hidden = true; sendFile(e.dataTransfer.files[0]); });
+  chatEl.addEventListener("drop", (e) => { e.preventDefault(); $("drop-hint").hidden = true; sendFiles([...e.dataTransfer.files]); });
   $("back-btn").onclick = closeChat;
   $("search-btn").append(icon("search"));
   $("chat-menu-btn").append(icon("more"));

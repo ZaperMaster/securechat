@@ -126,6 +126,10 @@ export class History {
     await tx("media", "readwrite", (s) => s.delete(this.k(peer, id)));
   }
 
+  async removeMedia(peer, id) {
+    await tx("media", "readwrite", (s) => s.delete(this.k(peer, id)));
+  }
+
   async deleteChat(peer) {
     const prefix = `${this.account}|${peer.toLowerCase()}|`;
     const range = IDBKeyRange.bound(prefix, `${prefix}￿`);

@@ -51,6 +51,23 @@ def receipt(ids: list[str], status: str) -> str:
     return json.dumps({"t": "receipt", "ids": ids, "s": status})
 
 
+PAD_BUCKETS = (256, 1024, 4096, 16384, 65536)
+PAD_BLOCK = 65536
+PAD_FIELD = 9  # ,"pad":""
+
+
+def pad_json(plaintext: str) -> str:
+    """Relleno: el JSON pasa a medir (en bytes UTF-8) uno de los tamaños fijos.
+
+    Igual que la web (padJson): así el tamaño del mensaje cifrado no delata su contenido.
+    """
+    if not (plaintext.startswith("{") and plaintext.endswith("}")) or len(plaintext) < 3:
+        return plaintext
+    need = len(plaintext.encode("utf-8")) + PAD_FIELD
+    target = next((b for b in PAD_BUCKETS if b >= need), -(-need // PAD_BLOCK) * PAD_BLOCK)
+    return plaintext[:-1] + ',"pad":"' + " " * (target - need) + '"}'
+
+
 def decode(plaintext: str) -> dict:
     """Interpreta un mensaje descifrado. Si no es JSON válido, se trata como texto."""
     try:
@@ -74,4 +91,11 @@ def describe(c: dict) -> str:
     if t in ("image", "video"):
         kind = "GIF" if c.get("mime") == "image/gif" else ("imagen" if t == "image" else "vídeo")
         return f"[{kind}: {c.get('name') or 'sin nombre'}]"
+    if t == "file":
+        return f"[documento: {c.get('name') or 'sin nombre'}]"
+    if t == "poll":
+        opts = " / ".join(str(o) for o in c.get("opts", []))
+        return f"[encuesta: {c.get('q', '')} — {opts}]"
+    if t == "call":
+        return "[llamada: ábrela en la app web]"
     return f"[contenido no soportado: {t}]"

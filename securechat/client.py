@@ -21,6 +21,7 @@ from websockets.exceptions import ConnectionClosed
 from . import content
 from .contacts import Contacts
 from .crypto import CryptoError, b64d, b64e
+from .content import pad_json
 from .ratchet import DeviceKeys, IdentityMismatch, decrypt_from, encrypt_for, initiate
 from .server import MAX_FRAME, auth_message
 
@@ -217,7 +218,7 @@ class ChatClient:
                 r = initiate(self.name, self.device, self.identity, user if not mine else self.name, dev, ik,
                              bundle, None if mine else self.contacts.pinned_key(user))
                 self.keys.push_new(user, dev, r)
-            payload = encrypt_for(self.name, self.device, r, plaintext)
+            payload = encrypt_for(self.name, self.device, r, pad_json(plaintext))
             self.keys.store(user, dev, r)
             try:
                 ack = await self._request(type="send", to=user, device=dev, payload=payload,

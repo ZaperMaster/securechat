@@ -159,6 +159,8 @@
             <span id="peer-status" class="status"></span>
           </span>
         </button>
+        <button id="call-btn" class="icon-btn" type="button" title="Llamada de voz" aria-label="Llamada de voz"></button>
+        <button id="video-btn" class="icon-btn" type="button" title="Videollamada" aria-label="Videollamada"></button>
         <button id="search-btn" class="icon-btn" type="button" title="Buscar en el chat" aria-label="Buscar en el chat"></button>
         <button id="chat-menu-btn" class="icon-btn" type="button" title="Más opciones" aria-label="Más opciones del chat"></button>
       </header>
@@ -170,6 +172,7 @@
         <button id="search-close" class="icon-btn" type="button" title="Cerrar" aria-label="Cerrar búsqueda"></button>
       </div>
       <div id="pinned-bar" class="pinned-bar" hidden></div>
+      <div id="sched-bar" class="pinned-bar sched" hidden></div>
       <ol id="messages" class="messages" aria-live="polite"></ol>
       <div id="empty-chat" class="empty-chat">
         <div class="empty-art"><img src="lock.svg" alt=""></div>
@@ -196,6 +199,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20 11.5-8.4 8.4a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/></svg>
         </button>
         <input id="file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden>
+        <input id="doc-input" type="file" hidden>
         <input id="text" placeholder="Escribe un mensaje cifrado…" maxlength="4000" autocomplete="off" disabled>
         <div id="rec-bar" class="rec-bar" hidden>
           <button id="rec-cancel" class="icon-btn" type="button" aria-label="Cancelar grabación"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>
