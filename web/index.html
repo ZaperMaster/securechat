@@ -32,10 +32,9 @@
         <h2 id="auth-title" class="auth-title">Iniciar sesión</h2>
         <p id="auth-sub" class="auth-sub">Entra con tu usuario y contraseña desde cualquier dispositivo.</p>
         <label class="field">
-          <span>Nombre de usuario</span>
-          <input id="login-name" required pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{1,30}[A-Za-z0-9_]" placeholder="Alejandro_99"
-                 autocapitalize="none" spellcheck="false" maxlength="32" autocomplete="username"
-                 title="3-32 caracteres: letras, números, '_', '.' o '-'">
+          <span id="login-name-label">Correo o nombre de usuario</span>
+          <input id="login-name" required placeholder="tu@correo.com o Alejandro_99"
+                 autocapitalize="none" spellcheck="false" maxlength="254" autocomplete="username">
         </label>
         <label class="field">
           <span>Contraseña</span>

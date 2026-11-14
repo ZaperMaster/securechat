@@ -49,6 +49,7 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{1,30}[A-Za-z0-9_]$")
 USERNAME_HELP = "3-32 caracteres: letras, números, '_', '.' o '-'"
 # Cabe un vídeo de ~8 MB cifrado y en base64 (dos veces) dentro de un mensaje.
 MAX_FRAME = 20 * 1024 * 1024
+EMAIL_SENDS_PER_HOUR = 5
 LOOKUP_LIMIT = 30  # búsquedas por minuto y conexión (frena la enumeración de usuarios)
 AUTH_TIMEOUT = 10
 AUTH_CONTEXT = b"securechat-auth-v1"
@@ -158,6 +159,7 @@ class RelayServer:
         self.access_code = normalize_code(access_code) or None
         self._code_fails: dict[str, list[float]] = {}
         self._keystore_hits: dict[str, list[float]] = {}
+        self._email_sends: dict[str, list[float]] = {}  # envíos de códigos por cuenta (límite por hora)
         # canon(nombre) -> {"name", "key", "devices": {id: {"bundle", "opks", "seen"}}, ...}
         self.registry: dict[str, dict] = {}
         self.online: dict[str, dict[str, ServerConnection]] = {}  # canon -> {dispositivo: conexión}
@@ -302,9 +304,66 @@ class RelayServer:
         await _send(ws, type="error", code="verify_failed", message="no se pudo verificar el correo; vuelve a intentarlo")
         return None
 
+    async def _start_email_change(self, ws: ServerConnection, c: str, msg: dict) -> dict | None:
+        """Añadir o cambiar el correo de una cuenta ya creada: se manda un código al correo nuevo."""
+        rid = msg.get("id")
+
+        async def fail(code: str, message: str) -> None:
+            await _send(ws, type="error", id=rid, code=code, message=message)
+
+        if not self.email_sender:
+            await fail("email_unavailable", "este servidor no tiene configurado el envío de correos")
+            return None
+        email = msg.get("email")
+        if not valid_email(email):
+            await fail("email_invalid", "ese correo no es válido")
+            return None
+        email = normalize_email(email)
+        h = self.email_hash(email)
+        if any(r.get("email") == h for k, r in self.registry.items() if k != c):
+            await fail("email_used", "ese correo ya tiene una cuenta")
+            return None
+        now = time.monotonic()
+        sends = self._email_sends[c] = [t for t in self._email_sends.get(c, []) if now - t < 3600] + [now]
+        if len(sends) > EMAIL_SENDS_PER_HOUR:
+            await fail("too_many", "has pedido demasiados códigos; espera un rato")
+            return None
+        code = new_code()
+        try:
+            await self.email_sender.send(email, code, purpose="change")
+        except Exception:  # noqa: BLE001 - cualquier fallo de SMTP
+            log.exception("no se pudo enviar el correo")
+            await fail("email_failed", "el servidor no pudo enviar el correo; avisa a quien lo gestiona")
+            return None
+        await _send(ws, type="email-code-sent", id=rid, to=mask(email))
+        return {"hash": h, "code": code, "deadline": now + CODE_TTL, "tries": MAX_TRIES}
+
+    async def _finish_email_change(self, ws: ServerConnection, c: str, msg: dict, pending: dict | None) -> dict | None:
+        rid = msg.get("id")
+        if not pending or time.monotonic() > pending["deadline"]:
+            await _send(ws, type="error", id=rid, code="code_expired", message="el código ha caducado; pide otro")
+            return None
+        if hmac.compare_digest(str(msg.get("code", "")).strip(), pending["code"]):
+            if any(r.get("email") == pending["hash"] for k, r in self.registry.items() if k != c):
+                await _send(ws, type="error", id=rid, code="email_used", message="ese correo ya tiene una cuenta")
+                return None
+            self.registry[c]["email"] = pending["hash"]
+            self._save()
+            log.info("%s ha vinculado un correo", self.registry[c]["name"])
+            await _send(ws, type="email-ok", id=rid)
+            return None
+        pending["tries"] -= 1
+        if pending["tries"] <= 0:
+            await _send(ws, type="error", id=rid, code="code_expired", message="demasiados intentos; pide otro código")
+            return None
+        await _send(ws, type="error", id=rid, code="wrong_code",
+                    message=f"código incorrecto, te quedan {pending['tries']} intentos")
+        return pending
+
     async def handler(self, ws: ServerConnection) -> None:
         user = device = None
         lookups: list[float] = []
+        pending_email: dict | None = None  # cambio de correo a medias (código enviado)
         try:
             auth = await self._authenticate(ws)
             if auth is None:
@@ -320,7 +379,8 @@ class RelayServer:
             r = self.registry[c]
             await _send(ws, type="welcome", user=user, device=device,
                         devices=[d for d in r["devices"] if d != device],
-                        opks=len(r["devices"][device].get("opks", [])))
+                        opks=len(r["devices"][device].get("opks", [])),
+                        has_email=bool(r.get("email")), email_available=bool(self.email_sender))
             log.info("%s conectado desde %s (%d en línea)", user, device, len(self.online))
             await self._flush_queue(c, device, ws)
             # Mis otros dispositivos se enteran de que existe este (para mandarle copias)
@@ -375,6 +435,10 @@ class RelayServer:
                     subs = self.registry[c].get("push", [])
                     self.registry[c]["push"] = [x for x in subs if x["endpoint"] != msg.get("endpoint")]
                     self._save()
+                elif t == "set-email":
+                    pending_email = await self._start_email_change(ws, c, msg)
+                elif t == "confirm-email":
+                    pending_email = await self._finish_email_change(ws, c, msg, pending_email)
                 elif t == "privacy":
                     reg = self.registry[c]
                     hide = not bool(msg.get("last_seen", True))
@@ -522,7 +586,12 @@ class RelayServer:
         if self.access_code and not hmac.compare_digest(normalize_code(q.get("code", [""])[0]), self.access_code):
             return _response(403, "Forbidden", b'{"error": "codigo de acceso incorrecto"}', "application/json")
         name = q.get("user", [""])[0]
-        r = self.registry.get(canon(name)) if USERNAME_RE.match(name) else None
+        if "@" in name:
+            # Inicio de sesión con correo: se compara su huella, la dirección nunca se guarda
+            h = self.email_hash(name) if valid_email(name) else None
+            r = next((x for x in self.registry.values() if h and x.get("email") == h), None)
+        else:
+            r = self.registry.get(canon(name)) if USERNAME_RE.match(name) else None
         if not r or not r.get("keystore"):
             return _response(404, "Not Found", b'{"error": "no encontrada"}', "application/json")
         body = json.dumps({"user": r["name"], "blob": r["keystore"]}).encode()

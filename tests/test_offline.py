@@ -241,3 +241,47 @@ def test_away_and_invisible_status(tmp_path):
         await alice.close()
         srv.close()
     run(main())
+
+
+def test_login_with_email_and_change_it(tmp_path):
+    async def main():
+        from securechat.crypto import save_identity
+        from securechat.email_verify import ConsoleSender
+        sender = ConsoleSender()
+        db = tmp_path / "users.json"
+        srv, url = await start(RelayServer(db, None, None, sender))
+        async def last_code(to, err):
+            return sender.sent[-1][1]
+
+        key = SigningKey.generate()
+        c = ChatClient("Laura", key, Contacts(None), prekeys_path=tmp_path / "l.json")
+        await c.connect(url, email="laura@example.com", on_verify=last_code)
+        save_identity(tmp_path / "id.json", key, "contraseña larga", opslimit=2, memlimit=64 * 1024 * 1024)
+        blob = json.loads((tmp_path / "id.json").read_text(encoding="utf-8"))
+        await c._send(type="keystore", blob={**blob, "username": "Laura"})
+        await asyncio.sleep(0.1)
+
+        # Se encuentra la cuenta por el correo (sin distinguir mayúsculas), nunca por otro
+        status, _, body = await http_get(url, "/keystore?user=Laura%40Example.com")
+        assert status == 200 and json.loads(body)["user"] == "Laura"
+        assert (await http_get(url, "/keystore?user=otra%40example.com"))[0] == 404
+
+        # Cambiar el correo: código al correo nuevo; uno incorrecto no vale
+        r = await c._request(type="set-email", email="laura.nueva@example.com")
+        assert r["type"] == "email-code-sent" and sender.sent[-1][0] == "laura.nueva@example.com"
+        with pytest.raises(ClientError, match="incorrecto"):
+            await c._request(type="confirm-email", code="999999" if sender.sent[-1][1] != "999999" else "111111")
+        assert (await c._request(type="confirm-email", code=sender.sent[-1][1]))["type"] == "email-ok"
+        assert (await http_get(url, "/keystore?user=laura.nueva%40example.com"))[0] == 200
+        assert (await http_get(url, "/keystore?user=laura%40example.com"))[0] == 404
+        assert "example.com" not in db.read_text(encoding="utf-8")
+
+        # Otro usuario no puede quedarse con un correo ya usado
+        other = ChatClient("Pablo", SigningKey.generate(), Contacts(None), prekeys_path=tmp_path / "p.json")
+        await other.connect(url, email="pablo@example.com", on_verify=last_code)
+        with pytest.raises(ClientError, match="ya tiene una cuenta"):
+            await other._request(type="set-email", email="laura.nueva@example.com")
+        await other.close()
+        await c.close()
+        srv.close()
+    run(main())

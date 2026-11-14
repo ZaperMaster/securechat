@@ -51,20 +51,26 @@ function updateLoginMode() {
   $("auth-title").textContent = reg ? "Crear cuenta" : "Iniciar sesión";
   $("auth-sub").textContent = reg
     ? "Elige tu @usuario y una contraseña. Después podrás poner tu nombre visible y una foto."
-    : "Entra con tu usuario y contraseña desde cualquier dispositivo.";
+    : "Entra con tu correo (o tu @usuario) y tu contraseña desde cualquier dispositivo.";
+  $("login-name-label").textContent = reg ? "Nombre de usuario" : "Correo o nombre de usuario";
+  $("login-name").placeholder = reg ? "Alejandro_99" : "tu@correo.com o Alejandro_99";
+  $("login-name").maxLength = reg ? 32 : 254;
   $("login-pass2").required = reg;
   $("login-email-wrap").hidden = !(reg && serverConfig.email_required);
   $("login-email").required = reg && serverConfig.email_required;
   $("login-btn").textContent = reg ? "Crear cuenta" : "Entrar";
   $("login-pass").autocomplete = reg ? "new-password" : "current-password";
-  $("login-hint").textContent = name && !NAME_RE.test(name) ? "3-32 caracteres: letras, números, '_', '.' o '-'."
+  $("login-hint").textContent = name && (reg || !name.includes("@")) && !NAME_RE.test(name.replace(/^@/, ""))
+    ? "El @usuario tiene 3-32 caracteres: letras, números, '_', '.' o '-'."
     : reg ? "Si olvidas la contraseña no se puede recuperar: nadie (ni el servidor) puede abrir tu cuenta sin ella." : "";
   $("login-remember-wrap").hidden = !Vault.canRemember();
 }
 
 /** Busca la copia cifrada de la cuenta: primero en este dispositivo y si no, en el servidor. */
+const EMAIL_LIKE = /^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$/;
+
 async function findKeystore(name) {
-  const local = store.get(idKey(name));
+  const local = name.includes("@") ? null : store.get(idKey(name));
   if (local) return local;
   const code = encodeURIComponent($("login-code").value.trim());
   let r;
@@ -89,6 +95,8 @@ async function onLogin(ev) {
   await new Promise((r) => setTimeout(r, 30)); // deja pintar antes de Argon2id
   try {
     if (serverConfig.code_required) store.set("sc:code", $("login-code").value.trim());
+    if (reg && !NAME_RE.test(name)) throw new Error("El @usuario tiene 3-32 caracteres: letras, números, '_', '.' o '-'.");
+    if (!reg && !NAME_RE.test(name) && !EMAIL_LIKE.test(name)) throw new Error("Escribe tu correo o tu @usuario.");
     if (reg) {
       if (pass !== $("login-pass2").value) throw new Error("Las contraseñas no coinciden.");
       if (store.get(idKey(name))) throw new Error(`Ya tienes la cuenta @${name} en este dispositivo. Inicia sesión.`);
@@ -98,11 +106,11 @@ async function onLogin(ev) {
       await startApp(name, { mustConnect: true, email: $("login-email").value.trim() || null, blob, isNew: true });
     } else {
       const blob = await findKeystore(name);
-      if (!blob) throw new Error("Usuario o contraseña incorrectos.");
+      if (!blob) throw new Error(name.includes("@") ? "Correo o contraseña incorrectos." : "Usuario o contraseña incorrectos.");
       $("login-btn").textContent = "Abriendo tu cuenta…";
       await new Promise((r) => setTimeout(r, 30));
       try { identity = P.loadIdentity(blob, pass); }
-      catch { throw new Error("Usuario o contraseña incorrectos."); }
+      catch { throw new Error(name.includes("@") ? "Correo o contraseña incorrectos." : "Usuario o contraseña incorrectos."); }
       store.set(idKey(blob.username || name), blob);
       await startApp(blob.username || name, { blob });
     }
@@ -1821,7 +1829,7 @@ function renderGroupCall() {
   c.videos ??= new Map();
   const tile = (name, avatar, stream, mine = false) => {
     const t = text("", "div", `call-tile${mine ? " mine" : ""}`);
-    const key = mine ? " yo" : name;
+    const key = mine ? "__yo__" : name;
     let v = c.videos.get(key);
     if (!v) {
       v = document.createElement("video");
@@ -2053,6 +2061,63 @@ function input(value, { max = 64, placeholder = "" } = {}) {
   return i;
 }
 
+/** Correo de la cuenta: sirve para iniciar sesión. Se confirma con un código enviado al correo. */
+function emailSection() {
+  const box = text("", "div", "email-box");
+  if (!client?.emailAvailable) return box;
+  box.append(text("Correo de la cuenta", "h3", "settings-h"),
+    text(client.hasEmail ? "Tienes un correo vinculado: puedes iniciar sesión con él." : "Aún no tienes correo. Añádelo para poder entrar con él.", "p", "hint"));
+  const b = withIcon("mail", client.hasEmail ? "Cambiar correo" : "Añadir correo", "button", "chip");
+  b.type = "button";
+  b.onclick = () => showEmailChange();
+  box.append(b);
+  return box;
+}
+
+function showEmailChange() {
+  const mail = input("", { max: 254, placeholder: "tu@correo.com" });
+  mail.type = "email";
+  mail.autocomplete = "email";
+  const code = input("", { max: 6, placeholder: "000000" });
+  code.inputMode = "numeric";
+  code.autocomplete = "one-time-code";
+  const codeField = field("Código que te hemos enviado", code);
+  codeField.hidden = true;
+  const msg = text("", "p", "hint");
+  const err = text("", "p", "error");
+  let step = "email";
+  dialog(client.hasEmail ? "Cambiar correo" : "Añadir correo", [
+    text("Te enviaremos un código para comprobar que el correo es tuyo. El servidor no guarda la dirección, solo una huella para reconocerla al iniciar sesión.", "p", "hint"),
+    field("Correo", mail), codeField, msg, err,
+  ], [["Cancelar"], [step === "email" ? "Enviar código" : "Confirmar", async () => {
+    const reopen = () => setTimeout(() => $("dialog").showModal());
+    err.textContent = "";
+    reopen();
+    try {
+      if (step === "email") {
+        if (!EMAIL_LIKE.test(mail.value.trim())) { err.textContent = "Escribe un correo válido."; return; }
+        const r = await client.request({ type: "set-email", email: mail.value.trim() }, 30000);
+        step = "code";
+        mail.readOnly = true;
+        codeField.hidden = false;
+        msg.textContent = `Código enviado a ${r.to}. Caduca en 10 minutos.`;
+        $("dlg-actions").lastChild.textContent = "Confirmar";
+        code.focus();
+      } else {
+        await client.request({ type: "confirm-email", code: code.value.trim() });
+        client.hasEmail = true;
+        seclog("Has vinculado un correo a tu cuenta.");
+        $("dialog").close();
+        toast("Correo vinculado. Ya puedes iniciar sesión con él.");
+      }
+    } catch (e) {
+      if (e.code === "code_expired") { step = "email"; mail.readOnly = false; codeField.hidden = true; code.value = ""; $("dlg-actions").lastChild.textContent = "Enviar código"; }
+      err.textContent = e.message.charAt(0).toUpperCase() + e.message.slice(1) + ".";
+    }
+  }]]);
+  mail.focus();
+}
+
 function showMyProfile({ welcome = false } = {}) {
   let avatar = profile.avatar;
   const preview = setAvatar(text("", "span", "avatar xl"), profile.name || me, avatar);
@@ -2099,6 +2164,7 @@ function showMyProfile({ welcome = false } = {}) {
     text("Tu estado", "h3", "settings-h"), statusPicker(),
     field("Frase de perfil", bioIn, "Una frase que verán tus contactos."),
     text(`Tu usuario es @${me}. Es único y es lo que otros escriben para encontrarte.`, "p", "hint"),
+    emailSection(),
     text("Tu nombre, estado y foto viajan cifrados: solo los ven tus contactos, nunca el servidor.", "p", "hint"),
     advancedSecurityMine(),
   ], [["Cancelar"], ["Guardar", () => {

@@ -72,7 +72,7 @@ class ConsoleSender:
     def __init__(self):
         self.sent: list[tuple[str, str]] = []  # para los tests
 
-    async def send(self, to: str, code: str) -> None:
+    async def send(self, to: str, code: str, purpose: str = "register") -> None:
         self.sent.append((to, code))
         print(f"\n  [correo de prueba] código para {to}: {code}\n", flush=True)
 
@@ -100,13 +100,16 @@ class SmtpSender:
             return None
         return cls(c["host"], int(c.get("port", 587)), c["user"], c["password"], c.get("from") or c["user"])
 
-    def _send_sync(self, to: str, code: str) -> None:
+    def _send_sync(self, to: str, code: str, purpose: str = "register") -> None:
+        what = "vincular este correo a tu cuenta de SecureChat" if purpose == "change" else "crear tu cuenta de SecureChat"
         msg = EmailMessage()
         msg["Subject"] = f"{code} es tu código de SecureChat"
         msg["From"] = self.sender
         msg["To"] = to
-        msg.set_content(f"Tu código para crear la cuenta de SecureChat es:\n\n    {code}\n\n"
-                        "Caduca en 10 minutos. Si no has sido tú, ignora este correo.")
+        msg.set_content(f"Hola:\n\nTu código para {what} es:\n\n    {code}\n\n"
+                        "Caduca en 10 minutos. Si no has sido tú, ignora este correo: nadie podrá usarlo sin el código.\n\n"
+                        "Con este correo podrás iniciar sesión además de con tu @usuario. "
+                        "SecureChat no guarda la dirección: solo una huella cifrada para reconocerla.")
         context = ssl.create_default_context()
         if self.port == 465:
             with smtplib.SMTP_SSL(self.host, self.port, context=context, timeout=20) as s:
@@ -118,6 +121,6 @@ class SmtpSender:
                 s.login(self.user, self.password)
                 s.send_message(msg)
 
-    async def send(self, to: str, code: str) -> None:
-        await asyncio.to_thread(self._send_sync, to, code)
+    async def send(self, to: str, code: str, purpose: str = "register") -> None:
+        await asyncio.to_thread(self._send_sync, to, code, purpose)
         log.info("código de verificación enviado a %s", mask(to))

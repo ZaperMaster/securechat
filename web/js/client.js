@@ -221,6 +221,8 @@ export class ChatClient {
           stage = "ready";
           this.name = this.keys.user = msg.user; // grafía oficial registrada en el servidor
           this.myDevices = msg.devices || [];
+          this.hasEmail = !!msg.has_email;
+          this.emailAvailable = !!msg.email_available;
           this.deviceCache.clear();
           this.profileSent.clear();
           this.request(this.keys.uploadMessage(msg.opks || 0)).catch(() => {});
