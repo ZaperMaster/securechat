@@ -98,6 +98,15 @@ class SmtpSender:
         c = json.loads(path.read_text(encoding="utf-8"))
         if not c.get("host") or not c.get("user") or not c.get("password"):
             return None
+        if "PEGA_AQUI" in c["password"] or "contraseña" in c["password"]:
+            log.warning("%s aún no tiene la contraseña de aplicación: el correo sigue desactivado", path)
+            return None
+        # Gmail solo acepta "contraseñas de aplicación" (16 letras). Con la contraseña normal
+        # fallarían todos los registros, así que mejor dejar el correo desactivado y avisar.
+        if "gmail" in c["host"].lower() and not re.fullmatch(r"[a-zA-Z]{16}", c["password"].replace(" ", "")):
+            log.warning("%s: para Gmail hace falta una contraseña de aplicación de 16 letras; "
+                        "el correo sigue desactivado", path)
+            return None
         return cls(c["host"], int(c.get("port", 587)), c["user"], c["password"], c.get("from") or c["user"])
 
     def _send_sync(self, to: str, code: str, purpose: str = "register") -> None:

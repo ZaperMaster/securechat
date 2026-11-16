@@ -620,11 +620,19 @@ dialog .hint { font-size: 13px; color: var(--muted); margin: 0 0 8px; }
 .verify-step { text-align: center; margin-top: 18px; }
 .verify-icon { font-size: 44px; }
 .verify-step h2 { margin: 6px 0; font-size: 20px; }
-.verify-step form { display: grid; gap: 12px; margin-top: 16px; }
+.verify-step form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 16px; }
+.verify-step form > * { min-width: 0; width: 100%; box-sizing: border-box; }
+.verify-step form > button.link { width: auto; justify-self: center; }
+.verify-step p { overflow-wrap: anywhere; }
 #verify-code {
-  text-align: center; font: 600 28px/1 var(--mono); letter-spacing: 10px; padding: 12px;
-  border-radius: 14px; border: 1px solid var(--line); background: var(--panel-2);
+  width: 100%; min-width: 0; box-sizing: border-box;
+  text-align: center; font: 600 clamp(22px, 7vw, 28px)/1 var(--mono); letter-spacing: .45em;
+  /* el espaciado se añade también tras el último dígito: lo compensamos a la izquierda */
+  padding: 14px 12px 14px calc(12px + .45em);
+  border-radius: 14px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
 }
+#verify-code:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#verify-error:empty { display: none; }
 button.link { background: none; color: var(--muted); text-decoration: underline; padding: 4px; }
 .chip.danger { color: var(--error); margin-top: 14px; }
 
