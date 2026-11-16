@@ -1200,3 +1200,14 @@ a.starred-row { text-decoration: none; }
 .login-card .verify-step { text-align: left; }
 .login-card .verify-step .state-icon { margin: 0 0 8px; }
 .login-card .verify-step form > button.link { justify-self: start; padding-left: 0; }
+
+/* Logo compacto: icono y nombre en una línea. En ordenador la frase ya está junto a la ilustración */
+.login-card .brand { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 12px; }
+.login-card .brand-mark { width: 44px; height: 44px; border-radius: 13px; grid-row: span 2; }
+.login-card .brand-mark img { width: 26px; height: 26px; }
+.login-card .brand h1 { margin: 0; font-size: 22px; }
+.login-card .brand-tag { margin: 0; font-size: 13px; }
+@media (min-width: 900px) {
+  .login-card .brand-tag { display: none; }
+  .login-card .brand-mark { grid-row: auto; }
+}
