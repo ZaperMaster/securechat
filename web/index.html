@@ -82,6 +82,85 @@
       </ul>
       <p class="disclaimer">Proyecto educativo, no auditado. No lo uses para información sensible real.</p>
     </div>
+    <aside class="login-art" aria-hidden="true">
+      <svg class="login-illustration" viewBox="0 0 600 560" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="la-shield" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#fff"/>
+            <stop offset="1" stop-color="#fff" stop-opacity=".86"/>
+          </linearGradient>
+          <filter id="la-shadow" x="-30%" y="-30%" width="160%" height="160%">
+            <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000" flood-opacity=".22"/>
+          </filter>
+        </defs>
+        <!-- Red cifrada de fondo -->
+        <g class="la-net">
+          <path d="M40 90 170 40 300 96 440 46 560 120M40 90 104 214 170 40M440 46 516 236 560 120M104 214 40 344M516 236 566 392M40 344 116 486 262 526M566 392 474 506 340 528M104 214 220 250M516 236 430 270"/>
+          <g class="la-node">
+            <circle cx="40" cy="90" r="5"/><circle cx="170" cy="40" r="6"/><circle cx="300" cy="96" r="4"/>
+            <circle cx="440" cy="46" r="6"/><circle cx="560" cy="120" r="5"/><circle cx="104" cy="214" r="5"/>
+            <circle cx="516" cy="236" r="6"/><circle cx="40" cy="344" r="4"/><circle cx="566" cy="392" r="5"/>
+            <circle cx="116" cy="486" r="6"/><circle cx="262" cy="526" r="4"/><circle cx="474" cy="506" r="6"/>
+          </g>
+        </g>
+        <g class="la-bits">
+          <text x="196" y="118">01101001</text><text x="470" y="170">a3f9·07c1</text>
+          <text x="458" y="460">10010110</text>
+          <text x="250" y="60">X25519</text><text x="300" y="548">XChaCha20</text>
+        </g>
+        <!-- Ventana de chat -->
+        <g transform="translate(60 132)" filter="url(#la-shadow)">
+          <rect class="la-glass" width="330" height="312" rx="28"/>
+          <circle class="la-w" cx="40" cy="40" r="17"/>
+          <path class="la-acc-stroke" d="M33 41.5l5 5 9-10" fill="none" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <rect class="la-w" x="68" y="28" width="118" height="10" rx="5"/>
+          <rect class="la-w2" x="68" y="45" width="74" height="8" rx="4"/>
+          <rect class="la-w2" x="20" y="76" width="290" height="1.5"/>
+          <!-- mensaje recibido -->
+          <rect class="la-w" x="20" y="96" width="200" height="56" rx="18"/>
+          <rect class="la-acc-soft" x="38" y="113" width="150" height="8" rx="4"/>
+          <rect class="la-acc-soft" x="38" y="128" width="104" height="8" rx="4"/>
+          <!-- mi mensaje: viaja cifrado -->
+          <rect class="la-dark" x="112" y="166" width="198" height="66" rx="18"/>
+          <text class="la-cipher" x="130" y="195">7f3a c91e</text>
+          <text class="la-cipher" x="130" y="217">04bd 9e2c…</text>
+          <g transform="translate(272 184)">
+            <rect class="la-w" x="0" y="8" width="18" height="14" rx="3"/>
+            <path class="la-w-stroke" d="M4 8V5.5a5 5 0 0 1 10 0V8" fill="none" stroke-width="2.5"/>
+          </g>
+          <!-- escribiendo… -->
+          <rect class="la-w" x="20" y="248" width="92" height="42" rx="18"/>
+          <circle class="la-acc" cx="46" cy="269" r="5"/><circle class="la-acc" cx="66" cy="269" r="5" opacity=".7"/><circle class="la-acc" cx="86" cy="269" r="5" opacity=".45"/>
+        </g>
+        <!-- Escudo con candado -->
+        <g transform="translate(330 150)">
+          <circle class="la-halo" cx="120" cy="150" r="138"/>
+          <circle class="la-halo2" cx="120" cy="150" r="102"/>
+          <g filter="url(#la-shadow)">
+            <path fill="url(#la-shield)" d="M120 22 222 60v94c0 74-44 124-102 148C62 278 18 228 18 154V60Z"/>
+          </g>
+          <path class="la-acc-stroke" fill="none" stroke-width="4" opacity=".35" d="M120 44 204 75v79c0 61-36 103-84 124-48-21-84-63-84-124V75Z"/>
+          <path class="la-acc-stroke" fill="none" stroke-width="13" stroke-linecap="round" d="M94 146v-20a26 26 0 0 1 52 0v20"/>
+          <rect class="la-acc" x="78" y="142" width="84" height="70" rx="15"/>
+          <circle class="la-w" cx="120" cy="170" r="9"/>
+          <rect class="la-w" x="115.5" y="172" width="9" height="20" rx="4.5"/>
+        </g>
+        <!-- Llave -->
+        <g transform="translate(150 492) rotate(-20)" class="la-key">
+          <circle cx="0" cy="0" r="20" fill="none" stroke-width="8"/>
+          <path d="M20 0h52M56 0v14M68 0v10" fill="none" stroke-width="8" stroke-linecap="round"/>
+        </g>
+      </svg>
+      <div class="login-art-text">
+        <h2>Tus conversaciones, solo tuyas</h2>
+        <p>Cada mensaje se cifra en tu dispositivo antes de salir. Ni el servidor ni nadie en medio puede leerlo.</p>
+        <ul>
+          <li>Cifrado de extremo a extremo con X3DH y Double Ratchet</li>
+          <li>Llamadas, fotos y archivos también cifrados</li>
+          <li>Tu clave nunca sale de tus dispositivos sin tu contraseña</li>
+        </ul>
+      </div>
+    </aside>
   </main>
 
   <!-- Servicio caído -->
