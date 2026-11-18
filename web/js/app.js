@@ -1384,6 +1384,21 @@ const ICE_SERVERS = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.goog
 const RING_MS = 45000;
 let call = null;
 let ringTimer = null, ringCtx = null;
+let turnCache = null;
+
+/** Servidores STUN + el relé (TURN) de nuestro servidor, con credenciales temporales. */
+async function iceServersNow() {
+  if (!turnCache || turnCache.until < Date.now()) {
+    turnCache = { servers: [], until: Date.now() + 60000 };
+    if (client && connected) {
+      try {
+        const r = await client.request({ type: "turn" }, 5000);
+        turnCache = { servers: [{ urls: r.urls, username: r.username, credential: r.credential }], until: Date.now() + 6 * 3600000 };
+      } catch { /* sin relé: solo conexión directa */ }
+    }
+  }
+  return [...ICE_SERVERS, ...turnCache.servers];
+}
 
 function callSignal(peer, content, queue = false) {
   return client.sendContent(peer, { t: "call", ...content }, queue ? { sync: false } : { ephemeral: true, sync: false }).catch(() => {});
@@ -1394,7 +1409,7 @@ function iceGathered(pc) {
   return new Promise((resolve) => {
     const done = () => { if (pc.iceGatheringState === "complete") resolve(); };
     pc.addEventListener("icegatheringstatechange", done);
-    setTimeout(resolve, 3000);
+    setTimeout(resolve, 6000);
   });
 }
 
@@ -1411,7 +1426,7 @@ async function getCallMedia(video) {
 }
 
 function newPeerConnection(c) {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers: c.ice || ICE_SERVERS });
   pc.ontrack = (e) => { if (call === c) { c.remote = e.streams[0]; renderCall(); } };
   pc.onconnectionstatechange = () => {
     if (call !== c) return;
@@ -1438,6 +1453,7 @@ async function startCall(video) {
   try { local = await getCallMedia(video); } catch (e) { alert(e.message); return; }
   const c = { id: newId(), peer, video, local, role: "out", state: "calling", muted: false, camOff: false };
   call = c;
+  c.ice = await iceServersNow();
   c.pc = newPeerConnection(c);
   for (const tr of local.getTracks()) c.pc.addTrack(tr, local);
   renderCall();
@@ -1512,6 +1528,7 @@ async function acceptCall() {
   try {
     c.local = await getCallMedia(c.video);
     if (call !== c) { c.local.getTracks().forEach((t) => t.stop()); return; }
+    c.ice = await iceServersNow();
     c.pc = newPeerConnection(c);
     for (const tr of c.local.getTracks()) c.pc.addTrack(tr, c.local);
     await c.pc.setRemoteDescription({ type: "offer", sdp: c.offer });
@@ -1578,7 +1595,7 @@ function renderCall() {
     document.body.append(el);
   }
   const remote = $("call-remote"), local = $("call-local");
-  if (c.remote && remote.srcObject !== c.remote) remote.srcObject = c.remote;
+  if (c.remote && remote.srcObject !== c.remote) { remote.srcObject = c.remote; remote.play().catch(() => {}); }
   if (c.local && local.srcObject !== c.local) local.srcObject = c.local;
   el.dataset.video = c.video ? "1" : "";
   el.dataset.state = c.state;
@@ -1652,6 +1669,7 @@ async function startGroupCall(video) {
   try { local = await getCallMedia(video); } catch (e) { alert(e.message); return; }
   gcall = { id: newId(), g: gidOf(conv), video, local, state: "calling", peers: new Map(), muted: false, camOff: false };
   const c = gcall;
+  c.ice = await iceServersNow();
   renderGroupCall();
   startRing("out");
   for (const u of members) gSignal(u, { kind: "ring", video }, true);
@@ -1706,7 +1724,7 @@ function groupPeer(u) {
   const k = gkey(u);
   if (c.peers.has(k)) return null;
   if (c.peers.size >= GROUP_CALL_MAX - 1) return null;
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers: c.ice || ICE_SERVERS });
   const p = { user: u, pc, stream: null, connected: false };
   c.peers.set(k, p);
   for (const tr of c.local.getTracks()) pc.addTrack(tr, c.local);
@@ -1772,6 +1790,7 @@ async function acceptGroupCall() {
   try { c.local = await getCallMedia(c.video); }
   catch (e) { endGroupCall(e.message); return; }
   if (gcall !== c) { c.local.getTracks().forEach((t) => t.stop()); return; }
+  c.ice = await iceServersNow();
   c.state = "joining";
   renderGroupCall();
   for (const u of targetsOf(`#${c.g}`)) gSignal(u, { kind: "joined" });
@@ -2542,7 +2561,7 @@ function showPeerProfile(peer) {
 // ------------------------------------------------------------- personalizar
 
 const ACCENTS = ["#4f46e5", "#7c3aed", "#db2777", "#e11d48", "#ea580c", "#ca8a04", "#16a34a", "#0d9488", "#0284c7", "#475569"];
-const WALLS = [["dots", "Puntos"], ["plain", "Liso"], ["grid", "Cuadrícula"], ["diagonal", "Rayas"], ["bubbles", "Burbujas"], ["gradient", "Degradado"], ["image", "Tu foto"]];
+const WALLS = [["circuit", "Circuito"], ["dots", "Puntos"], ["plain", "Liso"], ["grid", "Cuadrícula"], ["diagonal", "Rayas"], ["bubbles", "Burbujas"], ["gradient", "Degradado"], ["image", "Tu foto"]];
 
 const STATUS_OPTS = [
   ["online", "En línea", "Los demás ven que estás conectado."],
@@ -2756,7 +2775,7 @@ function shortTime(d) {
 
 function previewOf(c) {
   if (!c) return "";
-  if (c.t === "text") return c.body;
+  if (c.t === "text") return c.body.replace(/([*_~`])(\S(?:[^\n]*?\S)?)\1/g, "$2"); // sin las marcas de formato
   if (c.t === "sticker") return `Sticker ${c.id}`;
   if (c.once) return c.t === "image" ? "Foto · ver una vez" : "Vídeo · ver una vez";
   if (c.t === "image") return c.mime === "image/gif" ? "GIF" : "Foto";

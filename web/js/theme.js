@@ -38,7 +38,8 @@ window.applyTheme = function (id) {
 const DEFAULT_PREFS = {
   status: "online",    // online | away | invisible
   accent: null,        // null = el color del tema
-  wall: "dots",        // fondo de los chats
+  wall: "circuit",     // fondo de los chats
+  styleV: 2,           // versión del estilo (para pasar a los nuevos predeterminados una sola vez)
   wallImage: null,     // data: URL de la foto de fondo (redimensionada)
   font: 15,            // px
   radius: null,        // px de las burbujas (null = el del tema)
@@ -50,8 +51,16 @@ const DEFAULT_PREFS = {
 };
 
 function readPrefs() {
-  try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem("sc:prefs")) }; }
+  let p;
+  try { p = { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem("sc:prefs")) }; }
   catch { return { ...DEFAULT_PREFS }; }
+  // Estilo nuevo: quien tenía el fondo de puntos de antes pasa al de circuito (una sola vez)
+  if (p.styleV !== 2) {
+    if (p.wall === "dots") p.wall = "circuit";
+    p.styleV = 2;
+    try { localStorage.setItem("sc:prefs", JSON.stringify(p)); } catch { /* sin almacenamiento */ }
+  }
+  return p;
 }
 
 /** Texto blanco o negro según lo claro que sea el color de fondo. */

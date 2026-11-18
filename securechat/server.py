@@ -160,6 +160,10 @@ class RelayServer:
         self._code_fails: dict[str, list[float]] = {}
         self._keystore_hits: dict[str, list[float]] = {}
         self._email_sends: dict[str, list[float]] = {}  # envíos de códigos por cuenta (límite por hora)
+        # Relé de llamadas (TURN): direcciones que se dan a los navegadores y secreto de sus credenciales
+        self.turn_urls: list[str] = []
+        self.turn_port: int | None = None
+        self.turn_secret = secrets.token_bytes(32)
         # canon(nombre) -> {"name", "key", "devices": {id: {"bundle", "opks", "seen"}}, ...}
         self.registry: dict[str, dict] = {}
         self.online: dict[str, dict[str, ServerConnection]] = {}  # canon -> {dispositivo: conexión}
@@ -435,6 +439,14 @@ class RelayServer:
                     subs = self.registry[c].get("push", [])
                     self.registry[c]["push"] = [x for x in subs if x["endpoint"] != msg.get("endpoint")]
                     self._save()
+                elif t == "turn":
+                    if self.turn_urls:
+                        from .turn import make_credentials
+                        username, credential = make_credentials(self.turn_secret, c)
+                        await _send(ws, type="turn", id=msg.get("id"), urls=self.turn_urls,
+                                    username=username, credential=credential)
+                    else:
+                        await _send(ws, type="error", id=msg.get("id"), code="no_turn", message="sin relé de llamadas")
                 elif t == "set-email":
                     pending_email = await self._start_email_change(ws, c, msg)
                 elif t == "confirm-email":
@@ -685,6 +697,9 @@ async def run(host: str, port: int, db: Path | None = None, tls: ssl.SSLContext 
                                    process_request=serve_static, ssl=tls))
     for s in servers:
         s.relay = server  # para que /config.json sepa si hace falta código
+    if server.turn_urls and server.turn_port:
+        from .turn import TurnServer
+        servers.append(await TurnServer(server.turn_secret).start("127.0.0.1", server.turn_port))
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     log.info("web y relay en %s://%s:%d", "https" if tls and not tls_port else "http", shown, port)
     if tls and tls_port:
@@ -709,6 +724,8 @@ def main() -> None:
                    help="exigir verificación por correo al crear cuenta (SMTP en variables SECURECHAT_SMTP_*)")
     p.add_argument("--email-pruebas", action="store_true",
                    help="verificación por correo, pero el código se muestra en esta consola")
+    p.add_argument("--turn", type=int, metavar="PUERTO",
+                   help="arranca el relé de llamadas (TURN por TCP) en este puerto, solo para este equipo")
     p.add_argument("--cert", type=Path, help="certificado TLS (PEM) para servir por HTTPS")
     p.add_argument("--key", type=Path, help="clave privada TLS (PEM)")
     args = p.parse_args()
@@ -730,6 +747,9 @@ def main() -> None:
         if sender is None:
             p.error("--email necesita SECURECHAT_SMTP_HOST, _USER, _PASSWORD (y opcional _PORT, _FROM)")
     relay = RelayServer(args.db, args.queue, code, sender)
+    if args.turn:
+        relay.turn_port = args.turn
+        relay.turn_urls = [f"turn:127.0.0.1:{args.turn}?transport=tcp"]
     try:
         asyncio.run(run(host, args.port, relay=relay, tls=tls))
     except KeyboardInterrupt:

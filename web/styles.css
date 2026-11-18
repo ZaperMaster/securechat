@@ -1211,3 +1211,77 @@ a.starred-row { text-decoration: none; }
   .login-card .brand-tag { display: none; }
   .login-card .brand-mark { grid-row: auto; }
 }
+
+/* =====================================================================
+   Identidad propia de SecureChat (para que no se parezca a otras apps)
+   ===================================================================== */
+
+/* Panel lateral oscuro, teñido con el color del tema: se redefinen sus variables */
+.sidebar {
+  --panel: color-mix(in srgb, var(--accent) 14%, #0c1512);
+  --panel-2: rgb(255 255 255 / .07);
+  --hover: rgb(255 255 255 / .07);
+  --line: rgb(255 255 255 / .1);
+  --text: #eef5f1;
+  --muted: rgb(238 245 241 / .6);
+  --accent-soft: rgb(255 255 255 / .1);
+  --shadow: 0 12px 32px rgb(0 0 0 / .35);
+  color: var(--text); border: 0;
+  background:
+    radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--accent) 35%, transparent), transparent 55%),
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 20%, #0c1512), color-mix(in srgb, var(--accent) 8%, #090f0d));
+}
+.sidebar input { color: var(--text); }
+.sidebar input::placeholder { color: var(--muted); }
+.sidebar .me-handle { color: color-mix(in srgb, var(--accent) 55%, #fff); }
+.sidebar .contacts li button { border-radius: 14px; padding: 10px 12px; margin: 1px 0; }
+.sidebar .contacts li.active button { background: rgb(255 255 255 / .11); box-shadow: inset 3px 0 0 var(--accent); }
+.sidebar .contact-name { color: var(--text); }
+.sidebar .preview, .sidebar .contact-side time { color: var(--muted); }
+.sidebar .unread { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+.sidebar .settings-h, .sidebar .section-title, .sidebar h2 { color: var(--muted); }
+.sidebar .app-menu { background: color-mix(in srgb, var(--accent) 10%, #111b17); border: 1px solid var(--line); }
+
+/* Avatares: cuadrados redondeados en lugar de círculos */
+.avatar { border-radius: 32% !important; }
+.avatar.xl { border-radius: 30% !important; }
+.call-info .avatar.xl, .call-tile .avatar.xl { border-radius: 50% !important; }
+.me-avatar-wrap .status-dot { border-color: color-mix(in srgb, var(--accent) 14%, #0c1512); }
+
+/* Burbujas: más redondas, con degradado y la esquina "señalando" hacia abajo */
+.msg { border-radius: var(--radius, 18px); padding: 9px 14px 7px; box-shadow: 0 1px 2px rgb(0 0 0 / .06); }
+.msg.mine {
+  background: linear-gradient(140deg, color-mix(in srgb, var(--accent) 88%, #fff), color-mix(in srgb, var(--accent) 78%, #062a1c)) !important;
+  box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--accent) 80%, transparent);
+}
+.msg.mine, .msg.mine.first, .msg.mine.cont { border-radius: var(--radius, 18px) var(--radius, 18px) 5px var(--radius, 18px); }
+.msg.mine.cont { border-top-right-radius: 8px; }
+.msg.theirs, .msg.theirs.first, .msg.theirs.cont {
+  border-radius: var(--radius, 18px) var(--radius, 18px) var(--radius, 18px) 5px;
+  background: color-mix(in srgb, var(--theirs) 92%, transparent); backdrop-filter: blur(6px);
+}
+.msg.theirs.cont { border-top-left-radius: 8px; }
+.msg.first { margin-top: 10px; }
+.sys { backdrop-filter: blur(6px); background: color-mix(in srgb, var(--panel) 85%, transparent); }
+
+/* Cabecera del chat translúcida y caja de escribir flotante */
+.chat-head { background: color-mix(in srgb, var(--panel) 80%, transparent); backdrop-filter: blur(14px); }
+.composer {
+  margin: 0 14px 14px; border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow);
+  padding: 7px 7px 7px 10px; background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(14px);
+}
+.composer input { background: transparent; border: 0; padding: 10px 6px; }
+.composer input:focus { border: 0; box-shadow: none; }
+.composer:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.send { border-radius: 16px !important; background: linear-gradient(140deg, color-mix(in srgb, var(--accent) 88%, #fff), color-mix(in srgb, var(--accent) 78%, #062a1c)) !important; }
+.reply-bar, .rec-bar { margin: 0 14px; border-radius: 16px 16px 0 0; }
+@media (max-width: 760px) {
+  .composer { margin: 0 8px max(8px, env(safe-area-inset-bottom)); padding-bottom: 7px; }
+}
+
+/* Fondo "Circuito" (el predeterminado) */
+[data-wall="circuit"] .chat {
+  --wall: linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 45%),
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180' viewBox='0 0 180 180'%3E %3Cg fill='none' stroke='%237f8c86' stroke-opacity='.17' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E %3Cpath d='M0 40h34l12 12h40M86 52v30l14 14h46M146 96h34M22 180v-32l16-16h30M68 132v-20M120 0v24l-10 10H76M166 180v-26l-14-14M0 120h14l10-10'/%3E %3Crect x='100' y='126' width='20' height='15' rx='3.5'/%3E%3Cpath d='M103.5 126v-4.5a6.5 6.5 0 0 1 13 0v4.5'/%3E %3Cpath d='M30 74l9-6 9 6v9c0 5.5-4 9-9 11-5-2-9-5.5-9-11z'/%3E %3C/g%3E %3Cg fill='%237f8c86' fill-opacity='.22'%3E%3Ccircle cx='86' cy='52' r='3'/%3E%3Ccircle cx='146' cy='96' r='3'/%3E%3Ccircle cx='68' cy='112' r='3'/%3E %3Ccircle cx='76' cy='34' r='3'/%3E%3Ccircle cx='152' cy='140' r='3'/%3E%3Ccircle cx='24' cy='110' r='3'/%3E%3C/g%3E %3C/svg%3E") 0 0 / 180px 180px;
+}
+.wall[data-wall="circuit"] { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180' viewBox='0 0 180 180'%3E %3Cg fill='none' stroke='%237f8c86' stroke-opacity='.17' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E %3Cpath d='M0 40h34l12 12h40M86 52v30l14 14h46M146 96h34M22 180v-32l16-16h30M68 132v-20M120 0v24l-10 10H76M166 180v-26l-14-14M0 120h14l10-10'/%3E %3Crect x='100' y='126' width='20' height='15' rx='3.5'/%3E%3Cpath d='M103.5 126v-4.5a6.5 6.5 0 0 1 13 0v4.5'/%3E %3Cpath d='M30 74l9-6 9 6v9c0 5.5-4 9-9 11-5-2-9-5.5-9-11z'/%3E %3C/g%3E %3Cg fill='%237f8c86' fill-opacity='.22'%3E%3Ccircle cx='86' cy='52' r='3'/%3E%3Ccircle cx='146' cy='96' r='3'/%3E%3Ccircle cx='68' cy='112' r='3'/%3E %3Ccircle cx='76' cy='34' r='3'/%3E%3Ccircle cx='152' cy='140' r='3'/%3E%3Ccircle cx='24' cy='110' r='3'/%3E%3C/g%3E %3C/svg%3E"); background-size: 90px 90px; }
