@@ -3960,3 +3960,29 @@ async function main() {
 }
 
 main();
+
+// Teclado del móvil: la app ocupa solo la parte visible de la pantalla y el chat abierto
+// se queda en su sitio (sin que la página se desplace ni se pierda el último mensaje)
+(() => {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const root = document.documentElement;
+  const inApp = () => !$("app").hidden;
+  const pin = () => { if (inApp() && (window.scrollY || document.documentElement.scrollTop)) window.scrollTo(0, 0); };
+  let lastH = 0;
+  const fit = () => {
+    const h = Math.round(vv.height);
+    if (h !== lastH) {
+      const l = $("messages");
+      const atBottom = l && l.scrollHeight - l.scrollTop - l.clientHeight < 80;
+      const fromBottom = l ? l.scrollHeight - l.scrollTop : 0;
+      lastH = h;
+      root.style.setProperty("--app-h", h + "px");
+      if (l) requestAnimationFrame(() => { l.scrollTop = atBottom ? l.scrollHeight : l.scrollHeight - fromBottom; });
+    }
+    pin();
+  };
+  vv.addEventListener("resize", fit);
+  vv.addEventListener("scroll", pin);
+  fit();
+})();

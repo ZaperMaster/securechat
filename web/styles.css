@@ -290,7 +290,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
    App
    ===================================================================== */
 .app {
-  height: 100%; display: grid; grid-template-columns: 340px 1fr; gap: 14px; padding: 14px;
+  height: var(--app-h, 100%); display: grid; grid-template-columns: 340px 1fr; gap: 14px; padding: 14px;
   max-width: 1400px; margin: 0 auto;
 }
 .sidebar, .chat {
@@ -1285,3 +1285,7 @@ a.starred-row { text-decoration: none; }
           url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180' viewBox='0 0 180 180'%3E %3Cg fill='none' stroke='%237f8c86' stroke-opacity='.17' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E %3Cpath d='M0 40h34l12 12h40M86 52v30l14 14h46M146 96h34M22 180v-32l16-16h30M68 132v-20M120 0v24l-10 10H76M166 180v-26l-14-14M0 120h14l10-10'/%3E %3Crect x='100' y='126' width='20' height='15' rx='3.5'/%3E%3Cpath d='M103.5 126v-4.5a6.5 6.5 0 0 1 13 0v4.5'/%3E %3Cpath d='M30 74l9-6 9 6v9c0 5.5-4 9-9 11-5-2-9-5.5-9-11z'/%3E %3C/g%3E %3Cg fill='%237f8c86' fill-opacity='.22'%3E%3Ccircle cx='86' cy='52' r='3'/%3E%3Ccircle cx='146' cy='96' r='3'/%3E%3Ccircle cx='68' cy='112' r='3'/%3E %3Ccircle cx='76' cy='34' r='3'/%3E%3Ccircle cx='152' cy='140' r='3'/%3E%3Ccircle cx='24' cy='110' r='3'/%3E%3C/g%3E %3C/svg%3E") 0 0 / 180px 180px;
 }
 .wall[data-wall="circuit"] { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180' viewBox='0 0 180 180'%3E %3Cg fill='none' stroke='%237f8c86' stroke-opacity='.17' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E %3Cpath d='M0 40h34l12 12h40M86 52v30l14 14h46M146 96h34M22 180v-32l16-16h30M68 132v-20M120 0v24l-10 10H76M166 180v-26l-14-14M0 120h14l10-10'/%3E %3Crect x='100' y='126' width='20' height='15' rx='3.5'/%3E%3Cpath d='M103.5 126v-4.5a6.5 6.5 0 0 1 13 0v4.5'/%3E %3Cpath d='M30 74l9-6 9 6v9c0 5.5-4 9-9 11-5-2-9-5.5-9-11z'/%3E %3C/g%3E %3Cg fill='%237f8c86' fill-opacity='.22'%3E%3Ccircle cx='86' cy='52' r='3'/%3E%3Ccircle cx='146' cy='96' r='3'/%3E%3Ccircle cx='68' cy='112' r='3'/%3E %3Ccircle cx='76' cy='34' r='3'/%3E%3Ccircle cx='152' cy='140' r='3'/%3E%3Ccircle cx='24' cy='110' r='3'/%3E%3C/g%3E %3C/svg%3E"); background-size: 90px 90px; }
+
+/* Con el teclado del móvil abierto la app mide lo que se ve (--app-h) y la página no rebota */
+html:has(#app:not([hidden])), html:has(#app:not([hidden])) body { overflow: hidden; overscroll-behavior: none; }
+.messages { overscroll-behavior: contain; }
