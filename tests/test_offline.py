@@ -187,7 +187,7 @@ def test_push_notification_only_for_real_messages(tmp_path):
         relay = RelayServer(tmp_path / "u.json")
         calls = []
 
-        async def fake_notify(account, subs):
+        async def fake_notify(account, subs, call=False):
             calls.append(account)
             return subs
         relay.pusher.notify = fake_notify

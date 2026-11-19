@@ -1392,3 +1392,30 @@ html.is-locked #app { visibility: hidden; }
 .send-preview-cell small { font-size: 11px; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .send-preview-ico { width: 40px; height: 40px; margin: 18px 0; color: var(--accent); }
 .contacts li.drop-target button { outline: 2px dashed var(--accent); outline-offset: -3px; background: rgb(255 255 255 / .12); }
+
+/* Grupos: foto y normas */
+.group-rules { display: grid; gap: 10px; }
+.rules-list { margin: 0; padding-left: 20px; color: var(--muted); font-size: .92em; display: grid; gap: 3px; }
+details.advanced > .switch { margin-top: 10px; }
+.profile-view .profile-photo-btns { justify-content: center; margin-top: 4px; }
+
+/* «Ver una vez» antes de enviar */
+.once-toggle {
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; margin: 0 0 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font: 600 13px var(--font); cursor: pointer;
+}
+.once-toggle .once-badge { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+  border: 2px dashed currentColor; font-size: 12px; font-weight: 700; }
+.once-toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.once-toggle[aria-pressed="true"] .once-badge { border-style: solid; background: #fff; color: var(--accent); }
+.send-preview-cell video { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: #000; }
+
+/* Nota de voz: parar y escuchar antes de enviar */
+.rec-stop-square { display: block; width: 14px; height: 14px; border-radius: 3px; background: var(--error); }
+.voice-review { display: none; flex: 1; align-items: center; gap: 8px; min-width: 0; }
+.composer.reviewing .voice-review { display: flex; }
+.composer.reviewing > :not(.voice-review) { display: none !important; }
+.voice-review audio { flex: 1; min-width: 0; height: 40px; }
+.voice-review .once-toggle { margin: 0; padding: 4px 10px 4px 4px; white-space: nowrap; }
+.voice-review .send { margin-left: 2px; }
+.once-audio { width: 100%; margin: 8px 0; }

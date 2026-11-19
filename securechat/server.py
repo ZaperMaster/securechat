@@ -679,6 +679,11 @@ class RelayServer:
             self.related.setdefault(cs, set()).add(ct)
         # El remitente lo pone el servidor a partir de la sesión autenticada,
         # nunca se copia de lo que diga el cliente.
+        # Llamada entrante (el cliente marca la oferta como urgente): avisamos al móvil SIEMPRE,
+        # porque Android congela la app en segundo plano sin cerrar la conexión y el servidor
+        # la ve "conectada" aunque no pueda sonar. Si la app está a la vista, el aviso no se muestra.
+        if msg.get("urgent") and ct != cs and self.registry[ct].get("push"):
+            asyncio.get_running_loop().create_task(self._push(ct, call=True))
         target = self.online.get(ct, {}).get(device)
         if target is not None:
             try:
@@ -692,15 +697,16 @@ class RelayServer:
             return
         self._enqueue(f"{ct}|{device}", {"from": sender, "payload": payload, "at": int(time.time())})
         # Aviso al móvil (sin contenido) si no tiene ningún dispositivo conectado
-        if not msg.get("silent") and ct != cs and not self.online.get(ct) and self.registry[ct].get("push"):
+        if not msg.get("silent") and not msg.get("urgent") and ct != cs and not self.online.get(ct) \
+                and self.registry[ct].get("push"):
             asyncio.get_running_loop().create_task(self._push(ct))
         await _send(ws, type="ack", id=rid, status="queued", devices=devices)
 
-    async def _push(self, c: str) -> None:
+    async def _push(self, c: str, call: bool = False) -> None:
         r = self.registry.get(c)
         if not r:
             return
-        alive = await self.pusher.notify(c, r.get("push", []))
+        alive = await self.pusher.notify(c, r.get("push", []), call=call)
         if len(alive) != len(r.get("push", [])):
             r["push"] = alive
             self._save()

@@ -128,7 +128,8 @@ def test_state_persists_encrypted(tmp_path):
     b = Device("bob", kb, tmp_path / "b.keys")
     b.recv(a, a.send(b, "antes de reiniciar"))
     raw = (tmp_path / "b.keys").read_text()
-    assert "antes" not in raw and "bob" not in raw  # cifrado en disco
+    # Buscamos los nombres como cadenas JSON: dentro del base64 cifrado podría salir "bob" por azar
+    assert "antes" not in raw and "\"bob\"" not in raw and "\"alice\"" not in raw  # cifrado en disco
     b2 = DeviceKeys("bob", kb, tmp_path / "b.keys")  # "reinicio" del dispositivo
     assert b2.device == b.keys.device
     b.keys = b2

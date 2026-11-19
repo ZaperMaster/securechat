@@ -51,7 +51,7 @@ export function decodeContent(plaintext) {
   const id = (v) => (typeof v === "string" && ID_RE.test(v) ? v : null);
   const common = { mid: id(c.mid), g: id(c.g), fwd: c.fwd === true ? true : null,
     exp: Number.isInteger(c.exp) && TIMER_OPTIONS.includes(c.exp) && c.exp > 0 ? c.exp : null,
-    once: c.once === true && (c.t === "image" || c.t === "video") ? true : null };
+    once: c.once === true && (c.t === "image" || c.t === "video" || c.t === "audio") ? true : null };
   if (c.reply && typeof c.reply === "object" && id(c.reply.mid)) {
     common.reply = { mid: c.reply.mid, from: str(c.reply.from, 32), text: str(c.reply.text, 120) };
   }
@@ -115,8 +115,11 @@ export function decodeContent(plaintext) {
       const members = Array.isArray(c.members) ? [...new Set(c.members.filter((m) => NAME_OK.test(m)))].slice(0, 64) : [];
       const avatar = typeof c.avatar === "string" && c.avatar.length < 200000 ? c.avatar : null;
       const inGroup = (list) => (Array.isArray(list) ? [...new Set(list.filter((m) => members.includes(m)))] : []);
+      // Normas del grupo: solo booleanos conocidos
+      const r = c.rules && typeof c.rules === "object" ? c.rules : {};
+      const rules = { onlyAdmins: r.onlyAdmins === true, membersEdit: r.membersEdit === true, membersAdd: r.membersAdd === true };
       return { t: "group", g: c.g, name: str(c.name, 64).trim() || "Grupo", members, admin: str(c.admin, 32),
-        admins: inGroup(c.admins), muted: inGroup(c.muted), v: Number.isFinite(c.v) ? c.v : 0, avatar };
+        admins: inGroup(c.admins), muted: inGroup(c.muted), v: Number.isFinite(c.v) ? c.v : 0, avatar, rules };
     }
     case "group-leave": return id(c.g) ? { t: "group-leave", g: c.g } : { t: "ignore" };
     default: return out({ t: "unsupported" });
@@ -301,18 +304,18 @@ export class ChatClient {
    * Cifra y envía a todos los dispositivos de `name` (y una copia a los míos).
    * Devuelve {peer, status}: "delivered" si algún dispositivo lo tiene ya, si no "queued".
    */
-  sendContent(name, content, { ephemeral = false, sync = true } = {}) {
-    const job = this.queue.then(() => this._send(name, content, { ephemeral, sync }));
+  sendContent(name, content, { ephemeral = false, sync = true, urgent = false } = {}) {
+    const job = this.queue.then(() => this._send(name, content, { ephemeral, sync, urgent }));
     this.queue = job.catch(() => {});
     return job;
   }
 
-  async _send(name, content, { ephemeral, sync }) {
+  async _send(name, content, { ephemeral, sync, urgent = false }) {
     const peer = await this.resolve(name);
     if (peer.toLowerCase() === this.name.toLowerCase()) throw new ClientError("no puedes escribirte a ti mismo");
     const plaintext = JSON.stringify(content);
     const silent = SILENT_TYPES.has(content.t);
-    const statuses = await this.sendToUser(peer, plaintext, { silent, ephemeral });
+    const statuses = await this.sendToUser(peer, plaintext, { silent, ephemeral, urgent });
     if (sync && !ephemeral && content.t !== "receipt" && this.myDevices.length) {
       await this.sendToUser(this.name, JSON.stringify({ t: "sync", to: peer, c: content }), { silent: true, ephemeral: false });
     }
@@ -324,7 +327,7 @@ export class ChatClient {
     return { peer, status: statuses.includes("delivered") ? "delivered" : "queued" };
   }
 
-  async sendToUser(user, plaintext, { silent, ephemeral }) {
+  async sendToUser(user, plaintext, { silent, ephemeral, urgent = false }) {
     const mine = user.toLowerCase() === this.name.toLowerCase();
     let info = mine ? null : await this.peerDevices(user);
     const targets = mine ? [...this.myDevices] : [...info.list];
@@ -349,7 +352,7 @@ export class ChatClient {
       this.keys.store(user, dev, r);
       let ack;
       try {
-        ack = await this.request({ type: "send", to: user, device: dev, payload, ...(silent ? { silent: true } : {}), ...(ephemeral ? { ephemeral: true } : {}) });
+        ack = await this.request({ type: "send", to: user, device: dev, payload, ...(silent ? { silent: true } : {}), ...(ephemeral ? { ephemeral: true } : {}), ...(urgent ? { urgent: true } : {}) });
       } catch (e) {
         if (e.code === "no_device") { this.keys.drop(user, dev); continue; }
         throw e;

@@ -849,34 +849,73 @@ navigator.serviceWorker?.addEventListener("message", onWorkerMessage);
 
 function groupState(g) {
   return { t: "group", g: g.id, name: g.name, members: g.members, admin: g.admin, admins: adminsOf(g), muted: g.muted || [],
-    v: g.v, avatar: g.avatar || null };
+    v: g.v, avatar: g.avatar || null, rules: rulesOf(g) };
 }
+
+/**
+ * Normas del grupo (las cambian los administradores):
+ *  onlyAdmins   solo los administradores pueden escribir
+ *  membersEdit  cualquier miembro puede cambiar el nombre y la foto
+ *  membersAdd   cualquier miembro puede añadir gente
+ */
+const rulesOf = (g) => ({ onlyAdmins: !!g?.rules?.onlyAdmins, membersEdit: !!g?.rules?.membersEdit, membersAdd: !!g?.rules?.membersAdd });
+const RULES = [
+  ["onlyAdmins", "Solo los administradores pueden escribir", "Los demás miembros solo pueden leer (y reaccionar)."],
+  ["membersEdit", "Todos pueden cambiar el nombre y la foto", "Si lo quitas, solo los administradores pueden hacerlo."],
+  ["membersAdd", "Todos pueden añadir miembros", "Si lo quitas, solo los administradores pueden añadir gente."],
+];
+const canEditInfo = (g, u) => !!g && !g.left && (isAdminOf(g, u) || (rulesOf(g).membersEdit && g.members.some((x) => same(x, u))));
+const canAddMembers = (g, u) => !!g && !g.left && (isAdminOf(g, u) || (rulesOf(g).membersAdd && g.members.some((x) => same(x, u))));
 
 /** Administradores del grupo (los grupos antiguos solo tenían uno). */
 const adminsOf = (g) => (g.admins?.length ? g.admins : g.admin ? [g.admin] : []);
 const isAdminOf = (g, u) => !!g && adminsOf(g).some((x) => same(x, u));
-const isMutedIn = (g, u) => !!g && (g.muted || []).some((x) => same(x, u));
+const isMutedIn = (g, u) => !!g && ((g.muted || []).some((x) => same(x, u)) || (rulesOf(g).onlyAdmins && !isAdminOf(g, u)));
+const isSilencedIn = (g, u) => !!g && (g.muted || []).some((x) => same(x, u)); // silenciado a mano por un admin
 /** ¿Puedo escribir en esta conversación? (en un grupo me pueden haber silenciado) */
 const mutedHere = (conv) => isGroup(conv) && isMutedIn(groups.get(gidOf(conv)), me);
 
-/** Estado de un grupo recibido: solo lo acepta del administrador. */
+/** ¿Este cambio del grupo lo permiten las normas a un miembro que no es administrador? */
+function memberChangeAllowed(g, sender, c) {
+  if (!g.members.some((x) => same(x, sender))) return false;
+  const sameList = (a, b) => a.length === b.length && a.every((x) => b.some((y) => same(x, y)));
+  const r = rulesOf(g), nr = rulesOf(c);
+  // Lo que nunca puede tocar: administradores, silenciados y normas
+  if (!sameList(adminsOf(g), c.admins) || !sameList(g.muted || [], c.muted) || JSON.stringify(r) !== JSON.stringify(nr)) return false;
+  const infoChanged = g.name !== c.name || (g.avatar || null) !== (c.avatar || null);
+  const removed = g.members.some((x) => !c.members.some((y) => same(x, y)));
+  const added = c.members.some((x) => !g.members.some((y) => same(x, y)));
+  if (removed) return false;
+  if (infoChanged && !r.membersEdit) return false;
+  if (added && !r.membersAdd) return false;
+  return infoChanged || added;
+}
+
+/** Estado de un grupo recibido: del administrador, o de un miembro si las normas lo permiten. */
 function onGroupState(sender, c) {
   const existing = groups.get(c.g);
   const valid = existing
-    ? isAdminOf(existing, sender) && c.v > existing.v
+    ? c.v > existing.v && (isAdminOf(existing, sender) || memberChangeAllowed(existing, sender, c))
     : (same(sender, c.admin) || c.admins.some((x) => same(x, sender))) && c.members.some((x) => same(x, sender));
   if (!valid) return;
   const conv = `#${c.g}`;
   const inside = c.members.some((x) => same(x, me));
   const wasInside = existing && !existing.left;
   groups.set(c.g, { id: c.g, name: c.name, members: c.members, admin: c.admin, admins: c.admins, muted: c.muted, v: c.v,
-    avatar: c.avatar, left: !inside, ...(existing?.invite ? { invite: existing.invite } : {}) });
+    avatar: c.avatar, rules: c.rules, left: !inside, ...(existing?.invite ? { invite: existing.invite } : {}) });
   saveGroups();
   if (existing && inside) {
     const was = (list, u) => (list || []).some((x) => same(x, u));
     for (const u of c.admins) if (!was(adminsOf(existing), u)) addMsg(conv, { sys: `${same(u, me) ? "Ahora eres" : `${displayName(u)} ahora es`} administrador del grupo.` });
     for (const u of c.muted) if (!was(existing.muted, u)) addMsg(conv, { sys: same(u, me) ? `${displayName(sender)} te ha silenciado: solo puedes leer.` : `${displayName(sender)} ha silenciado a ${displayName(u)}.` });
     for (const u of existing.muted || []) if (!was(c.muted, u) && c.members.some((x) => same(x, u))) addMsg(conv, { sys: same(u, me) ? "Ya puedes volver a escribir en el grupo." : `${displayName(u)} ya puede escribir.` });
+    // Cambios de normas
+    const before = rulesOf(existing), after = rulesOf(c);
+    const who = displayName(sender);
+    if (before.onlyAdmins !== after.onlyAdmins) addMsg(conv, { sys: after.onlyAdmins ? `${who} ha cambiado las normas: solo los administradores pueden escribir.` : `${who} ha cambiado las normas: todos pueden escribir.` });
+    if (before.membersEdit !== after.membersEdit) addMsg(conv, { sys: after.membersEdit ? `${who} ha permitido que todos cambien el nombre y la foto.` : `${who} ha decidido que solo los administradores cambien el nombre y la foto.` });
+    if (before.membersAdd !== after.membersAdd) addMsg(conv, { sys: after.membersAdd ? `${who} ha permitido que todos añadan miembros.` : `${who} ha decidido que solo los administradores añadan miembros.` });
+    if ((existing.avatar || null) !== (c.avatar || null)) addMsg(conv, { sys: c.avatar ? `${who} ha cambiado la foto del grupo.` : `${who} ha quitado la foto del grupo.` });
   }
   if (!existing && inside) addMsg(conv, { sys: `${displayName(sender)} te ha añadido al grupo «${c.name}».` });
   else if (wasInside && !inside) addMsg(conv, { sys: `${displayName(sender)} te ha sacado del grupo.`, warn: true });
@@ -909,8 +948,8 @@ function onGroupLeave(sender, gid) {
   if (active === `#${gid}`) renderChat();
 }
 
-function createGroup(name, members) {
-  const g = { id: newId(), name, members: [me, ...members], admin: me, v: Date.now(), avatar: null, left: false };
+function createGroup(name, members, avatar = null, rules = {}) {
+  const g = { id: newId(), name, members: [me, ...members], admin: me, v: Date.now(), avatar, rules: rulesOf({ rules }), left: false };
   groups.set(g.id, g);
   saveGroups();
   const conv = `#${g.id}`;
@@ -1515,7 +1554,31 @@ async function iceServersNow() {
 }
 
 function callSignal(peer, content, queue = false) {
-  return client.sendContent(peer, { t: "call", ...content }, queue ? { sync: false } : { ephemeral: true, sync: false }).catch(() => {});
+  // Las que se guardan en cola son las que hacen sonar (oferta o aviso de llamada de grupo):
+  // van marcadas como urgentes para que el servidor despierte al móvil aunque parezca conectado.
+  return client.sendContent(peer, { t: "call", ...content }, queue ? { sync: false, urgent: true } : { ephemeral: true, sync: false }).catch(() => {});
+}
+
+/**
+ * Aviso de llamada entrante con la app en segundo plano. En Android `new Notification()`
+ * no existe (hay que usar el service worker), así que va por ahí y, si no, por la clásica.
+ */
+async function callNotification(title, body) {
+  if (!prefs().notifications || !("Notification" in window) || Notification.permission !== "granted") return;
+  const opts = { body, tag: "call", renotify: true, requireInteraction: true, icon: "icon-192.png", badge: "icon-192.png",
+    vibrate: [400, 200, 400, 200, 400], data: { call: true, account: me } };
+  try {
+    const reg = window.isSecureContext ? await navigator.serviceWorker?.getRegistration() : null;
+    if (reg?.showNotification) { await reg.showNotification(title, opts); return; }
+    new Notification(title, opts);
+  } catch { /* sin notificaciones */ }
+}
+
+async function clearCallNotification() {
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    for (const n of (await reg?.getNotifications({ tag: "call" })) || []) n.close();
+  } catch { /* sin service worker */ }
 }
 
 function iceGathered(pc) {
@@ -1599,9 +1662,7 @@ function onCallSignal(sender, c, queuedAt) {
     call = inc;
     renderCall();
     startRing("in");
-    if (document.hidden && prefs().notifications && "Notification" in window && Notification.permission === "granted") {
-      new Notification(`${c.video ? "Videollamada" : "Llamada"} de ${displayName(sender)}`, { tag: "call", body: "Abre SecureChat para contestar" });
-    }
+    if (document.hidden) callNotification(`${c.video ? "Videollamada" : "Llamada"} de ${displayName(sender)}`, "Toca para contestar");
     inc.timeout = setTimeout(() => {
       if (call === inc && inc.state === "incoming") endCall(`${c.video ? "Videollamada perdida" : "Llamada perdida"} de ${displayName(sender)}`);
     }, RING_MS);
@@ -1806,7 +1867,7 @@ function onGroupCallSignal(sender, c, queuedAt) {
     renderGroupCall();
     startRing("in");
     if (document.hidden && prefs().notifications && "Notification" in window && Notification.permission === "granted") {
-      new Notification(`${c.video ? "Videollamada" : "Llamada"} en ${convName(conv)}`, { tag: "call", body: `${displayName(sender)} te está llamando` });
+      callNotification(`${c.video ? "Videollamada" : "Llamada"} en ${convName(conv)}`, `${displayName(sender)} te está llamando`);
     }
     inc.timeout = setTimeout(() => {
       if (gcall === inc && inc.state === "incoming") endGroupCall(`${c.video ? "Videollamada" : "Llamada"} perdida de ${displayName(sender)}`);
@@ -2044,6 +2105,7 @@ function stopRing() {
   clearInterval(ringTimer);
   ringTimer = null;
   navigator.vibrate?.(0);
+  clearCallNotification();
 }
 
 // ------------------------------------------------------------- notas de voz
@@ -2075,6 +2137,7 @@ async function startRecording() {
     if (recCancelled || dur < 0.7) return;
     const blob = new Blob(recChunks, { type });
     if (blob.size > MAX_MEDIA) return addMsg(active, { sys: "La nota de voz es demasiado larga.", warn: true }, { persist: false });
+    if (recReview) { reviewVoice(blob, type, dur); return; }
     const bytes = new Uint8Array(await blob.arrayBuffer());
     await send({ t: "audio", mime: type, dur: Math.round(dur * 10) / 10 }, { bytes, url: URL.createObjectURL(blob) });
   };
@@ -2091,10 +2154,45 @@ async function startRecording() {
   recTimer = setInterval(tick, 250);
 }
 
-function stopRecording(cancel) {
+function stopRecording(cancel, review = false) {
   if (!recorder) return;
   recCancelled = cancel;
+  recReview = review;
   recorder.stop();
+}
+
+let recReview = false;
+
+/** Nota de voz ya grabada: se puede escuchar, marcar «escuchar una vez», borrar o enviar. */
+function reviewVoice(blob, type, dur) {
+  const conv = active;
+  const url = URL.createObjectURL(blob);
+  const bar = text("", "div", "voice-review");
+  const del = text("", "button", "icon-btn");
+  del.type = "button";
+  del.title = "Borrar la nota de voz";
+  del.setAttribute("aria-label", "Borrar la nota de voz");
+  del.append(icon("trash"));
+  const audio = document.createElement("audio");
+  audio.src = url;
+  audio.controls = true;
+  audio.preload = "metadata";
+  const once = onceToggle("Una vez");
+  once.title = "Solo se podrá escuchar una vez";
+  const go = text("", "button", "send");
+  go.type = "button";
+  go.setAttribute("aria-label", "Enviar nota de voz");
+  go.append($("rec-send").querySelector("svg").cloneNode(true));
+  bar.append(del, audio, once, go);
+  const close = () => { bar.remove(); $("composer").classList.remove("reviewing"); };
+  del.onclick = () => { close(); URL.revokeObjectURL(url); };
+  go.onclick = async () => {
+    close();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    await sendTo(conv, { t: "audio", mime: type, dur: Math.round(dur * 10) / 10, ...(once.on ? { once: true } : {}) }, { bytes, url });
+  };
+  $("composer").append(bar);
+  $("composer").classList.add("reviewing");
 }
 
 /** Suscribe este dispositivo a los avisos con la app cerrada (Web Push). */
@@ -2308,6 +2406,32 @@ function showDeleteAccount(back = true) {
   pass.focus();
 }
 
+/** «Elegir foto» / «Quitar» para una foto cuadrada de 256 px (perfil o grupo). */
+function photoButtons(current, onChange) {
+  const fileIn = document.createElement("input");
+  fileIn.type = "file";
+  fileIn.accept = "image/png,image/jpeg,image/webp,image/gif";
+  fileIn.hidden = true;
+  const change = withIcon("image", current ? "Cambiar foto" : "Poner foto", "button", "chip");
+  change.type = "button";
+  change.onclick = () => fileIn.click();
+  const remove = withIcon("trash", "Quitar", "button", "chip");
+  remove.type = "button";
+  remove.hidden = !current;
+  remove.onclick = () => { onChange(null); remove.hidden = true; change.lastChild.textContent = "Poner foto"; };
+  fileIn.onchange = async () => {
+    try {
+      onChange(await resizeImage(fileIn.files[0], 256, true));
+      remove.hidden = false;
+      change.lastChild.textContent = "Cambiar foto";
+    } catch { toast("Esa imagen no se puede usar."); }
+    fileIn.value = "";
+  };
+  const btns = text("", "div", "profile-photo-btns");
+  btns.append(change, remove, fileIn);
+  return btns;
+}
+
 function showMyProfile({ welcome = false } = {}) {
   let avatar = profile.avatar;
   const preview = setAvatar(text("", "span", "avatar xl"), profile.name || me, avatar);
@@ -2419,16 +2543,47 @@ function showGroupInfo(conv) {
   const gid = gidOf(conv), g = groups.get(gid);
   if (!g) return;
   const isAdmin = isAdminOf(g, me) && !g.left;
+  const canEdit = canEditInfo(g, me);
   const head = text("", "div", "profile-view");
-  head.append(setAvatar(text("", "span", "avatar xl"), g.name, g.avatar), text(g.name, "h3"),
+  const pic = setAvatar(text("", "span", "avatar xl"), g.name, g.avatar);
+  head.append(pic, text(g.name, "h3"),
     text(`${g.members.length} miembros${g.left ? " · ya no estás en este grupo" : ""}`, "p", "muted"));
   const body = [head];
   let nameIn = null;
-  if (isAdmin) { nameIn = input(g.name); body.push(field("Nombre del grupo", nameIn)); }
+  if (canEdit) {
+    head.append(photoButtons(g.avatar, (avatar) => { updateGroup(gid, { avatar }); setAvatar(pic, g.name, avatar); }));
+    nameIn = input(g.name);
+    body.push(field("Nombre del grupo", nameIn));
+  }
+  // Normas: los administradores las cambian; los demás las ven
+  body.push(text("Normas del grupo", "h3", "settings-h"));
+  const rules = rulesOf(g);
+  if (isAdmin) {
+    const box = text("", "div", "group-rules");
+    for (const [key, label, hint] of RULES) {
+      const l = text("", "label", "switch");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = rules[key];
+      cb.onchange = () => updateGroup(gid, { rules: { ...rulesOf(g), [key]: cb.checked } });
+      const t = text("", "span");
+      t.append(text(label, "strong"), text(hint, "small"));
+      l.append(cb, t);
+      box.append(l);
+    }
+    body.push(box);
+  } else {
+    const lines = [rules.onlyAdmins ? "Solo los administradores pueden escribir." : "Todos pueden escribir.",
+      rules.membersEdit ? "Todos pueden cambiar el nombre y la foto." : "Solo los administradores cambian el nombre y la foto.",
+      rules.membersAdd ? "Todos pueden añadir miembros." : "Solo los administradores añaden miembros."];
+    const ul = text("", "ul", "rules-list");
+    for (const l of lines) ul.append(text(l, "li"));
+    body.push(ul);
+  }
   const list = text("", "ul", "member-list");
   for (const u of g.members) {
     const li = document.createElement("li");
-    const tags = [isAdminOf(g, u) ? "admin" : "", isMutedIn(g, u) ? "silenciado" : ""].filter(Boolean).join(" · ");
+    const tags = [isAdminOf(g, u) ? "admin" : "", isSilencedIn(g, u) ? "silenciado" : ""].filter(Boolean).join(" · ");
     li.append(setAvatar(text("", "span", "avatar"), same(u, me) ? (profile.name || me) : displayName(u), same(u, me) ? profile.avatar : avatarOf(u)),
       text(same(u, me) ? "Tú" : displayName(u), "span", "member-name"), text(tags, "small", "muted"));
     if (isAdmin && !same(u, me)) {
@@ -2441,7 +2596,7 @@ function showGroupInfo(conv) {
         b.onclick = () => { fn(); showGroupInfo(conv); };
         li.append(b);
       };
-      const adm = isAdminOf(g, u), mut = isMutedIn(g, u);
+      const adm = isAdminOf(g, u), mut = isSilencedIn(g, u);
       act("shield", adm ? "Quitar de administrador" : "Hacer administrador", () =>
         updateGroup(gid, adm ? { admins: adminsOf(g).filter((x) => !same(x, u)) }
           : { admins: [...adminsOf(g), u], muted: (g.muted || []).filter((x) => !same(x, u)) }), adm ? "on" : "");
@@ -2454,7 +2609,7 @@ function showGroupInfo(conv) {
     list.append(li);
   }
   body.push(text("Miembros", "h3", "settings-h"), list);
-  if (isAdmin) {
+  if (canAddMembers(g, me)) {
     const addIn = input("", { max: 33, placeholder: "@usuario" });
     const addErr = text("", "p", "error");
     const addBtn = text("Añadir", "button", "chip");
@@ -2474,7 +2629,7 @@ function showGroupInfo(conv) {
     const row = text("", "div", "add-row");
     row.append(addIn, addBtn);
     body.push(text("Añadir miembro", "h3", "settings-h"), row, addErr);
-    body.push(text("Enlace de invitación", "h3", "settings-h"), inviteBox(g));
+    if (isAdmin) body.push(text("Enlace de invitación", "h3", "settings-h"), inviteBox(g));
   }
   if (!g.left) {
     const leave = text("Salir del grupo", "button", "chip danger");
@@ -2653,6 +2808,26 @@ function showAbout(back = false) {
 
 function showNewGroup() {
   const nameIn = input("", { placeholder: "Amigos de clase" });
+  let avatar = null;
+  const pic = setAvatar(text("", "span", "avatar xl"), "G", null);
+  pic.classList.add("group-pic");
+  const photoHead = text("", "div", "profile-head");
+  photoHead.append(pic, photoButtons(null, (a) => { avatar = a; setAvatar(pic, nameIn.value || "G", a); }));
+  nameIn.addEventListener("input", () => { if (!avatar) setAvatar(pic, nameIn.value || "G", null); });
+  const newRules = { onlyAdmins: false, membersEdit: false, membersAdd: false };
+  const rulesBox = document.createElement("details");
+  rulesBox.className = "advanced";
+  rulesBox.append(text("Normas del grupo (se pueden cambiar después)", "summary"));
+  for (const [key, label, hint] of RULES) {
+    const l = text("", "label", "switch");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.onchange = () => { newRules[key] = cb.checked; };
+    const t = text("", "span");
+    t.append(text(label, "strong"), text(hint, "small"));
+    l.append(cb, t);
+    rulesBox.append(l);
+  }
   const memberIn = input("", { max: 33, placeholder: "@usuario" });
   const chosen = [];
   const chips = text("", "div", "chosen");
@@ -2720,15 +2895,17 @@ function showNewGroup() {
   };
 
   dialog("Nuevo grupo", [
+    photoHead,
     field("Nombre del grupo", nameIn),
     text("Miembros", "h3", "settings-h"), row, err,
     people.length ? pick : text("Aún no has hablado con nadie: escribe su @usuario y pulsa Añadir.", "p", "hint"),
     chips,
+    rulesBox,
     text("Cada mensaje del grupo se cifra por separado para cada miembro: el servidor no sabe que el grupo existe.", "p", "hint"),
   ], [["Cancelar"], ["Crear grupo", () => {
     if (!connected) { alert("Sin conexión: espera a que vuelva."); return; }
     if (!chosen.length) { alert("Añade al menos a una persona."); return; }
-    createGroup(nameIn.value.trim().slice(0, 64) || "Grupo", chosen);
+    createGroup(nameIn.value.trim().slice(0, 64) || "Grupo", chosen, avatar, newRules);
   }]]);
   nameIn.focus();
 }
@@ -2992,7 +3169,7 @@ function previewOf(c) {
   if (!c) return "";
   if (c.t === "text") return c.body.replace(/([*_~`])(\S(?:[^\n]*?\S)?)\1/g, "$2"); // sin las marcas de formato
   if (c.t === "sticker") return `Sticker ${c.id}`;
-  if (c.once) return c.t === "image" ? "Foto · ver una vez" : "Vídeo · ver una vez";
+  if (c.once) return c.t === "image" ? "Foto · ver una vez" : c.t === "video" ? "Vídeo · ver una vez" : "Nota de voz · escuchar una vez";
   if (c.t === "image") return c.mime === "image/gif" ? "GIF" : "Foto";
   if (c.t === "video") return "Vídeo";
   if (c.t === "audio") return `Nota de voz${c.dur ? ` · ${fmtDur(c.dur)}` : ""}`;
@@ -3350,7 +3527,10 @@ function renderHeader() {
   // Se puede escribir siempre que haya un chat abierto (sin conexión, el mensaje espera con 🕓)
   const silenced = has && mutedHere(active);
   for (const id of ["text", "send-btn", "emoji-btn", "attach-btn", "mic-btn"]) $(id).disabled = !has || silenced;
-  $("text").placeholder = silenced ? "Un administrador te ha silenciado: solo puedes leer" : "Escribe un mensaje cifrado…";
+  const gNow = isGroup(active) ? groups.get(gidOf(active)) : null;
+  $("text").placeholder = !silenced ? "Escribe un mensaje cifrado…"
+    : isSilencedIn(gNow, me) ? "Un administrador te ha silenciado: solo puedes leer"
+    : "Solo los administradores pueden escribir en este grupo";
   $("chat").classList.toggle("is-empty", !has);
   $("empty-chat").hidden = has;
 }
@@ -3442,11 +3622,12 @@ function buildMessage(conv, m, prev) {
       downloadBytes(bytes, c.name || "archivo");
     };
     li.append(card);
-  } else if (c.once && (c.t === "image" || c.t === "video")) {
-    const what = c.t === "image" ? "Foto" : "Vídeo";
+  } else if (c.once && (c.t === "image" || c.t === "video" || c.t === "audio")) {
+    const what = c.t === "image" ? "Foto" : c.t === "video" ? "Vídeo" : "Nota de voz";
     const b = text("", "button", `once-card${m.opened || m.from === "me" ? " used" : ""}`);
     b.type = "button";
-    b.append(text("1", "span", "once-badge"), text(m.from === "me" ? `${what} · ver una vez` : m.opened ? "Abierta" : `${what} · ver una vez`, "span"));
+    const verb = c.t === "audio" ? "escuchar una vez" : "ver una vez";
+    b.append(text("1", "span", "once-badge"), text(m.from === "me" ? `${what} · ${verb}` : m.opened ? (c.t === "audio" ? "Escuchada" : "Abierta") : `${what} · ${verb}`, "span"));
     b.disabled = m.from === "me" || !!m.opened;
     b.onclick = (e) => { e.stopPropagation(); openOnce(conv, m); };
     li.append(b);
@@ -3563,13 +3744,24 @@ function rerenderMessage(m) {
 
 // ------------------------------------------------------------- varios archivos a la vez
 
-let sendOnce = false;
 
 async function sendFiles(files, once = false, asDoc = false) {
   for (const f of files.slice(0, 10)) await sendFile(f, asDoc, once);
 }
 
-/** Antes de enviar lo pegado o arrastrado, se enseña qué se va a mandar y a quién. */
+/** Botón «1 · Ver una vez» que se enciende y se apaga (btn.on dice cómo está). */
+function onceToggle(label = "Ver una vez") {
+  const b = text("", "button", "once-toggle");
+  b.type = "button";
+  b.on = false;
+  b.setAttribute("aria-pressed", "false");
+  b.append(text("1", "span", "once-badge"), text(label, "span"));
+  b.title = "Solo se podrá abrir una vez y luego desaparece";
+  b.addEventListener("click", () => { b.on = !b.on; b.setAttribute("aria-pressed", String(b.on)); });
+  return b;
+}
+
+/** Antes de enviar lo elegido, pegado o arrastrado, se enseña qué se va a mandar y a quién. */
 function confirmFiles(files, conv) {
   files = files.slice(0, 10);
   if (!files.length) return;
@@ -3585,6 +3777,15 @@ function confirmFiles(files, conv) {
       img.src = u;
       img.alt = f.name || "Imagen";
       cell.append(img);
+    } else if (VIDEO_MIME.includes(f.type)) {
+      const v = document.createElement("video");
+      const u = URL.createObjectURL(f);
+      urls.push(u);
+      v.src = `${u}#t=0.1`;
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = "metadata";
+      cell.append(v);
     } else {
       cell.append(icon(/^video\//.test(f.type) ? "video" : /^audio\//.test(f.type) ? "mic" : "file", "send-preview-ico"));
     }
@@ -3595,14 +3796,20 @@ function confirmFiles(files, conv) {
   docCb.type = "checkbox";
   const docL = text("", "label", "check");
   docL.append(docCb, text("Enviar como documento (sin comprimir)", "span"));
+  // «Ver una vez»: solo para fotos y vídeos (desaparecen al abrirlos)
+  const media = files.some((f) => IMAGE_MIME.includes(f.type) || VIDEO_MIME.includes(f.type));
+  const onceBtn = onceToggle();
+  onceBtn.hidden = !media;
+  onceBtn.addEventListener("click", () => { docCb.disabled = onceBtn.on; if (onceBtn.on) docCb.checked = false; });
+  docCb.onchange = () => { if (docCb.checked && onceBtn.on) onceBtn.click(); };
   const done = () => { for (const u of urls) URL.revokeObjectURL(u); };
   $("dialog").addEventListener("close", done, { once: true });
   const n = files.length;
   dialog(`Enviar ${n === 1 ? "1 archivo" : `${n} archivos`} a ${convName(conv)}`, [
-    grid, docL, text("Se cifra en tu dispositivo antes de salir.", "p", "hint"),
+    grid, onceBtn, docL, text("Se cifra en tu dispositivo antes de salir.", "p", "hint"),
   ], [["Cancelar"], ["Enviar", async () => {
     if (active !== conv) await openChat(conv);
-    sendFiles(files, false, docCb.checked);
+    sendFiles(files, onceBtn.on, docCb.checked);
   }]]);
 }
 
@@ -3616,13 +3823,14 @@ async function openOnce(conv, m) {
   m.hasMedia = false;
   save(conv, m);
   history?.removeMedia(conv, m.id);
-  if (!url) { alert("Esta foto ya no está disponible."); return; }
-  const el = document.createElement(m.content.t === "image" ? "img" : "video");
+  if (!url) { alert("Ya no está disponible."); return; }
+  const t = m.content.t;
+  const el = document.createElement(t === "image" ? "img" : t === "video" ? "video" : "audio");
   el.src = url;
-  el.className = "viewer";
-  if (m.content.t === "video") { el.controls = true; el.autoplay = true; el.playsInline = true; }
+  el.className = t === "audio" ? "once-audio" : "viewer";
+  if (t !== "image") { el.controls = true; el.autoplay = true; el.playsInline = true; el.controlsList = "nodownload"; }
   el.oncontextmenu = (e) => e.preventDefault();
-  dialog(m.content.t === "image" ? "Foto de ver una vez" : "Vídeo de ver una vez",
+  dialog(t === "image" ? "Foto de ver una vez" : t === "video" ? "Vídeo de ver una vez" : "Nota de voz de escuchar una vez",
     [el, text("Cuando cierres esta ventana, desaparecerá de este dispositivo.", "p", "hint")]);
   $("dialog").addEventListener("close", () => { el.removeAttribute("src"); URL.revokeObjectURL(url); }, { once: true });
 }
@@ -4116,8 +4324,7 @@ async function main() {
     e.stopPropagation();
     if ($("msg-menu")) return closeMsgMenu();
     const [menu, item] = newMenu();
-    item("image", "Foto o vídeo", () => { sendOnce = false; $("file-input").click(); });
-    item("eye", "Foto o vídeo de ver una vez", () => { sendOnce = true; $("file-input").click(); });
+    item("image", "Foto o vídeo", () => $("file-input").click());
     item("file", "Documento", () => $("doc-input").click());
     item("poll", "Encuesta", showNewPoll);
     item("clock", "Programar mensaje", () => showSchedule());
@@ -4133,7 +4340,8 @@ async function main() {
   setInterval(sweepExpired, 30000);
   window.addEventListener("hashchange", () => checkInvite());
   $("file-input").multiple = true;
-  $("file-input").onchange = () => { sendFiles([...$("file-input").files], sendOnce); sendOnce = false; $("file-input").value = ""; };
+  // Como en otras apps: antes de enviar se ve lo elegido y se puede marcar «ver una vez»
+  $("file-input").onchange = () => { const f = [...$("file-input").files]; $("file-input").value = ""; if (active) confirmFiles(f, active); };
   $("text").addEventListener("input", onMentionInput);
   $("text").addEventListener("keydown", onMentionKey, true);
   $("text").addEventListener("blur", () => setTimeout(hideMentions, 150));
@@ -4212,6 +4420,14 @@ async function main() {
   $("mic-btn").onclick = startRecording;
   $("rec-cancel").onclick = () => stopRecording(true);
   $("rec-send").onclick = () => stopRecording(false);
+  // Botón «parar»: termina la grabación sin enviarla, para escucharla antes
+  const recStop = text("", "button", "icon-btn rec-stop");
+  recStop.type = "button";
+  recStop.title = "Parar y escuchar antes de enviar";
+  recStop.setAttribute("aria-label", "Parar y escuchar antes de enviar");
+  recStop.append(text("", "span", "rec-stop-square"));
+  recStop.onclick = () => stopRecording(false, true);
+  $("rec-send").before(recStop);
   $("new-group-btn").onclick = showNewGroup;
   // Menú de hamburguesa
   const menu = $("app-menu"), menuBtn = $("menu-btn");

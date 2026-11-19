@@ -279,3 +279,30 @@ def test_delete_account_frees_the_name():
         assert "alice" in relay.registry
         await other.close(); await bob.close(); srv.close()
     run(main())
+
+
+def test_urgent_call_offer_wakes_the_phone_even_if_connected():
+    async def main():
+        srv, url, relay = await start_server()
+        alice, bob = await new_client(url, "alice"), await new_client(url, "bob")
+        calls = []
+
+        async def fake_notify(account, subs, call=False):
+            calls.append((account, call))
+            return subs
+        relay.pusher.notify = fake_notify
+        relay.registry["bob"]["push"] = [{"endpoint": "https://push.example/x", "keys": {"p256dh": "a", "auth": "b"}}]
+
+        # Un mensaje normal a alguien conectado no avisa por push
+        ack = await alice._request(type="send", to="bob", device=bob.device, payload={"x": 1})
+        assert ack["status"] == "delivered"
+        await asyncio.sleep(0.1)
+        assert calls == []
+
+        # Una oferta de llamada (urgente) sí, aunque bob parezca conectado (Android congela la app)
+        ack = await alice._request(type="send", to="bob", device=bob.device, payload={"x": 2}, urgent=True)
+        assert ack["status"] == "delivered"
+        await asyncio.sleep(0.1)
+        assert calls == [("bob", True)]
+        await alice.close(); await bob.close(); srv.close()
+    run(main())

@@ -28,6 +28,8 @@ except ImportError:  # pragma: no cover - sin dependencias opcionales
     AVAILABLE = False
 
 MIN_INTERVAL = 20      # segundos mínimos entre avisos a la misma cuenta
+CALL_INTERVAL = 5      # los de llamada no esperan a los de mensaje, pero tampoco se repiten sin fin
+CALL_TTL = 60          # un aviso de llamada que llega tarde ya no sirve
 MAX_SUBS = 5           # dispositivos con avisos por cuenta
 
 
@@ -45,6 +47,7 @@ class Pusher:
         self.enabled = AVAILABLE
         self.contact = contact
         self._last: dict[str, float] = {}
+        self._last_call: dict[str, float] = {}
         self.public_key = None
         if not self.enabled:
             return
@@ -58,12 +61,15 @@ class Pusher:
         raw = self.vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
         self.public_key = base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    def _send_sync(self, sub: dict) -> bool:
+    def _send_sync(self, sub: dict, call: bool = False) -> bool:
         """Devuelve False si la suscripción ya no vale (hay que borrarla)."""
+        body = {"title": "SecureChat", "kind": "call", "body": "📞 Te están llamando"} if call \
+            else {"title": "SecureChat", "body": "Tienes un mensaje nuevo 🔒"}
         try:
-            webpush(sub, json.dumps({"title": "SecureChat", "body": "Tienes un mensaje nuevo 🔒"}),
-                    vapid_private_key=self.vapid, vapid_claims={"sub": self.contact}, ttl=86400,
-                    timeout=10)
+            # Urgency: high hace que Android lo entregue al momento aunque el móvil esté en reposo
+            webpush(sub, json.dumps(body), vapid_private_key=self.vapid, vapid_claims={"sub": self.contact},
+                    ttl=CALL_TTL if call else 86400, timeout=10,
+                    headers={"Urgency": "high" if call else "normal"})
             return True
         except WebPushException as exc:
             status = getattr(exc.response, "status_code", None)
@@ -75,13 +81,15 @@ class Pusher:
             log.warning("aviso push fallido", exc_info=True)
             return True
 
-    async def notify(self, account: str, subs: list[dict]) -> list[dict]:
-        """Envía el aviso a todos los dispositivos. Devuelve las suscripciones que siguen vivas."""
+    async def notify(self, account: str, subs: list[dict], call: bool = False) -> list[dict]:
+        """Envía el aviso a todos los dispositivos. Devuelve las suscripciones que siguen vivas.
+        call=True: aviso de llamada entrante (prioridad alta y caduca en un minuto)."""
         if not self.enabled or not subs:
             return subs
         now = time.monotonic()
-        if now - self._last.get(account, 0) < MIN_INTERVAL:
+        last, gap = (self._last_call, CALL_INTERVAL) if call else (self._last, MIN_INTERVAL)
+        if now - last.get(account, 0) < gap:
             return subs
-        self._last[account] = now
-        alive = await asyncio.gather(*(asyncio.to_thread(self._send_sync, s) for s in subs))
+        last[account] = now
+        alive = await asyncio.gather(*(asyncio.to_thread(self._send_sync, s, call) for s in subs))
         return [s for s, ok in zip(subs, alive) if ok]

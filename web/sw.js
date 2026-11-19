@@ -1,6 +1,6 @@
 // Service worker: permite instalar SecureChat como app y abrirla sin red
 // (la interfaz carga; para enviar mensajes hace falta el servidor).
-const CACHE = "securechat-v27";
+const CACHE = "securechat-v29";
 const SHELL = [
   "./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg", "lock.svg", "icon-192.png", "icon-512.png",
   "js/theme.js", "js/app.js", "js/emoji.js", "js/vault.js", "js/ratchet.js", "js/icons.js", "js/client.js", "js/protocol.js",
@@ -40,6 +40,13 @@ self.addEventListener("push", (e) => {
   e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
     // Si la app está abierta y a la vista, ya lo ve ella: no molestamos
     if (wins.some((w) => w.visibilityState === "visible")) return;
+    // Llamada entrante: aviso que no se agrupa, vibra y se queda hasta que lo toques
+    if (data.kind === "call") {
+      return self.registration.showNotification("SecureChat", {
+        body: "📞 Te están llamando. Toca para abrir y contestar.", icon: "icon-192.png", badge: "icon-192.png",
+        tag: "call", renotify: true, requireInteraction: true, vibrate: [400, 200, 400, 200, 400], data: { call: true },
+      });
+    }
     return self.registration.getNotifications({ tag: "securechat-new" }).then((prev) => {
       const count = (prev[0]?.data?.count || 0) + 1;
       return self.registration.showNotification(data.title, {
