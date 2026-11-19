@@ -14,9 +14,6 @@ Esta versión está pensada para **uso local**: el servidor escucha solo en tu e
 (o en tu red Wi-Fi con `--lan`) y pide un **código de acceso** que genera al
 arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede entrar.
 
-> ⚠️ **Proyecto educativo. No está auditado.** No lo uses para información sensible
-> real. Si necesitas mensajería segura de verdad, usa [Signal](https://signal.org).
-
 ## Capturas
 
 ![Grupo con foto, una imagen cifrada y reacciones, en el ordenador](docs/img/chat-ordenador.jpg)
