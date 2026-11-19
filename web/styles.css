@@ -1289,3 +1289,106 @@ a.starred-row { text-decoration: none; }
 /* Con el teclado del móvil abierto la app mide lo que se ve (--app-h) y la página no rebota */
 html:has(#app:not([hidden])), html:has(#app:not([hidden])) body { overflow: hidden; overscroll-behavior: none; }
 .messages { overscroll-behavior: contain; }
+
+/* Borrar la cuenta */
+.danger-list { margin: 0 0 14px; padding-left: 20px; color: var(--muted); font-size: .92em; display: grid; gap: 4px; }
+#dlg-actions button.danger { background: var(--error); color: #fff; border: 0; }
+#dlg-actions button.danger:disabled { opacity: .6; }
+
+/* Pantalla de acceso: cabe entera en la pantalla, sin tener que subir ni bajar.
+   Se compacta según la altura disponible (y solo si de verdad no cabe, por ejemplo con
+   el teclado abierto en un móvil muy pequeño, se puede desplazar dentro). */
+.login { height: 100vh; height: 100dvh; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.login-card { min-height: 100%; padding-top: max(24px, env(safe-area-inset-top)); padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+@media (min-width: 900px) { .login-art { height: 100%; min-height: 0; } }
+@media (max-width: 899px) { .login-card .features { display: none; } }
+@media (max-height: 860px) {
+  #login-form { gap: 11px; margin-top: 18px; }
+  .field { gap: 4px; }
+  .field input { padding: 10px 13px; }
+  .login-card .features { margin-top: 14px; }
+  .disclaimer { margin-top: 10px; }
+}
+@media (max-height: 720px) {
+  .login-card { justify-content: flex-start; padding-top: max(16px, env(safe-area-inset-top)); }
+  #login-form { gap: 9px; margin-top: 12px; }
+  .auth-sub, .login-card .features { display: none; }
+  .login-card .brand-mark { width: 38px; height: 38px; }
+  .login-card .brand h1 { font-size: 20px; }
+  .auth-title { font-size: 19px; }
+  .field span { font-size: 12px; }
+  .field input { padding: 9px 12px; }
+  .login-card .primary { padding-top: 10px; padding-bottom: 10px; }
+  .disclaimer { margin-top: 8px; font-size: 11px; }
+  .login-art { gap: 18px; padding-top: 28px; padding-bottom: 28px; }
+  .login-illustration { max-height: 42vh; }
+}
+@media (max-height: 600px) {
+  .login-card .brand-tag, .disclaimer, .login-art-text p { display: none; }
+  #login-form { margin-top: 8px; gap: 7px; }
+}
+@media (max-height: 640px) {
+  .login-card { padding-top: max(10px, env(safe-area-inset-top)); padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .login-card .hint { font-size: 12px; }
+}
+/* Al crear cuenta, las dos contraseñas van una al lado de la otra */
+#login-form[data-mode="register"] { grid-template-columns: 1fr 1fr; column-gap: 10px; }
+#login-form[data-mode="register"] > * { grid-column: 1 / -1; }
+#login-form[data-mode="register"] > #login-pass-wrap { grid-column: 1; }
+#login-form[data-mode="register"] > #login-pass2-wrap { grid-column: 2; }
+@media (max-height: 720px) { #login-email-wrap .hint { display: none; } }
+
+/* Mensaje que no se pudo enviar */
+.msg.mine.failed { box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 70%, transparent) !important; }
+.retry-chip {
+  display: flex; align-items: center; gap: 6px; margin: 6px 0 0 auto; padding: 4px 10px; border-radius: 999px;
+  border: 0; background: rgb(255 255 255 / .92); color: var(--error); font: 600 12px var(--font); cursor: pointer;
+}
+.retry-chip .ico { width: 14px; height: 14px; }
+.retry-chip:hover { background: #fff; }
+
+/* Bloqueo de la app */
+.lock-screen {
+  position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 24px;
+  background:
+    radial-gradient(circle at 20% 10%, color-mix(in srgb, var(--accent) 35%, transparent), transparent 55%),
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 20%, #0c1512), color-mix(in srgb, var(--accent) 8%, #090f0d));
+  color: #eef5f1;
+}
+.lock-screen[hidden] { display: none; }
+html.is-locked #app { visibility: hidden; }
+.lock-box { width: min(340px, 100%); display: grid; gap: 12px; justify-items: center; text-align: center; }
+.lock-box h2 { margin: 6px 0 0; font-size: 21px; }
+.lock-box .hint { color: rgb(238 245 241 / .7); margin: 0; }
+.lock-box input {
+  width: 100%; text-align: center; font-size: 24px; letter-spacing: .4em; padding: 12px; border-radius: 14px;
+  border: 1px solid rgb(255 255 255 / .2); background: rgb(255 255 255 / .08); color: #fff;
+}
+.lock-box input:focus { outline: none; border-color: var(--accent); }
+.lock-box .primary { width: 100%; }
+.lock-box .chip { color: #eef5f1; border-color: rgb(255 255 255 / .25); background: rgb(255 255 255 / .06); }
+.lock-box .link { color: rgb(238 245 241 / .65); background: none; border: 0; cursor: pointer; font-size: 13px; }
+.lock-box .error { color: #ffb4b4; }
+.lock-settings { display: grid; gap: 12px; }
+.lock-settings select { padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); }
+.lock-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.pin-new { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
+.pin-new input { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); letter-spacing: .2em; }
+.pin-new-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Vista previa de enlaces (título, descripción e imagen) */
+.link-card.rich { display: grid; gap: 0; padding: 0; overflow: hidden; align-items: stretch; max-width: 340px; }
+.link-card.rich img { width: 100%; max-height: 180px; object-fit: cover; display: block; }
+.link-card.rich .link-meta { padding: 8px 10px; gap: 2px; }
+.link-card.rich .link-meta small { text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+.link-card.rich .link-meta strong { font-size: 14px; line-height: 1.3; }
+.link-desc { font-size: 12.5px; opacity: .8; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.send.busy { opacity: .6; pointer-events: none; }
+
+/* Enviar lo pegado o arrastrado */
+.send-preview { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin-bottom: 12px; max-height: 46vh; overflow: auto; }
+.send-preview-cell { display: grid; gap: 4px; justify-items: center; padding: 6px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--line); }
+.send-preview-cell img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+.send-preview-cell small { font-size: 11px; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.send-preview-ico { width: 40px; height: 40px; margin: 18px 0; color: var(--accent); }
+.contacts li.drop-target button { outline: 2px dashed var(--accent); outline-offset: -3px; background: rgb(255 255 255 / .12); }

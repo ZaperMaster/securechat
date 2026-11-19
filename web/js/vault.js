@@ -130,6 +130,14 @@ export class History {
     await tx("media", "readwrite", (s) => s.delete(this.k(peer, id)));
   }
 
+  /** Borra todo el historial (mensajes y archivos) de esta cuenta en el dispositivo. */
+  async deleteAll() {
+    const prefix = `${this.account}|`;
+    const range = IDBKeyRange.bound(prefix, `${prefix}￿`);
+    await tx("messages", "readwrite", (s) => s.delete(range));
+    await tx("media", "readwrite", (s) => s.delete(range));
+  }
+
   async deleteChat(peer) {
     const prefix = `${this.account}|${peer.toLowerCase()}|`;
     const range = IDBKeyRange.bound(prefix, `${prefix}￿`);

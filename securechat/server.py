@@ -51,6 +51,7 @@ USERNAME_HELP = "3-32 caracteres: letras, números, '_', '.' o '-'"
 MAX_FRAME = 20 * 1024 * 1024
 EMAIL_SENDS_PER_HOUR = 5
 LOOKUP_LIMIT = 30  # búsquedas por minuto y conexión (frena la enumeración de usuarios)
+PREVIEW_LIMIT = 20  # vistas previas de enlaces por minuto y conexión
 AUTH_TIMEOUT = 10
 AUTH_CONTEXT = b"securechat-auth-v1"
 QUEUE_MAX_MSGS = 300
@@ -367,6 +368,7 @@ class RelayServer:
     async def handler(self, ws: ServerConnection) -> None:
         user = device = None
         lookups: list[float] = []
+        previews: list[float] = []
         pending_email: dict | None = None  # cambio de correo a medias (código enviado)
         try:
             auth = await self._authenticate(ws)
@@ -471,6 +473,21 @@ class RelayServer:
                         self._store_keystore(c, msg.get("blob"))
                     except (ValueError, KeyError, TypeError, CryptoError) as exc:
                         await _send(ws, type="error", code="bad_keystore", message=str(exc))
+                elif t == "preview":
+                    now = time.monotonic()
+                    previews[:] = [x for x in previews if now - x < 60] + [now]
+                    if len(previews) > PREVIEW_LIMIT:
+                        await _send(ws, type="error", code="rate_limited", id=msg.get("id"), message="demasiadas vistas previas")
+                    else:
+                        asyncio.create_task(self._preview(ws, msg))
+                elif t == "delete-account":
+                    # La conexión ya demostró tener la clave privada; además se firma la petición
+                    # para que no baste con colar un mensaje en una sesión ajena abierta.
+                    verify_signature(self.registry[c]["key"], b"securechat-delete-account|" + c.encode(),
+                                     b64d(msg.get("sig", "")))
+                    await _send(ws, type="ack", id=msg.get("id"), status="ok")
+                    await self._delete_account(c)
+                    return
                 elif t == "who":
                     await _send(ws, type="who", users=sorted(self.registry[x]["name"] for x in self.online))
                 else:
@@ -498,6 +515,40 @@ class RelayServer:
                             self.registry[c]["last_seen"] = int(time.time())
                             self._save()
                             await self._presence(c, False)
+
+    async def _preview(self, ws: ServerConnection, msg: dict) -> None:
+        """Vista previa de un enlace (en otro hilo, para no frenar al resto)."""
+        from .preview import PreviewError, link_preview
+        try:
+            data = await asyncio.wait_for(asyncio.to_thread(link_preview, msg.get("url")), 12)
+            await _send(ws, type="preview", id=msg.get("id"), **data)
+        except (PreviewError, TimeoutError) as exc:
+            await _send(ws, type="error", code="no_preview", id=msg.get("id"), message=str(exc) or "sin vista previa")
+        except ConnectionClosed:
+            pass
+        except Exception:  # noqa: BLE001 - una página rara no debe tumbar nada
+            log.warning("vista previa fallida", exc_info=True)
+            await _send(ws, type="error", code="no_preview", id=msg.get("id"), message="sin vista previa")
+
+    async def _delete_account(self, c: str) -> None:
+        """Borra la cuenta para siempre: claves, copia cifrada, correo, avisos y mensajes en espera.
+        El nombre queda libre para que otra persona pueda registrarlo."""
+        r = self.registry.get(c)
+        if r is None:
+            return
+        if r.get("status") != "invisible" and c in self.online:
+            r["last_seen"] = None
+            await self._presence(c, False)
+        for d in list(r.get("devices", {})):
+            self._forget_device(c, d)
+        conns = list(self.online.pop(c, {}).values())
+        del self.registry[c]
+        for other in self.related.pop(c, set()):
+            self.related.get(other, set()).discard(c)
+        self._save()
+        log.info("cuenta borrada: %s", r["name"])
+        for conn in conns:
+            await conn.close(4002, "cuenta borrada")
 
     async def _presence(self, c: str, online: bool) -> None:
         """Avisa a quien ha hablado con este usuario de que entra o sale."""

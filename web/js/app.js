@@ -92,6 +92,7 @@ async function onLogin(ev) {
   $("login-error").textContent = "";
   $("login-btn").disabled = true;
   $("login-btn").textContent = reg ? "Creando cuenta…" : "Comprobando…";
+  passwordJustTyped = true; // acaba de escribir la contraseña: no hace falta pedirle además el PIN
   await new Promise((r) => setTimeout(r, 30)); // deja pintar antes de Argon2id
   try {
     if (serverConfig.code_required) store.set("sc:code", $("login-code").value.trim());
@@ -218,6 +219,8 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   sweepExpired();
   checkInvite();
   runScheduled();
+  setTimeout(maybeRemindBackup, 20000);
+  maybeLock(true);
 }
 
 const sendPrivacy = () => client?.setPrivacy({ lastSeen: prefs().lastSeen, status: prefs().status });
@@ -474,7 +477,33 @@ function setStatus(conv, m, status) {
   history?.put(conv, m);
   const el = m.el?.querySelector(".tick");
   if (el) paintTick(el, statusOf(conv, m));
+  if (m.el) syncRetry(conv, m, m.el);
   renderContacts();
+}
+
+/** Si un mensaje mío no se pudo enviar, debajo aparece «No se pudo enviar · Reintentar». */
+function syncRetry(conv, m, li) {
+  li.classList.toggle("failed", m.status === "failed");
+  li.querySelector(".retry-chip")?.remove();
+  if (m.from !== "me" || m.status !== "failed" || m.deleted) return;
+  const b = withIcon("alert", "No se pudo enviar · Reintentar", "button", "retry-chip");
+  b.type = "button";
+  b.onclick = (e) => { e.stopPropagation(); retryMsg(conv, m); };
+  li.append(b);
+}
+
+/** Vuelve a poner en la bandeja de salida un mensaje que falló. */
+function retryMsg(conv, m) {
+  if (m.status !== "failed") return;
+  m.to = targetsOf(conv);
+  m.status = "sending";
+  history?.put(conv, m);
+  const el = m.el?.querySelector(".tick");
+  if (el) paintTick(el, "sending");
+  if (m.el) syncRetry(conv, m, m.el);
+  renderContacts();
+  if (!connected) toast("Sin conexión: se enviará en cuanto vuelva.");
+  flushAll();
 }
 
 function paintTick(el, status) {
@@ -523,6 +552,12 @@ function onEvent(ev) {
     case "disconnected":
       if (!client) break;
       connected = false;
+      if (ev.text === "deleted") {
+        // La cuenta se ha borrado desde otro dispositivo: aquí tampoco debe quedar nada
+        const name = me;
+        wipeLocalAccount(name).then(() => logout()).then(() => { $("login-error").textContent = `La cuenta @${name} se ha borrado.`; });
+        break;
+      }
       if (ev.text === "removed") {
         logout();
         $("login-error").textContent = "Este dispositivo se ha desvinculado de tu cuenta desde otro dispositivo.";
@@ -735,6 +770,7 @@ function sendReceipt(peer, ids, status, g) {
 }
 
 function markRead(conv) {
+  clearChatNotification(conv);
   const unread = chat(conv).messages.filter((m) => m.from === "them" && !m.read);
   if (!unread.length) return;
   const bySender = new Map();
@@ -756,8 +792,58 @@ function notify(conv, sender, content) {
   // No mostramos el contenido: la notificación podría verse con la pantalla bloqueada.
   const title = isGroup(conv) ? convName(conv) : displayName(sender);
   const who = isGroup(conv) ? `${displayName(sender)}: ` : "";
-  new Notification(title, { body: who + (mentioned ? "Te ha mencionado" : content.t === "text" ? "Nuevo mensaje" : previewOf(content)), tag: conv });
+  const what = mentioned ? "Te ha mencionado" : content.t === "text" ? "Nuevo mensaje" : previewOf(content);
+  showChatNotification(conv, title, who + what);
 }
+
+/**
+ * Una notificación por chat: si llegan varios mensajes se agrupan («3 mensajes nuevos»).
+ * Con el service worker lleva botones para responder desde la propia notificación
+ * (en los navegadores que lo permiten, se escribe ahí mismo) o marcar como leído.
+ */
+async function showChatNotification(conv, title, body) {
+  const tag = `chat:${conv.toLowerCase()}`;
+  const reg = navigator.serviceWorker && window.isSecureContext ? await navigator.serviceWorker.getRegistration() : null;
+  if (!reg?.showNotification) { new Notification(title, { body, tag }); return; }
+  const prev = (await reg.getNotifications({ tag }))[0];
+  const count = (prev?.data?.count || 0) + 1;
+  const canWrite = !isGroup(conv) || targetsOf(conv).length;
+  await reg.showNotification(title, {
+    body: count > 1 ? `${count} mensajes nuevos · ${body}` : body,
+    tag, renotify: true, icon: "icon-192.png", badge: "icon-192.png",
+    data: { conv, count, account: me },
+    actions: [
+      ...(canWrite && !mutedHere(conv) ? [{ action: "reply", title: "Responder", type: "text", placeholder: "Escribe un mensaje…" }] : []),
+      { action: "read", title: "Marcar como leído" },
+    ],
+  });
+}
+
+/** Al abrir un chat (o leerlo), su notificación sobra. */
+async function clearChatNotification(conv) {
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    for (const n of (await reg?.getNotifications({ tag: `chat:${conv.toLowerCase()}` })) || []) n.close();
+  } catch { /* sin service worker */ }
+}
+
+/** Lo que pide el service worker al pulsar una notificación. */
+function onWorkerMessage(e) {
+  const d = e.data || {};
+  if (!me || !d.conv || (d.account && !same(d.account, me))) return;
+  const conv = [...chats.keys()].find((c) => same(c, d.conv)) || d.conv;
+  if (d.type === "notif-read") { markRead(conv); renderContacts(); return; }
+  if (d.type === "notif-reply" && d.text?.trim()) {
+    sendTo(conv, { t: "text", body: d.text.trim() });
+    markRead(conv);
+    return;
+  }
+  if (d.type === "notif-open" || d.type === "notif-reply") {
+    openChat(conv);
+    if (d.type === "notif-reply") setTimeout(() => $("text").focus(), 100);
+  }
+}
+navigator.serviceWorker?.addEventListener("message", onWorkerMessage);
 
 // ------------------------------------------------------------------- grupos
 
@@ -900,6 +986,7 @@ async function openChat(conv) {
   renderContacts();
   renderChat();
   markRead(conv);
+  clearChatNotification(conv);
   if (window.matchMedia("(pointer: fine)").matches) $("text").focus();
   if (isGroup(conv) || !connected) return;
   // Contacto: miramos si está conectado y su "última vez"
@@ -1049,7 +1136,34 @@ async function onSend(ev) {
   if (!t.trim()) return;
   $("text").value = "";
   closePicker();
-  await send({ t: "text", body: t });
+  const lp = await makeLinkPreview(t);
+  await send({ t: "text", body: t, ...(lp ? { lp } : {}) });
+}
+
+const FIRST_URL = /https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]']/;
+
+/** Vista previa del primer enlace, generada al ENVIAR (el que recibe no visita la web). */
+async function makeLinkPreview(body) {
+  const url = body.match(FIRST_URL)?.[0];
+  if (!url || !prefs().linkPreviews || !connected) return null;
+  const btn = $("send-btn");
+  btn.classList.add("busy");
+  try {
+    const r = await client.request({ type: "preview", url }, 7000);
+    let img = null;
+    if (r.image) {
+      try {
+        const blob = new Blob([sodium.from_base64(r.image, sodium.base64_variants.ORIGINAL)], { type: r.mime });
+        img = await resizeImage(blob, 360, false); // miniatura pequeña: el mensaje no crece casi nada
+      } catch { /* imagen que el navegador no sabe leer */ }
+    }
+    const cut = (x, n) => (typeof x === "string" ? x.slice(0, n) : "");
+    return { url, title: cut(r.title, 200), desc: cut(r.desc, 300), site: cut(r.site, 80), ...(img ? { img } : {}) };
+  } catch {
+    return null; // sin vista previa: se envía igual
+  } finally {
+    btn.classList.remove("busy");
+  }
 }
 
 // Acciones propias sobre un mensaje
@@ -2137,6 +2251,63 @@ function showEmailChange() {
   mail.focus();
 }
 
+// ------------------------------------------------------------ borrar la cuenta
+
+/** Borra todo lo de esta cuenta que hay en este dispositivo (claves, historial, ajustes). */
+async function wipeLocalAccount(name) {
+  const low = name.toLowerCase();
+  for (const k of Object.keys(localStorage)) if (k.startsWith("sc:") && k.endsWith(`:${low}`)) localStorage.removeItem(k);
+  if (store.get("sc:last")?.toLowerCase?.() === low) localStorage.removeItem("sc:last");
+  try { await history?.deleteAll(); } catch { /* sin historial */ }
+  try { await Vault.forget(name); } catch { /* sin sesión recordada */ }
+}
+
+function showDeleteAccount(back = true) {
+  const pass = input("", { max: 200 });
+  pass.type = "password";
+  pass.autocomplete = "current-password";
+  const confirmIn = input("", { max: 20, placeholder: "BORRAR" });
+  confirmIn.autocapitalize = "characters";
+  const err = text("", "p", "error");
+  const list = text("", "ul", "danger-list");
+  for (const t of ["Tu @usuario quedará libre y cualquiera podrá registrarlo.", "Se borran tus claves, tu copia cifrada y tu correo del servidor.",
+    "Se borran tus chats, fotos y ajustes de este dispositivo.", "Tus contactos conservan los mensajes que ya recibieron.",
+    "No se puede deshacer. Si quieres conservar algo, descarga antes una copia de seguridad."]) list.append(text(t, "li"));
+  dialog("Borrar mi cuenta", [
+    list,
+    field("Tu contraseña", pass),
+    field("Escribe BORRAR para confirmar", confirmIn),
+    err,
+  ], [[back ? "Atrás" : "Cancelar", back ? () => setTimeout(showOptions) : undefined], ["Borrar para siempre", async () => {
+    setTimeout(() => $("dialog").showModal());
+    err.textContent = "";
+    if (confirmIn.value.trim().toUpperCase() !== "BORRAR") { err.textContent = "Escribe BORRAR para confirmar."; return; }
+    try { P.loadIdentity(store.get(idKey(me)), pass.value); }
+    catch { err.textContent = "La contraseña no es correcta."; return; }
+    if (!connected) { err.textContent = "Necesitas conexión con el servidor para borrar la cuenta."; return; }
+    const btn = $("dlg-actions").lastChild;
+    btn.disabled = true;
+    btn.textContent = "Borrando…";
+    try {
+      const sig = sodium.crypto_sign_detached(P.utf8(`securechat-delete-account|${me.toLowerCase()}`), identity.privateKey);
+      await client.request({ type: "delete-account", sig: P.b64e(sig) });
+      const name = me;
+      await removePush().catch(() => {});
+      await wipeLocalAccount(name);
+      $("dialog").close();
+      await logout();
+      $("login-name").value = "";
+      $("login-error").textContent = `La cuenta @${name} se ha borrado para siempre.`;
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "Borrar para siempre";
+      err.textContent = `No se pudo borrar: ${e.message}.`;
+    }
+  }]]);
+  $("dlg-actions").lastChild.className = "danger";
+  pass.focus();
+}
+
 function showMyProfile({ welcome = false } = {}) {
   let avatar = profile.avatar;
   const preview = setAvatar(text("", "span", "avatar xl"), profile.name || me, avatar);
@@ -2322,13 +2493,16 @@ function showGroupInfo(conv) {
 
 const BACKUP_MAGIC = "securechat-backup-v1";
 
-async function exportBackup() {
+const backupKey = () => `sc:lastbackup:${me.toLowerCase()}`;
+
+async function exportBackup({ media = true } = {}) {
   const convs = [];
   for (const [conv, ch] of chats) {
     const msgs = [];
     for (const m of ch.messages) {
       const { el, url, ...plain } = m;
-      if (m.hasMedia) {
+      if (m.hasMedia && !media) plain.hasMedia = false;
+      else if (m.hasMedia) {
         const bytes = await history.getMedia(conv, m.id);
         if (bytes) plain.media = sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL);
       }
@@ -2339,6 +2513,8 @@ async function exportBackup() {
   const data = {
     magic: BACKUP_MAGIC, account: me, created: Date.now(), convs,
     groups: Object.fromEntries(groups), contacts: client.contacts.toJSON(), profile,
+    // También los ajustes de cada chat (fijado, archivado, silenciado…), los programados y las preferencias
+    meta: chatMeta, scheduled: store.get(schedKey()) || [], prefs: prefs(), theme: store.get("sc:theme") || null,
   };
   const key = P.kdf(identity.seed, "sc-backup");
   const nonce = sodium.randombytes_buf(24);
@@ -2350,6 +2526,7 @@ async function exportBackup() {
   a.download = `securechat-${me}-${new Date().toISOString().slice(0, 10)}.scbackup`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  store.set(backupKey(), Date.now());
   return convs.reduce((n, [, l]) => n + l.length, 0);
 }
 
@@ -2382,6 +2559,14 @@ async function importBackup(file) {
     if (!mine || (g.v || 0) > (mine.v || 0)) groups.set(gid, g);
   }
   saveGroups();
+  // Ajustes de los chats: solo se rellenan los que aquí no existen
+  for (const [conv, mt] of Object.entries(data.meta || {})) if (!chatMeta[conv]) chatMeta[conv] = mt;
+  store.set(metaKey(), chatMeta);
+  if (data.scheduled?.length) {
+    const mine = store.get(schedKey()) || [];
+    const ids = new Set(mine.map((x) => x.id));
+    store.set(schedKey(), [...mine, ...data.scheduled.filter((x) => !ids.has(x.id) && x.at > Date.now())]);
+  }
   for (const [name, c] of Object.entries(data.contacts || {})) {
     if (!client.contacts.get(name)) {
       try { client.contacts.pin(name, P.b64d(c.identity_key)); client.contacts.setProfile(name, { name: c.display_name, avatar: c.avatar, bio: c.bio }); }
@@ -2393,14 +2578,39 @@ async function importBackup(file) {
   return added;
 }
 
+function lastBackupText() {
+  const t = store.get(backupKey());
+  if (!t) return "Todavía no has hecho ninguna copia en este dispositivo.";
+  const days = Math.floor((Date.now() - t) / 86400000);
+  return `Última copia: ${days === 0 ? "hoy" : days === 1 ? "ayer" : `hace ${days} días`}.`;
+}
+
+/** Una vez por sesión, si hay historial y hace más de 30 días de la última copia, lo recordamos. */
+let backupNagged = false;
+function maybeRemindBackup() {
+  if (backupNagged || !me) return;
+  const n = [...chats.values()].reduce((a, ch) => a + ch.messages.length, 0);
+  const t = store.get(backupKey()) || store.get(`sc:firstseen:${me.toLowerCase()}`);
+  if (!t) { store.set(`sc:firstseen:${me.toLowerCase()}`, Date.now()); return; }
+  if (n < 30 || Date.now() - t < 30 * 86400000) return;
+  backupNagged = true;
+  toast("Hace más de un mes que no guardas una copia de seguridad: ☰ → Opciones → Copia de seguridad.");
+}
+
 function showBackup(back = false) {
   const status = text("", "p", "hint");
+  const last = text(lastBackupText(), "p", "hint");
+  const mediaCb = document.createElement("input");
+  mediaCb.type = "checkbox";
+  mediaCb.checked = true;
+  const mediaL = text("", "label", "check");
+  mediaL.append(mediaCb, text("Incluir fotos, vídeos, notas de voz y documentos (la copia ocupa más)", "span"));
   const exp = withIcon("download", "Descargar copia cifrada", "button", "primary");
   exp.type = "button";
   exp.onclick = async () => {
     exp.disabled = true;
     status.textContent = "Preparando la copia…";
-    try { status.textContent = `Copia descargada con ${await exportBackup()} mensajes.`; seclog("Has descargado una copia de seguridad."); }
+    try { status.textContent = `Copia descargada con ${await exportBackup({ media: mediaCb.checked })} mensajes.`; last.textContent = lastBackupText(); seclog("Has descargado una copia de seguridad."); }
     catch (e) { status.textContent = `No se pudo crear: ${e.message}`; }
     finally { exp.disabled = false; }
   };
@@ -2419,7 +2629,8 @@ function showBackup(back = false) {
   dialog("Copia de seguridad", [
     text("Guarda todo tu historial (mensajes, fotos, notas de voz, grupos y contactos) en un fichero cifrado.", "p"),
     text("Solo tu cuenta puede abrirlo: la clave sale de tu identidad. Sirve para pasar tu historial a otro móvil u ordenador: inicia sesión allí y restaura la copia.", "p", "hint"),
-    exp, imp, fileIn, status,
+    text("Ten en cuenta que si borras tu cuenta, la copia ya no se podrá abrir.", "p", "hint"),
+    last, mediaL, exp, imp, fileIn, status,
   ], subActions(back));
 }
 
@@ -2600,6 +2811,7 @@ const OPTIONS = [
   ["key", "Registro de seguridad", "Dispositivos nuevos, cambios de clave…", () => showSecLog()],
   ["download", "Copia de seguridad", "Guarda o restaura tu historial cifrado", () => showBackup(true)],
   ["shield", "Cómo te protege SecureChat", "Qué ve y qué no ve el servidor", () => showAbout(true)],
+  ["trash", "Borrar mi cuenta", "Elimina tu cuenta y libera tu @usuario", () => showDeleteAccount(true)],
 ];
 
 /** Pantalla de opciones: una lista de apartados; cada uno abre el suyo. */
@@ -2730,6 +2942,9 @@ function showSettings(section = "appearance", back = true) {
       toggle("typing", "Mostrar que estoy escribiendo", "Si lo quitas, los demás no verán «escribiendo…» cuando escribes."),
       toggle("readReceipts", "Mostrar que he leído (visto)", "Si lo quitas, los demás no verán el doble check azul cuando leas sus mensajes."),
       toggle("lastSeen", "Mostrar mi última conexión", "Si lo quitas, nadie verá a qué hora te conectaste por última vez (y tú tampoco la de los demás)."),
+      toggle("linkPreviews", "Vista previa de los enlaces", "Al enviar un enlace, el servidor descarga el título y la imagen de la página para enseñarlos en el chat. El servidor verá esa dirección (no a quién se la mandas). Quien lo recibe no descarga nada."),
+      text("Bloqueo de la app", "h3", "settings-h"),
+      lockSettings(),
     ], subActions(back));
   }
   if (section === "chats") {
@@ -2821,6 +3036,7 @@ function renderContacts() {
     const unread = unreadOf(conv);
     const li = document.createElement("li");
     if (conv === active) li.className = "active";
+    li.dataset.conv = conv;
     const btn = document.createElement("button");
     btn.type = "button";
     const main = text("", "span", "contact-main");
@@ -3209,7 +3425,7 @@ function buildMessage(conv, m, prev) {
     li.append(del);
   } else if (c.t === "text") {
     li.append(richText(c.body));
-    const card = linkCard(c.body);
+    const card = linkCard(c.body, c.lp);
     if (card) li.append(card);
   } else if (c.t === "file") {
     const card = text("", "button", "file-card");
@@ -3277,6 +3493,7 @@ function buildMessage(conv, m, prev) {
     t.append(" ", tick);
   }
   li.append(t);
+  syncRetry(conv, m, li);
   // Reacciones agrupadas: 👍 2  ❤️ 1
   const reactions = Object.entries(m.reactions || {});
   if (reactions.length && !m.deleted) {
@@ -3350,6 +3567,43 @@ let sendOnce = false;
 
 async function sendFiles(files, once = false, asDoc = false) {
   for (const f of files.slice(0, 10)) await sendFile(f, asDoc, once);
+}
+
+/** Antes de enviar lo pegado o arrastrado, se enseña qué se va a mandar y a quién. */
+function confirmFiles(files, conv) {
+  files = files.slice(0, 10);
+  if (!files.length) return;
+  if (mutedHere(conv)) { toast("Solo los administradores pueden escribir en este grupo."); return; }
+  const urls = [];
+  const grid = text("", "div", "send-preview");
+  for (const f of files) {
+    const cell = text("", "div", "send-preview-cell");
+    if (/^image\//.test(f.type)) {
+      const img = document.createElement("img");
+      const u = URL.createObjectURL(f);
+      urls.push(u);
+      img.src = u;
+      img.alt = f.name || "Imagen";
+      cell.append(img);
+    } else {
+      cell.append(icon(/^video\//.test(f.type) ? "video" : /^audio\//.test(f.type) ? "mic" : "file", "send-preview-ico"));
+    }
+    cell.append(text(f.name || "Captura", "small"));
+    grid.append(cell);
+  }
+  const docCb = document.createElement("input");
+  docCb.type = "checkbox";
+  const docL = text("", "label", "check");
+  docL.append(docCb, text("Enviar como documento (sin comprimir)", "span"));
+  const done = () => { for (const u of urls) URL.revokeObjectURL(u); };
+  $("dialog").addEventListener("close", done, { once: true });
+  const n = files.length;
+  dialog(`Enviar ${n === 1 ? "1 archivo" : `${n} archivos`} a ${convName(conv)}`, [
+    grid, docL, text("Se cifra en tu dispositivo antes de salir.", "p", "hint"),
+  ], [["Cancelar"], ["Enviar", async () => {
+    if (active !== conv) await openChat(conv);
+    sendFiles(files, false, docCb.checked);
+  }]]);
 }
 
 // ------------------------------------------------------------- ver una vez
@@ -3680,7 +3934,7 @@ function richText(body) {
 }
 
 /** Tarjeta del primer enlace: solo con lo que ya está en el texto (no se visita la web: no se filtra tu IP). */
-function linkCard(body) {
+function linkCard(body, lp = null) {
   const raw = body.match(/https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]']/)?.[0];
   if (!raw) return null;
   let u;
@@ -3691,6 +3945,23 @@ function linkCard(body) {
   a.target = "_blank";
   a.rel = "noopener noreferrer nofollow";
   a.onclick = (e) => e.stopPropagation();
+  // Vista previa que generó quien lo envió (viene cifrada dentro del mensaje)
+  if (lp && lp.url === raw && (lp.title || lp.desc)) {
+    a.classList.add("rich");
+    if (typeof lp.img === "string" && /^[A-Za-z0-9+/=]+$/.test(lp.img)) {
+      const img = document.createElement("img");
+      img.src = `data:image/jpeg;base64,${lp.img}`;
+      img.alt = "";
+      img.loading = "lazy";
+      a.append(img);
+    }
+    const info = text("", "span", "link-meta");
+    info.append(text(String(lp.site || u.hostname.replace(/^www\./, "")), "small"));
+    if (lp.title) info.append(text(String(lp.title), "strong"));
+    if (lp.desc) info.append(text(String(lp.desc), "span", "link-desc"));
+    a.append(info);
+    return a;
+  }
   const info = text("", "span", "link-meta");
   const path = decodeURIComponent(u.pathname + u.search).replace(/\/$/, "");
   info.append(text(u.hostname.replace(/^www\./, ""), "strong"), text(path || "Abrir enlace", "small"));
@@ -3735,6 +4006,7 @@ function openMsgMenu(conv, m, x, y) {
     menu.append(b);
   };
   const canWrite = !isGroup(conv) || targetsOf(conv).length;
+  if (m.from === "me" && m.status === "failed" && canWrite) item("upload", "Reintentar el envío", () => retryMsg(conv, m));
   if (!m.deleted && canWrite) item("reply", "Responder", () => startReply(m));
   if (!m.deleted && m.content.t === "text") item("copy", "Copiar", () => navigator.clipboard?.writeText(m.content.body));
   if (!m.deleted && m.content.t !== "unsupported" && !m.content.once) item("forward", "Reenviar", () => showForward(conv, m));
@@ -3869,14 +4141,43 @@ async function main() {
   longPress($("send-btn"), () => showSchedule());
   setInterval(runScheduled, 15000);
   for (const b of document.querySelectorAll(".picker-tabs button")) b.onclick = () => { pickerTab = b.dataset.tab; renderPicker(); };
-  $("text").addEventListener("paste", (e) => {
+  // Pegar (Ctrl+V) una captura o archivos en cualquier parte del chat abierto
+  document.addEventListener("paste", (e) => {
     const files = [...(e.clipboardData?.files || [])];
-    if (files.length) { e.preventDefault(); sendFiles(files); }
+    if (!files.length || !active || locked || $("app").hidden) return;
+    const t = e.target;
+    if (t !== $("text") && (t.closest?.("dialog") || /^(INPUT|TEXTAREA)$/.test(t.tagName) || t.isContentEditable)) return;
+    e.preventDefault();
+    confirmFiles(files, active);
   });
+  // Arrastrar archivos: al chat abierto o encima de un chat de la lista
   const chatEl = $("chat");
-  chatEl.addEventListener("dragover", (e) => { if (active && e.dataTransfer.types.includes("Files")) { e.preventDefault(); $("drop-hint").hidden = false; } });
+  const hasFiles = (e) => e.dataTransfer?.types.includes("Files");
+  chatEl.addEventListener("dragover", (e) => { if (active && hasFiles(e)) { e.preventDefault(); $("drop-hint").hidden = false; } });
   chatEl.addEventListener("dragleave", (e) => { if (!chatEl.contains(e.relatedTarget)) $("drop-hint").hidden = true; });
-  chatEl.addEventListener("drop", (e) => { e.preventDefault(); $("drop-hint").hidden = true; sendFiles([...e.dataTransfer.files]); });
+  chatEl.addEventListener("drop", (e) => {
+    e.preventDefault();
+    $("drop-hint").hidden = true;
+    if (active && e.dataTransfer.files.length) confirmFiles([...e.dataTransfer.files], active);
+  });
+  const list = $("contacts");
+  const rowOf = (e) => e.target.closest?.("li[data-conv]");
+  list.addEventListener("dragover", (e) => {
+    const li = rowOf(e);
+    if (!li || !hasFiles(e)) return;
+    e.preventDefault();
+    for (const x of list.querySelectorAll(".drop-target")) if (x !== li) x.classList.remove("drop-target");
+    li.classList.add("drop-target");
+  });
+  list.addEventListener("dragleave", (e) => { const li = rowOf(e); if (li && !li.contains(e.relatedTarget)) li.classList.remove("drop-target"); });
+  list.addEventListener("drop", (e) => {
+    const li = rowOf(e);
+    if (!li || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    li.classList.remove("drop-target");
+    const files = [...e.dataTransfer.files];
+    openChat(li.dataset.conv).then(() => confirmFiles(files, li.dataset.conv));
+  });
   $("back-btn").onclick = closeChat;
   $("search-btn").append(icon("search"));
   $("chat-menu-btn").append(icon("more"));
@@ -3985,4 +4286,260 @@ main();
   vv.addEventListener("resize", fit);
   vv.addEventListener("scroll", pin);
   fit();
+})();
+
+
+// ------------------------------------------------------------ bloqueo de la app
+// Opcional (se activa en Opciones → Privacidad). Es una pantalla de privacidad, como la
+// de otras apps de mensajería: evita que quien coja tu móvil desbloqueado lea tus chats.
+// El PIN se guarda solo como hash Argon2id y la huella usa WebAuthn (Windows Hello,
+// Touch ID, huella de Android…); nada de esto sale del dispositivo.
+
+let passwordJustTyped = false;
+let locked = false;
+let hiddenAt = 0;
+let lockFails = 0;
+let lockWaitUntil = 0;
+const lockKey = () => `sc:lock:${me.toLowerCase()}`;
+const lockConf = () => (me ? store.get(lockKey()) : null);
+const LOCK_AFTER = [[0, "Nada más salir"], [1, "Tras 1 minuto"], [5, "Tras 5 minutos"], [15, "Tras 15 minutos"], [60, "Tras 1 hora"]];
+
+function hashPin(pin, salt) {
+  return sodium.crypto_pwhash(32, pin, salt, sodium.crypto_pwhash_OPSLIMIT_INTERACTIVE,
+    sodium.crypto_pwhash_MEMLIMIT_INTERACTIVE, sodium.crypto_pwhash_ALG_ARGON2ID13);
+}
+
+function checkPin(pin) {
+  const c = lockConf();
+  if (!c) return true;
+  return sodium.memcmp(hashPin(pin, P.b64d(c.salt)), P.b64d(c.hash));
+}
+
+const canBio = () => !!(window.PublicKeyCredential && window.isSecureContext && navigator.credentials);
+
+/** Registra la huella/cara del dispositivo (autenticador de la plataforma). */
+async function registerBio() {
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: sodium.randombytes_buf(32),
+    rp: { name: "SecureChat" },
+    user: { id: sodium.randombytes_buf(16), name: me, displayName: me },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+    authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+    timeout: 60000,
+  } });
+  return P.b64e(new Uint8Array(cred.rawId));
+}
+
+async function verifyBio() {
+  const c = lockConf();
+  if (!c?.bio) return false;
+  try {
+    const a = await navigator.credentials.get({ publicKey: {
+      challenge: sodium.randombytes_buf(32),
+      allowCredentials: [{ type: "public-key", id: P.b64d(c.bio) }],
+      userVerification: "required", timeout: 60000,
+    } });
+    // El autenticador tiene que confirmar que ha verificado a la persona (bit UV)
+    return !!a && (new Uint8Array(a.response.authenticatorData)[32] & 0x04) !== 0;
+  } catch { return false; }
+}
+
+function lockScreen() {
+  let el = $("lock-screen");
+  if (el) return el;
+  el = text("", "div", "lock-screen");
+  el.id = "lock-screen";
+  el.hidden = true;
+  const box = text("", "form", "lock-box");
+  const mark = text("", "div", "brand-mark");
+  const img = document.createElement("img");
+  img.src = "lock.svg";
+  img.alt = "";
+  mark.append(img);
+  const pin = document.createElement("input");
+  pin.id = "lock-pin";
+  pin.type = "password";
+  pin.inputMode = "numeric";
+  pin.autocomplete = "off";
+  pin.maxLength = 8;
+  pin.placeholder = "PIN";
+  pin.setAttribute("aria-label", "PIN");
+  const err = text("", "p", "error");
+  err.id = "lock-error";
+  const ok = text("Desbloquear", "button", "primary");
+  ok.type = "submit";
+  const bio = withIcon("key", "Usar huella o reconocimiento facial", "button", "chip");
+  bio.type = "button";
+  bio.id = "lock-bio";
+  bio.onclick = async () => { if (await verifyBio()) unlock(); else err.textContent = "No se ha podido verificar. Usa tu PIN."; };
+  const forgot = text("¿Has olvidado el PIN? Cerrar sesión", "button", "link");
+  forgot.type = "button";
+  forgot.onclick = async () => {
+    if (!confirm("Para entrar sin PIN tendrás que cerrar sesión y volver a escribir tu contraseña. ¿Continuar?")) return;
+    localStorage.removeItem(lockKey());
+    unlock();
+    await logout();
+  };
+  box.onsubmit = async (e) => {
+    e.preventDefault();
+    if (Date.now() < lockWaitUntil) { err.textContent = `Demasiados intentos. Espera ${Math.ceil((lockWaitUntil - Date.now()) / 1000)} s.`; return; }
+    ok.disabled = true;
+    await new Promise((r) => setTimeout(r, 30));
+    const good = checkPin(pin.value);
+    ok.disabled = false;
+    if (good) { lockFails = 0; unlock(); return; }
+    lockFails++;
+    pin.value = "";
+    if (lockFails >= 5) {
+      lockWaitUntil = Date.now() + 30000 * 2 ** (lockFails - 5);
+      err.textContent = "Demasiados intentos. Espera un poco antes de volver a probar.";
+    } else err.textContent = "PIN incorrecto.";
+  };
+  box.append(mark, text("SecureChat está bloqueado", "h2"), text("Escribe tu PIN para ver tus chats.", "p", "hint"), pin, err, ok, bio, forgot);
+  el.append(box);
+  document.body.append(el);
+  return el;
+}
+
+/** Bloquea si está activado. initial: al abrir la app (no si acaba de escribir la contraseña). */
+function maybeLock(initial = false) {
+  if (initial && passwordJustTyped) { passwordJustTyped = false; return; }
+  passwordJustTyped = false;
+  if (!lockConf() || locked || call || gcall) return;
+  locked = true;
+  if ($("dialog").open) $("dialog").close();
+  $("msg-menu")?.remove();
+  const el = lockScreen();
+  el.hidden = false;
+  $("lock-error").textContent = "";
+  $("lock-pin").value = "";
+  $("lock-bio").hidden = !(lockConf().bio && canBio());
+  document.documentElement.classList.add("is-locked");
+  setTimeout(() => $("lock-pin").focus(), 50);
+  // Con huella configurada, la pedimos directamente al abrir
+  if (lockConf().bio && canBio() && !document.hidden) verifyBio().then((ok) => { if (ok) unlock(); });
+}
+
+function unlock() {
+  locked = false;
+  const el = $("lock-screen");
+  if (el) el.hidden = true;
+  document.documentElement.classList.remove("is-locked");
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!me || !lockConf()) return;
+  if (document.hidden) {
+    hiddenAt = Date.now();
+    if ((lockConf().after || 0) === 0) maybeLock();
+  } else if (hiddenAt && Date.now() - hiddenAt >= (lockConf().after || 0) * 60000) maybeLock();
+});
+
+/** Apartado de Privacidad para activar, cambiar o quitar el bloqueo. */
+function lockSettings() {
+  const box = text("", "div", "lock-settings");
+  const paint = () => {
+    box.replaceChildren();
+    const c = lockConf();
+    const st = text("", "label", "switch");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!c;
+    const t = text("", "span");
+    t.append(text("Bloquear la app con PIN", "strong"),
+      text("Al volver a SecureChat te pedirá un PIN (o tu huella). Si lo olvidas, cierras sesión y entras con tu contraseña.", "small"));
+    st.append(cb, t);
+    box.append(st);
+    cb.onchange = () => {
+      if (cb.checked) { cb.checked = false; askNewPin(box, paint); }
+      else { localStorage.removeItem(lockKey()); seclog("Has desactivado el bloqueo de la app."); paint(); }
+    };
+    if (!c) return;
+    const sel = document.createElement("select");
+    sel.className = "lock-after";
+    for (const [v, label] of LOCK_AFTER) { const o = new Option(label, v); o.selected = (c.after || 0) === v; sel.append(o); }
+    sel.onchange = () => store.set(lockKey(), { ...lockConf(), after: Number(sel.value) });
+    const row = text("", "label", "field");
+    row.append(text("Cuándo se bloquea", "span"), sel);
+    box.append(row);
+    const btns = text("", "div", "lock-btns");
+    const change = withIcon("key", "Cambiar el PIN", "button", "chip");
+    change.type = "button";
+    change.onclick = () => askNewPin(box, paint);
+    btns.append(change);
+    const msg = text("", "p", "hint");
+    if (canBio()) {
+      const bio = withIcon("shield", c.bio ? "Quitar la huella" : "Usar también la huella o la cara", "button", "chip");
+      bio.type = "button";
+      bio.onclick = async () => {
+        if (lockConf().bio) { store.set(lockKey(), { ...lockConf(), bio: null }); paint(); return; }
+        try {
+          const id = await registerBio();
+          store.set(lockKey(), { ...lockConf(), bio: id });
+          seclog("Has activado el desbloqueo con huella.");
+          paint();
+        } catch { msg.textContent = "Este dispositivo no tiene huella, cara ni Windows Hello configurados, o lo has cancelado."; }
+      };
+      btns.append(bio);
+    }
+    box.append(btns, msg);
+  };
+  paint();
+  return box;
+}
+
+/** Pide un PIN nuevo dos veces (dentro del mismo apartado de Privacidad). */
+function askNewPin(box, done) {
+  box.querySelector(".pin-new")?.remove();
+  const wrap = text("", "div", "pin-new");
+  const mk = (ph) => {
+    const i = document.createElement("input");
+    i.type = "password"; i.inputMode = "numeric"; i.maxLength = 8; i.placeholder = ph; i.autocomplete = "new-password";
+    return i;
+  };
+  const a = mk("PIN nuevo (4 a 8 números)"), b = mk("Repite el PIN");
+  const err = text("", "p", "error");
+  const ok = text("Guardar PIN", "button", "primary");
+  ok.type = "button";
+  const cancel = text("Cancelar", "button", "ghost");
+  cancel.type = "button";
+  cancel.onclick = () => { wrap.remove(); };
+  ok.onclick = async () => {
+    if (!/^\d{4,8}$/.test(a.value)) { err.textContent = "El PIN tiene que tener de 4 a 8 números."; return; }
+    if (a.value !== b.value) { err.textContent = "Los PIN no coinciden."; return; }
+    ok.disabled = true;
+    await new Promise((r) => setTimeout(r, 30));
+    const salt = sodium.randombytes_buf(16);
+    const prev = lockConf() || { after: 0, bio: null };
+    store.set(lockKey(), { ...prev, salt: P.b64e(salt), hash: P.b64e(hashPin(a.value, salt)) });
+    seclog(prev.hash ? "Has cambiado el PIN de bloqueo." : "Has activado el bloqueo de la app con PIN.");
+    done();
+  };
+  const btns = text("", "div", "pin-new-actions");
+  btns.append(cancel, ok);
+  wrap.append(a, b, err, btns);
+  box.append(wrap);
+  a.focus();
+}
+
+// Al volver a la app, los avisos genéricos («tienes un mensaje nuevo») ya sobran
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden || !me) return;
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    for (const n of (await reg?.getNotifications({ tag: "securechat-new" })) || []) n.close();
+    if (active) clearChatNotification(active);
+  } catch { /* sin service worker */ }
+});
+
+// Si estabas al final del chat y una imagen (foto, vista previa de un enlace…) termina de
+// cargar después, el chat sigue pegado abajo en vez de quedarse con el último mensaje tapado.
+(() => {
+  const l = $("messages");
+  let atBottom = true;
+  l.addEventListener("scroll", () => { atBottom = l.scrollHeight - l.scrollTop - l.clientHeight < 60; }, { passive: true });
+  l.addEventListener("load", (e) => {
+    if (atBottom && (e.target.tagName === "IMG" || e.target.tagName === "VIDEO")) l.scrollTop = l.scrollHeight;
+  }, true);
+  l.addEventListener("loadedmetadata", () => { if (atBottom) l.scrollTop = l.scrollHeight; }, true);
 })();

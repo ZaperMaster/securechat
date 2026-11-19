@@ -15,6 +15,40 @@ arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede ent
 > ⚠️ **Proyecto educativo. No está auditado.** No lo uses para información sensible
 > real. Si necesitas mensajería segura de verdad, usa [Signal](https://signal.org).
 
+## Capturas
+
+![Chat en el ordenador, con la vista previa de un enlace](docs/img/chat-ordenador.jpg)
+
+| Pantalla de acceso | En el móvil | Opciones |
+|---|---|---|
+| <img src="docs/img/acceso.jpg" alt="Pantalla de acceso con ilustración" width="420"> | <img src="docs/img/chat-movil.jpg" alt="Chat en el móvil" width="200"> | <img src="docs/img/opciones-movil.jpg" alt="Opciones en el móvil" width="200"> |
+
+## Cómo viaja un mensaje
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Móvil de Lucía
+    participant S as Servidor (relay)
+    participant B as Móvil de Marco
+    Note over A,B: Cada uno tiene su identidad Ed25519, que nunca sale del dispositivo sin cifrar
+    A->>S: hello + firma del reto (demuestra que es @lucia)
+    B->>S: publica sus prekeys firmadas (SPK + OPK de un solo uso)
+    A->>S: ¿prekeys de @marco?
+    S-->>A: SPK firmada + una OPK (y la borra)
+    Note over A: X3DH → clave compartida<br/>Double Ratchet → clave nueva por mensaje<br/>Relleno a un tamaño fijo y XChaCha20-Poly1305
+    A->>S: sobre cifrado (para cada dispositivo de Marco)
+    Note over S: Solo ve bytes, el remitente y el destinatario.<br/>Si Marco no está, lo guarda en su cola.
+    S->>B: sobre cifrado
+    Note over B: Descifra, comprueba la clave fijada (TOFU)<br/>y valida el contenido antes de enseñarlo
+    B-->>A: ✓✓ entregado / leído (también cifrado)
+```
+
+Lo que el servidor **no** ve: el texto, las fotos, el tipo de mensaje (va dentro del
+cifrado), los grupos (cada copia va por separado), los perfiles ni las llamadas (los
+datos de audio y vídeo van cifrados de punto a punto con DTLS-SRTP; el relé TURN solo
+pasa paquetes).
+
 ## Qué hace
 
 - **Identidad Ed25519** por usuario, guardada en disco cifrada con una contraseña
@@ -45,7 +79,25 @@ arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede ent
   mensaje), **notas de voz**, **"escribiendo…"** y **"última vez"** (ocultables).
 - **Notificaciones con la app cerrada** (Web Push): el aviso no lleva el contenido
   ni el remitente, solo "tienes un mensaje nuevo".
-- **Copia de seguridad cifrada** del historial (menú ☰), que solo tu cuenta puede abrir.
+- **Copia de seguridad cifrada** del historial, ajustes de los chats y mensajes
+  programados (*Opciones → Copia de seguridad*), que solo tu cuenta puede abrir. Puedes
+  hacerla con o sin fotos; la app te recuerda hacerla si pasa más de un mes.
+- **Reintentar envíos**: si un mensaje no se puede enviar, se marca en rojo con
+  *No se pudo enviar · Reintentar* (también desde el menú del mensaje).
+- **Bloqueo de la app** opcional con PIN y, si el dispositivo lo permite, huella, cara
+  o Windows Hello (WebAuthn). Se activa en *Opciones → Privacidad*; el PIN se guarda
+  solo como hash Argon2id y tras 5 fallos hay que esperar.
+- **Notificaciones agrupadas por chat** («3 mensajes nuevos») con botones para
+  *Responder* desde la propia notificación y *Marcar como leído*.
+- **Vista previa de enlaces** (título, descripción e imagen). La genera el servidor al
+  ENVIAR y viaja cifrada dentro del mensaje, así quien lo recibe no visita la web. El
+  servidor se protege contra SSRF: solo IP públicas, puertos 80/443, sin re-resolver el
+  nombre (DNS rebinding), redirecciones comprobadas y tamaño limitado. Se puede quitar.
+- **Pegar con Ctrl+V y arrastrar archivos** al chat abierto o encima de un chat de la
+  lista, con una vista previa antes de enviar.
+- **Borrar la cuenta** (*Opciones → Borrar mi cuenta*): pide tu contraseña y escribir
+  BORRAR, firma la petición con tu clave y el servidor borra claves, copia cifrada, correo
+  y mensajes en espera. El @usuario queda libre.
 - **Checks como WhatsApp**: 🕓 enviando, ✓ enviado, ✓✓ entregado y ✓✓ azul leído.
   Las confirmaciones viajan cifradas y las de lectura se pueden desactivar.
 - **Bandeja de salida**: si te quedas sin conexión (por ejemplo, el móvil corta la
@@ -105,7 +157,7 @@ tu nombre visible y tu foto.
 - La clave privada se genera en el navegador y se guarda en `localStorage`, cifrada
   con tu contraseña (Argon2id). En *Mi perfil → Seguridad avanzada* puedes exportarla
   como `identity.json`, compatible con la versión de terminal.
-- Los mensajes solo existen mientras la pestaña está abierta: no se guarda historial.
+- El historial se guarda cifrado en el dispositivo (IndexedDB).
 - En Chrome/Edge aparece **Instalar app** (o el icono de instalar en la barra de
   direcciones) y se abre en su propia ventana, como una app.
 
@@ -157,7 +209,8 @@ Dentro del chat de Alice:
 Tests (los de interoperabilidad web ↔ Python necesitan Node.js; si no está, se saltan):
 
 ```bash
-pytest -q
+pytest -q                          # todo, incluidas las pruebas de la web
+node --test tests/web/*.test.mjs   # solo las del cliente web
 ```
 
 ## Arquitectura
@@ -185,6 +238,10 @@ web/
 tests/
   test_ratchet.py      el protocolo, incluido un fuzz de 200 mensajes desordenados
   test_web_interop.py  ejecuta el JS en Node y conversa con Python mensaje a mensaje
+  test_preview.py      vista previa de enlaces y protección contra SSRF
+  test_web_client.py   lanza las pruebas del cliente web (tests/web/*.test.mjs) con Node
+  web/                 pruebas del JS de la web: relleno, validación del contenido,
+                       identidad, firmas y números de seguridad
 ```
 
 `ratchet.py` no hace E/S: toda la criptografía de la conversación se prueba sin red.
@@ -268,8 +325,14 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
   *Seguridad avanzada* para no estorbar en el día a día (igual que en Signal o WhatsApp).
 - **Existencia de usuarios**: cualquiera puede preguntar si un @usuario existe y
   si está conectado. Se limita a 30 búsquedas por minuto para frenar la enumeración.
-- **Tamaño de los mensajes**: el tipo de contenido va cifrado, pero un mensaje de
-  3 MB delata que es una foto o un vídeo. Rellenar (*padding*) los mensajes lo ocultaría.
+- **Tamaño de los mensajes**: los mensajes se rellenan a tamaños fijos (256 B, 1 KB,
+  4 KB, 16 KB, 64 KB y luego múltiplos de 64 KB), pero un envío de 3 MB sigue delatando
+  que es una foto o un vídeo.
+- **Vista previa de enlaces**: el servidor ve la dirección que compartes (no a quién).
+  Si no quieres, desactívala en *Opciones → Privacidad*.
+- **Bloqueo con PIN**: es una pantalla de privacidad frente a quien coja tu móvil
+  desbloqueado, no cifrado extra: un PIN de 4 cifras se puede adivinar con acceso a los
+  ficheros del navegador.
 - **Búsqueda de GIF**: no hay buscador tipo Giphy/Tenor porque enviaría lo que
   buscas a un tercero. Los GIF se envían desde tu dispositivo.
 - **Disponibilidad**: el servidor puede descartar mensajes o desconectar usuarios.
@@ -319,7 +382,9 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - [x] Fase 5 – Mensajes en diferido, checks, bandeja de salida, historial cifrado, correo
 - [x] Fase 6 – X3DH + Double Ratchet con one-time prekeys, varios dispositivos, grupos,
   respuestas/reacciones/ediciones, notas de voz, notificaciones push y copia de seguridad
-- [ ] Siguiente – *Sender keys* para grupos grandes, *padding* de mensajes y llamadas
+- [x] Fase 7 – *Padding* de mensajes, llamadas WebRTC con relé TURN propio, bloqueo de la
+  app, vista previa de enlaces segura y borrado de cuenta
+- [ ] Siguiente – *Sender keys* para grupos grandes
 
 ## Referencias
 

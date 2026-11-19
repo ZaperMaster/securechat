@@ -57,7 +57,14 @@ export function decodeContent(plaintext) {
   }
   const out = (o) => Object.fromEntries(Object.entries({ ...o, ...common }).filter(([, v]) => v != null));
   switch (c.t) {
-    case "text": return out({ t: "text", body: str(c.body, 20000) });
+    case "text": {
+      // Vista previa del enlace generada por quien lo envía: solo texto y una miniatura JPEG pequeña
+      const lp = c.lp && typeof c.lp === "object" && typeof c.lp.url === "string" && /^https?:\/\//.test(c.lp.url)
+        ? Object.fromEntries(Object.entries({ url: str(c.lp.url, 2000), title: str(c.lp.title, 200), desc: str(c.lp.desc, 300),
+          site: str(c.lp.site, 80), img: typeof c.lp.img === "string" && c.lp.img.length < 120000 && /^[A-Za-z0-9+/=]+$/.test(c.lp.img) ? c.lp.img : null })
+          .filter(([, v]) => v)) : null;
+      return out({ t: "text", body: str(c.body, 20000), lp });
+    }
     case "sticker": return out({ t: "sticker", id: str(c.id, 16) });
     case "image": case "video": case "audio": {
       const allowed = { image: IMAGE_MIME, video: VIDEO_MIME, audio: AUDIO_MIME }[c.t];
@@ -202,7 +209,7 @@ export class ChatClient {
         for (const p of this.requests.values()) p.reject(new ClientError("conexión cerrada"));
         this.requests.clear();
         // 4000 = la cuenta se ha abierto otra vez en ESTE dispositivo (otra pestaña)
-        if (stage === "ready" && this.ws === ws) this.emit("disconnected", "", ev.code === 4000 ? "replaced" : ev.code === 4001 ? "removed" : "");
+        if (stage === "ready" && this.ws === ws) this.emit("disconnected", "", ev.code === 4000 ? "replaced" : ev.code === 4001 ? "removed" : ev.code === 4002 ? "deleted" : "");
       };
       ws.onmessage = async (ev) => {
         let msg;

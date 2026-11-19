@@ -48,6 +48,7 @@ const DEFAULT_PREFS = {
   lastSeen: true,      // compartir "última vez"
   notifications: true,
   enterSends: true,
+  linkPreviews: true,  // vista previa de los enlaces que envías
 };
 
 function readPrefs() {

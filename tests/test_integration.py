@@ -1,6 +1,7 @@
 """Servidor relay real + dos clientes, todo en el mismo proceso."""
 
 import asyncio
+import base64
 import json
 
 import pytest
@@ -246,4 +247,35 @@ def test_media_and_profile_content():
         assert (await next_event(bob, "profile")).text == "Alicia 🌸"
         assert content.decode("no es json") == {"t": "text", "body": "no es json"}
         await alice.close(); await bob.close(); srv.close()
+    run(main())
+
+
+def test_delete_account_frees_the_name():
+    async def main():
+        srv, url, relay = await start_server()
+        key = SigningKey.generate()
+        alice = await new_client(url, "alice", key)
+        bob = await new_client(url, "bob")
+        await bob.send_text("alice", "hola")
+        await next_event(alice, "message")
+
+        # Una firma que no es de la cuenta no borra nada
+        bad = SigningKey.generate().sign(b"securechat-delete-account|alice").signature
+        await alice.ws.send(json.dumps({"type": "delete-account", "id": "x", "sig": base64.b64encode(bad).decode()}))
+        await asyncio.sleep(0.2)
+        assert "alice" in relay.registry
+
+        alice = await new_client(url, "alice", key)
+        sig = key.sign(b"securechat-delete-account|alice").signature
+        ack = await alice._request(type="delete-account", sig=base64.b64encode(sig).decode())
+        assert ack["status"] == "ok"
+        await asyncio.sleep(0.2)
+        assert "alice" not in relay.registry
+        assert not any(k.startswith("alice|") for k in relay.queues)
+        assert "alice" not in relay.related.get("bob", set())
+
+        # El nombre queda libre para otra persona (otra clave)
+        other = await new_client(url, "alice")
+        assert "alice" in relay.registry
+        await other.close(); await bob.close(); srv.close()
     run(main())

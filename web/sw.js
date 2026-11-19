@@ -1,6 +1,6 @@
 // Service worker: permite instalar SecureChat como app y abrirla sin red
 // (la interfaz carga; para enviar mensajes hace falta el servidor).
-const CACHE = "securechat-v26";
+const CACHE = "securechat-v27";
 const SHELL = [
   "./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg", "lock.svg", "icon-192.png", "icon-512.png",
   "js/theme.js", "js/app.js", "js/emoji.js", "js/vault.js", "js/ratchet.js", "js/icons.js", "js/client.js", "js/protocol.js",
@@ -40,14 +40,31 @@ self.addEventListener("push", (e) => {
   e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
     // Si la app está abierta y a la vista, ya lo ve ella: no molestamos
     if (wins.some((w) => w.visibilityState === "visible")) return;
-    return self.registration.showNotification(data.title, {
-      body: data.body, icon: "icon-192.png", badge: "icon-192.png", tag: "securechat-new", renotify: true,
+    return self.registration.getNotifications({ tag: "securechat-new" }).then((prev) => {
+      const count = (prev[0]?.data?.count || 0) + 1;
+      return self.registration.showNotification(data.title, {
+        body: count > 1 ? `Tienes ${count} mensajes nuevos 🔒` : data.body,
+        icon: "icon-192.png", badge: "icon-192.png", tag: "securechat-new", renotify: true, data: { count },
+      });
     });
   }));
 });
 
-// Al pulsar una notificación, enfocamos la ventana abierta.
+// Al pulsar una notificación:
+//  * «Responder» con texto escrito en la notificación: lo envía la app abierta (sin traerla al frente).
+//  * «Responder» sin texto (navegadores sin respuesta en línea) o pulsar el aviso: abre ese chat.
+//  * «Marcar como leído»: avisa a la app y cierra la notificación.
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  e.waitUntil(self.clients.matchAll({ type: "window" }).then((cs) => cs[0]?.focus() || self.clients.openWindow("./")));
+  const data = e.notification.data || {};
+  const msg = e.action === "read" ? { type: "notif-read" }
+    : e.action === "reply" && e.reply ? { type: "notif-reply", text: e.reply }
+    : e.action === "reply" ? { type: "notif-reply" } : { type: "notif-open" };
+  e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (cs) => {
+    const win = cs[0];
+    if (win && data.conv) win.postMessage({ ...msg, conv: data.conv, account: data.account });
+    if (msg.type === "notif-read" || (msg.type === "notif-reply" && msg.text)) return;
+    if (win) return win.focus();
+    return self.clients.openWindow("./");
+  }));
 });
