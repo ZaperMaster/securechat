@@ -392,21 +392,6 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **Notificaciones**: el servicio de avisos del navegador (Google, Mozilla o Apple) sabe
   cuándo te llega algo, aunque no el qué ni de quién.
 
-## Hoja de ruta
-
-- [x] Fase 1 – Chat 1 a 1 por CLI con relay ciego y claves protegidas con contraseña
-- [x] Fase 2 – Huellas, números de seguridad y contactos verificados
-- [x] Fase 3 – Claves efímeras por sesión (secreto hacia adelante)
-- [x] Fase 4 – Interfaz web instalable (PWA), temas, perfiles y multimedia cifrada
-- [x] Fase 5 – Mensajes en diferido, checks, bandeja de salida, historial cifrado, correo
-- [x] Fase 6 – X3DH + Double Ratchet con one-time prekeys, varios dispositivos, grupos,
-  respuestas/reacciones/ediciones, notas de voz, notificaciones push y copia de seguridad
-- [x] Fase 7 – *Padding* de mensajes, llamadas WebRTC con relé TURN propio, bloqueo de la
-  app, vista previa de enlaces segura y borrado de cuenta
-- [x] Fase 8 – *Sender keys* en grupos, normas y foto de grupo, stickers propios,
-  reacciones con doble toque, límites para editar y borrar, y pruebas en GitHub Actions
-- [ ] Siguiente – Verificar contactos con un código QR
-
 ## Referencias
 
 - [The X3DH Key Agreement Protocol](https://signal.org/docs/specifications/x3dh/) – Signal
