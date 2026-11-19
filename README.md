@@ -1,5 +1,7 @@
 # SecureChat
 
+[![Pruebas](https://github.com/ZaperMaster/securechat/actions/workflows/tests.yml/badge.svg)](https://github.com/ZaperMaster/securechat/actions/workflows/tests.yml)
+
 Mensajería 1 a 1 con cifrado extremo a extremo (E2E) sobre
 [libsodium](https://doc.libsodium.org/). Tiene dos clientes que se entienden entre sí:
 
@@ -17,11 +19,13 @@ arrancar. Quien monta el servidor se lo da a sus amigos; sin él no se puede ent
 
 ## Capturas
 
-![Chat en el ordenador, con la vista previa de un enlace](docs/img/chat-ordenador.jpg)
+![Grupo con foto, una imagen cifrada y reacciones, en el ordenador](docs/img/chat-ordenador.jpg)
 
-| Pantalla de acceso | En el móvil | Opciones |
-|---|---|---|
-| <img src="docs/img/acceso.jpg" alt="Pantalla de acceso con ilustración" width="420"> | <img src="docs/img/chat-movil.jpg" alt="Chat en el móvil" width="200"> | <img src="docs/img/opciones-movil.jpg" alt="Opciones en el móvil" width="200"> |
+| Demo | Chats | Chat con enlace | Grupo | Info del grupo |
+|---|---|---|---|---|
+| <img src="docs/img/demo.gif" alt="Escribir, recibir respuesta y reaccionar con doble toque" width="170"> | <img src="docs/img/lista-movil.jpg" alt="Lista de chats con fotos de perfil" width="170"> | <img src="docs/img/chat-movil.jpg" alt="Chat con vista previa de un enlace" width="170"> | <img src="docs/img/grupo-movil.jpg" alt="Grupo con foto y reacciones" width="170"> | <img src="docs/img/info-grupo-movil.jpg" alt="Foto, normas y miembros del grupo" width="170"> |
+
+<img src="docs/img/acceso.jpg" alt="Pantalla de acceso con ilustración" width="100%">
 
 ## Cómo viaja un mensaje
 
@@ -73,10 +77,22 @@ pasa paquetes).
   quiera descartar del todo que el propio servidor suplante a un contacto.
 - **Mensajes en diferido**: puedes escribir a alguien desconectado; el servidor
   guarda el mensaje cifrado y se lo entrega a cada dispositivo al conectarse.
-- **Grupos**: el servidor no sabe que existen. Cada mensaje del grupo se cifra por
-  separado para cada miembro (como hacía Signal al principio).
+- **Grupos con *sender keys*** (como Signal): cada dispositivo tiene una cadena de
+  claves por grupo que reparte a los miembros por el canal 1 a 1. Cada mensaje se cifra
+  **una sola vez** (y se firma con Ed25519) y el servidor entrega la misma copia a todos:
+  una foto de 5 MB a 20 personas sube 5 MB, no 100. La cadena avanza en cada mensaje
+  (secreto hacia adelante) y se rota si alguien sale, cada 500 mensajes o cada semana.
+  El servidor sigue sin saber que el grupo existe ni cómo se llama.
+- **Normas y foto del grupo**: solo administradores escriben, quién cambia nombre y foto,
+  quién añade gente. Cada dispositivo comprueba los cambios: si alguien sin permiso lo
+  intenta, se ignora.
 - **Responder, reaccionar, editar y borrar** (mantener pulsado o clic derecho en un
   mensaje), **notas de voz**, **"escribiendo…"** y **"última vez"** (ocultables).
+  Se reacciona con **doble toque** y cualquier emoji. Editar se puede durante 15 minutos
+  y borrar para todos durante 1 hora (cada dispositivo rechaza los cambios fuera de plazo).
+- **Stickers propios** hechos con tus fotos (cuadrado, redondo o entera, con texto).
+- **"Ver una vez"** en fotos, vídeos y notas de voz, eligiéndolo antes de enviar.
+- **Mensajes temporales por defecto** para los chats nuevos, si lo activas.
 - **Notificaciones con la app cerrada** (Web Push): el aviso no lleva el contenido
   ni el remitente, solo "tienes un mensaje nuevo".
 - **Copia de seguridad cifrada** del historial, ajustes de los chats y mensajes
@@ -229,6 +245,7 @@ securechat/
 web/
   js/protocol.js   identidad, KDF y huellas (mismos bytes que crypto.py)
   js/ratchet.js    port de ratchet.py (mismos bytes)
+  js/senderkeys.js sender keys de los grupos (cadena por dispositivo, firma Ed25519)
   js/client.js     port de client.py
   js/app.js        interfaz (solo usa textContent: nunca interpreta HTML recibido)
   js/vault.js      sesión recordada (WebCrypto) e historial cifrado (IndexedDB)
@@ -365,8 +382,10 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **Sin one-time prekeys disponibles**: si a alguien se le acaban (por ejemplo, porque
   un atacante las pide todas), el primer mensaje usa solo la SPK y su secreto hacia
   adelante depende de que la SPK se renueve (7 días), como en Signal.
-- **Grupos**: el tamaño del envío crece con el número de miembros y el servidor ve a
-  quién va cada copia. Signal usa *sender keys* para grupos grandes.
+- **Grupos**: el servidor ve a qué dispositivos entrega cada mensaje (aunque no sepa
+  que forman un grupo). Con *sender keys*, alguien que entra al grupo no puede leer lo
+  anterior y alguien que sale no lee lo siguiente (se rota la cadena), pero entre dos
+  rotaciones el secreto hacia adelante es por cadena, no por mensaje como en 1 a 1.
 - **Varios dispositivos**: comparten la identidad de la cuenta; un dispositivo robado
   y con la sesión abierta puede leer los mensajes nuevos hasta que lo desvincules desde
   otro (*Mi perfil → Seguridad avanzada → Tus dispositivos*).
@@ -384,7 +403,9 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
   respuestas/reacciones/ediciones, notas de voz, notificaciones push y copia de seguridad
 - [x] Fase 7 – *Padding* de mensajes, llamadas WebRTC con relé TURN propio, bloqueo de la
   app, vista previa de enlaces segura y borrado de cuenta
-- [ ] Siguiente – *Sender keys* para grupos grandes
+- [x] Fase 8 – *Sender keys* en grupos, normas y foto de grupo, stickers propios,
+  reacciones con doble toque, límites para editar y borrar, y pruebas en GitHub Actions
+- [ ] Siguiente – Verificar contactos con un código QR
 
 ## Referencias
 

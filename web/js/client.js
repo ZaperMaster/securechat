@@ -3,6 +3,9 @@
 
 import { b64d, b64e, CryptoError, equal, IdentityMismatch, signAuth } from "./protocol.js";
 import { decryptFrom, DeviceKeys, encryptFor, initiate } from "./ratchet.js";
+import { distribution, needsRotation, newSenderKey, skDecrypt, skEncrypt, validDistribution } from "./senderkeys.js";
+
+const same = (a, b) => a.toLowerCase() === b.toLowerCase();
 
 export class ClientError extends Error {
   constructor(message, code = null) { super(message); this.code = code; }
@@ -71,7 +74,9 @@ export function decodeContent(plaintext) {
       const mime = str(c.mime, 60).split(";")[0];
       if (!allowed.includes(mime) || typeof c.data !== "string") return out({ t: "unsupported" });
       const dur = Number.isFinite(c.dur) ? Math.max(0, Math.min(3600, c.dur)) : undefined;
-      return out({ t: c.t, mime, name: str(c.name, 120), data: c.data, dur });
+      // stk: sticker propio (una imagen pequeña que se enseña sin burbuja)
+      const stk = c.t === "image" && c.stk === true ? true : undefined;
+      return out({ t: c.t, mime, name: str(c.name, 120), data: c.data, dur, stk });
     }
     case "file": {
       if (typeof c.data !== "string") return out({ t: "unsupported" });
@@ -122,6 +127,8 @@ export function decodeContent(plaintext) {
         admins: inGroup(c.admins), muted: inGroup(c.muted), v: Number.isFinite(c.v) ? c.v : 0, avatar, rules };
     }
     case "group-leave": return id(c.g) ? { t: "group-leave", g: c.g } : { t: "ignore" };
+    // Clave de grupo (sender key) de quien escribe: va por el canal 1 a 1
+    case "skey": return id(c.g) && validDistribution(c) ? { t: "skey", g: c.g, kid: c.kid, ck: c.ck, n: c.n, spk: c.spk } : { t: "ignore" };
     default: return out({ t: "unsupported" });
   }
 }
@@ -167,7 +174,7 @@ export class Contacts {
 }
 
 const DEVICE_CACHE_MS = 60_000;
-const SILENT_TYPES = new Set(["receipt", "profile", "typing", "group-leave", "vote", "join"]);
+const SILENT_TYPES = new Set(["receipt", "profile", "typing", "group-leave", "vote", "join", "skey"]);
 
 /**
  * Protocolo v2 (ver securechat/ratchet.py): cada mensaje se cifra con Double Ratchet
@@ -189,6 +196,7 @@ export class ChatClient {
     this.queue = Promise.resolve();  // los envíos van en orden (el ratchet lo necesita)
     this.ws = null;
     this.profile = null;
+    this.pendingSk = [];             // mensajes de grupo que llegaron antes que su clave
   }
 
   get device() { return this.keys.device; }
@@ -425,12 +433,13 @@ export class ChatClient {
   onDeliver(sender, payload, queuedAt) {
     const mine = sender.toLowerCase() === this.name.toLowerCase();
     try {
+      if (payload?.kind === "sk") return this.onGroupPayload(sender, payload, queuedAt);
       if (payload?.kind !== "dr") throw new CryptoError("formato antiguo: pídele que recargue la app");
       const pinned = mine ? this.identity.publicKey : this.contacts.pinned(sender);
       const { text, ik } = decryptFrom(this.name, this.keys, sender, payload, pinned);
       if (ik && !mine) this.contacts.pin(sender, ik);
       if (mine && !this.myDevices.includes(payload.dev)) this.myDevices.push(payload.dev);
-      this.onContent(sender, text, queuedAt, mine);
+      this.onContent(sender, text, queuedAt, mine, payload.dev);
     } catch (e) {
       if (!(e instanceof CryptoError)) throw e;
       if (e instanceof IdentityMismatch) this.emit("identity_changed", sender, e.message);
@@ -438,7 +447,110 @@ export class ChatClient {
     }
   }
 
-  onContent(sender, text, queuedAt, mine) {
+  /** Mensaje de grupo cifrado una sola vez con la sender key de su autor. */
+  onGroupPayload(sender, payload, queuedAt, retry = false) {
+    if (typeof payload.g !== "string" || typeof payload.dev !== "string" || typeof payload.kid !== "string") {
+      throw new CryptoError("mensaje de grupo inválido");
+    }
+    const slot = this.keys.skPeers[`${sender.toLowerCase()}|${payload.dev}|${payload.g}`];
+    const state = slot?.cur?.kid === payload.kid ? slot.cur : slot?.prev?.kid === payload.kid ? slot.prev : null;
+    if (!state) {
+      // Puede que su clave venga justo detrás: lo guardamos un momento
+      if (!retry) this.pendingSk = [...this.pendingSk.filter((x) => Date.now() - x.at < 120000), { sender, payload, queuedAt, at: Date.now() }].slice(-200);
+      return;
+    }
+    const text = skDecrypt(state, sender, payload);
+    this.keys.save();
+    const c = decodeContent(text);
+    if (c.g !== payload.g) throw new CryptoError("el mensaje no es de ese grupo");
+    this.onContent(sender, text, queuedAt, false);
+  }
+
+  /** Guardo la sender key que me manda un miembro y leo lo que esperaba por ella. */
+  onSenderKey(sender, dev, c) {
+    if (!dev) return;
+    const k = `${sender.toLowerCase()}|${dev}|${c.g}`;
+    const slot = this.keys.skPeers[k] || {};
+    if (slot.cur?.kid === c.kid) return; // ya la tenía
+    this.keys.skPeers[k] = { cur: { kid: c.kid, ck: c.ck, n: c.n, spk: c.spk, skipped: {} }, prev: slot.cur || null };
+    this.keys.save();
+    const waiting = this.pendingSk.filter((x) => same(x.sender, sender) && x.payload.dev === dev && x.payload.kid === c.kid);
+    this.pendingSk = this.pendingSk.filter((x) => !waiting.includes(x));
+    for (const w of waiting.sort((a, b) => a.payload.n - b.payload.n)) {
+      try { this.onGroupPayload(w.sender, w.payload, w.queuedAt, true); }
+      catch (e) { if (!(e instanceof CryptoError)) throw e; }
+    }
+  }
+
+  /**
+   * Envía un mensaje a un grupo con sender keys: se cifra UNA vez y el servidor
+   * reparte la misma copia a todos los dispositivos. Devuelve {failed: [{user, error}]}.
+   */
+  sendGroup(g, members, content) {
+    const job = this.queue.then(() => this._sendGroup(g, members, content));
+    this.queue = job.catch(() => {});
+    return job;
+  }
+
+  async _sendGroup(g, members, content) {
+    const failed = [];
+    let key = this.keys.skMine[g];
+    if (needsRotation(key, members)) {
+      key = this.keys.skMine[g] = newSenderKey(members);
+      this.keys.save();
+    }
+    // 1) Quien aún no tiene mi clave la recibe por el canal 1 a 1
+    const targets = [];
+    for (const user of members) {
+      let info;
+      try { info = await this.peerDevices(user); }
+      catch (e) { if (e instanceof ClientError && /no conectado|conexión cerrada|no responde/.test(e.message)) throw e; failed.push({ user, error: e }); continue; }
+      const missing = info.list.filter((d) => !key.sentTo.includes(`${info.user.toLowerCase()}|${d}`));
+      if (missing.length) {
+        try {
+          await this.sendToUser(info.user, JSON.stringify(distribution(g, key)), { silent: true, ephemeral: false });
+          info = await this.peerDevices(info.user, true);
+          for (const d of info.list) key.sentTo.push(`${info.user.toLowerCase()}|${d}`);
+          this.keys.save();
+        } catch (e) {
+          if (e instanceof ClientError && /no conectado|conexión cerrada|no responde/.test(e.message)) throw e;
+          failed.push({ user, error: e });
+          continue;
+        }
+      }
+      for (const d of info.list) targets.push({ to: info.user, device: d });
+    }
+    if (!targets.length) return { failed, status: "queued" };
+    // 2) El mensaje se cifra una vez y va a todos
+    const before = { ck: key.ck, n: key.n }; // para dar la clave a dispositivos nuevos desde este mensaje
+    const payload = skEncrypt(key, g, this.name, this.device, padJson(JSON.stringify(content)));
+    this.keys.save();
+    const silent = SILENT_TYPES.has(content.t);
+    const ack = await this.request({ type: "send-many", targets, payload, ...(silent ? { silent: true } : {}) }, 30000);
+    // 3) ¿Algún miembro tiene un dispositivo nuevo? Le damos la clave y se lo mandamos a él
+    for (const [user, devs] of Object.entries(ack.devices || {})) {
+      const fresh = devs.filter((d) => !key.sentTo.includes(`${user.toLowerCase()}|${d}`));
+      if (!fresh.length) continue;
+      try {
+        await this.sendToUser(user, JSON.stringify(distribution(g, { ...key, ...before })), { silent: true, ephemeral: false });
+        for (const d of fresh) key.sentTo.push(`${user.toLowerCase()}|${d}`);
+        this.keys.save();
+        await this.request({ type: "send-many", targets: fresh.map((device) => ({ to: user, device })), payload });
+      } catch { /* lo recibirá con el siguiente mensaje */ }
+    }
+    // Copia para mis otros dispositivos (por el canal 1 a 1, como siempre)
+    if (this.myDevices.length && !silent) {
+      await this.sendToUser(this.name, JSON.stringify({ t: "sync", to: members[0], c: content }), { silent: true, ephemeral: false }).catch(() => {});
+    }
+    return { failed, status: (ack.results || []).some((r) => r.status === "delivered") ? "delivered" : "queued" };
+  }
+
+  /** Olvida mi cadena del grupo: el siguiente mensaje usará una nueva (alguien salió). */
+  rotateGroupKey(g) {
+    if (this.keys.skMine[g]) { delete this.keys.skMine[g]; this.keys.save(); }
+  }
+
+  onContent(sender, text, queuedAt, mine, dev = null) {
     let c;
     if (mine) {
       // Copia de algo que envié desde otro dispositivo
@@ -451,6 +563,7 @@ export class ChatClient {
     }
     c = decodeContent(text);
     if (c.t === "ignore") return;
+    if (c.t === "skey") return this.onSenderKey(sender, dev, c);
     if (c.mid && !this.keys.firstTime(`${sender}|${c.mid}`) && c.t !== "receipt") return; // repetido
     if (c.t === "receipt") return this.emit("receipt", sender, c.s, c);
     if (c.t === "profile") return this.emit("profile", sender, "", { name: c.name, bio: c.bio, avatar: c.avatar });

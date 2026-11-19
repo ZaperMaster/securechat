@@ -1,0 +1,35 @@
+# Pruebas automáticas en cada push y pull request: servidor y protocolo (Python)
+# y cliente web (Node). Si algo falla, GitHub lo marca en rojo.
+name: Pruebas
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Pruebas (Python + cliente web con Node)
+        run: pytest -q
+
+      - name: Pruebas del cliente web (detalle)
+        run: node --test tests/web/*.test.mjs

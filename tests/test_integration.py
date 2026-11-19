@@ -306,3 +306,30 @@ def test_urgent_call_offer_wakes_the_phone_even_if_connected():
         assert calls == [("bob", True)]
         await alice.close(); await bob.close(); srv.close()
     run(main())
+
+
+def test_send_many_delivers_one_copy_to_every_device():
+    async def main():
+        srv, url, relay = await start_server()
+        alice, bob, carol = await new_client(url, "alice"), await new_client(url, "bob"), await new_client(url, "carol")
+        dave_dev = carol.device + "x"  # dispositivo que no existe
+        payload = {"kind": "sk", "g": "grupo1", "ct": "AAAA"}
+        seen = []
+        original = relay._enqueue
+        relay._enqueue = lambda qk, item: (seen.append(qk), original(qk, item))
+        await carol.close()  # carol desconectada: se le guarda en cola
+        await asyncio.sleep(0.1)
+        ack = await alice._request(type="send-many", payload=payload, targets=[
+            {"to": "bob", "device": bob.device}, {"to": "carol", "device": carol.device},
+            {"to": "carol", "device": dave_dev}, {"to": "nadie", "device": "x"}, {"to": "alice", "device": alice.device}])
+        status = {(r["to"], r["device"]): r["status"] for r in ack["results"]}
+        assert status[("bob", bob.device)] == "delivered"
+        assert status[("carol", carol.device)] == "queued"
+        assert status[("carol", dave_dev)] == "no_device"
+        assert status[("nadie", "x")] == "no_user"
+        assert status[("alice", alice.device)] == "no_user"  # a uno mismo no
+        assert ack["devices"]["carol"] == [carol.device]
+        assert seen == [f"carol|{carol.device}"]
+        bad = await alice.ws.send(json.dumps({"type": "send-many", "id": "b", "targets": [], "payload": payload}))
+        await alice.close(); await bob.close(); srv.close()
+    run(main())

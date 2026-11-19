@@ -1419,3 +1419,47 @@ details.advanced > .switch { margin-top: 10px; }
 .voice-review .once-toggle { margin: 0; padding: 4px 10px 4px 4px; white-space: nowrap; }
 .voice-review .send { margin-left: 2px; }
 .once-audio { width: 100%; margin: 8px 0; }
+
+/* Móvil: el estado del contacto («@usuario · en línea») en una sola línea, recortado si no cabe */
+.chat-title .status { flex-wrap: nowrap; white-space: nowrap; overflow: hidden; min-width: 0; gap: 0; }
+.chat-title .status > * { flex: none; }
+.chat-title .status > :last-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chat-title .status > span:not(:first-child) { margin-left: 4px; }
+#peer-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+/* La fecha («Hoy», «Ayer»…) va en su sitio, sin flotar por encima de los mensajes */
+.day { position: static; }
+
+/* Reaccionar con doble toque: fila con muchas reacciones y «+» para todas */
+.msg { touch-action: manipulation; }
+.react-pop { padding: 6px; max-width: min(92vw, 420px); }
+.react-row { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; align-items: center; }
+.react-row::-webkit-scrollbar { display: none; }
+.react-row button, .react-cells button { font-size: 24px; line-height: 1; padding: 6px; border-radius: 12px; flex: none; transition: transform .1s; }
+.react-row button:hover, .react-cells button:hover { transform: scale(1.2); background: var(--hover); }
+.react-row button.own { background: var(--accent-soft); }
+.react-more { width: 38px; height: 38px; border-radius: 50% !important; background: var(--panel-2) !important; color: var(--muted);
+  font: 600 22px/1 var(--font) !important; flex: none; display: grid; place-items: center; }
+.menu-reactions .react-more { font-size: 20px !important; width: 34px; height: 34px; align-self: center; }
+.react-pop.expanded { width: min(92vw, 360px); max-height: min(60vh, 380px); overflow-y: auto; }
+.react-cat { font-size: 12px; font-weight: 600; color: var(--muted); padding: 8px 6px 4px; position: sticky; top: -6px; background: var(--panel); }
+.react-cells { display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); }
+
+/* Stickers propios */
+.picker-tabs { overflow-x: auto; }
+.sticker-btn.mine { padding: 4px; }
+.sticker-btn.mine img { width: 100%; aspect-ratio: 1; object-fit: contain; display: block; }
+.sticker-add { display: grid; place-items: center; gap: 0; aspect-ratio: 1; border-radius: 16px; border: 2px dashed var(--line);
+  color: var(--accent); background: none; cursor: pointer; }
+.sticker-add span { font-size: 30px; line-height: 1; }
+.sticker-add small { font-size: 12px; font-weight: 600; }
+.msg.own-sticker { padding: 0 2px !important; }
+.msg.own-sticker .sticker-img { width: 150px; height: 150px; object-fit: contain; display: block; animation: wobble .4s ease-out;
+  -webkit-user-drag: none; user-select: none; }
+.sticker-canvas { width: min(240px, 70vw); aspect-ratio: 1; display: block; margin: 0 auto 12px;
+  background: repeating-conic-gradient(rgb(127 127 127 / .15) 0 25%, transparent 0 50%) 0 0 / 20px 20px; border-radius: 16px; }
+
+/* Móvil: en la cabecera del chat cabe mejor el estado («en línea») que el @usuario */
+@media (max-width: 760px) {
+  .chat-title .status .handle, .chat-title .status .handle + span { display: none; }
+  .chat-title .status > span:not(:first-child) { margin-left: 0; }
+}

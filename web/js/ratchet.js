@@ -199,11 +199,15 @@ export class DeviceKeys {
     this.opks = data?.opks || {};
     this.sessions = data?.sessions || {};
     this.seen = data?.seen || [];
+    // Sender keys de grupos: las mías (por grupo) y las de los demás (por autor|dispositivo|grupo)
+    this.skMine = data?.skMine || {};
+    this.skPeers = data?.skPeers || {};
     if (!data?.device) this.save();
   }
 
   save() {
-    this._save({ device: this.device, spks: this.spks, opks: this.opks, sessions: this.sessions, seen: this.seen.slice(-2000) });
+    this._save({ device: this.device, spks: this.spks, opks: this.opks, sessions: this.sessions, seen: this.seen.slice(-2000),
+      skMine: this.skMine, skPeers: this.skPeers });
   }
 
   currentSpk() {

@@ -587,7 +587,7 @@ function onSync(ev) {
     const existing = groups.get(c.g);
     if (!existing || c.v > existing.v) {
       groups.set(c.g, { id: c.g, name: c.name, members: c.members, admin: c.admin, admins: c.admins, muted: c.muted, v: c.v, avatar: c.avatar,
-        left: !c.members.some((x) => same(x, me)), ...(existing?.invite ? { invite: existing.invite } : {}) });
+        rules: c.rules, left: !c.members.some((x) => same(x, me)), ...(existing?.invite ? { invite: existing.invite } : {}) });
       saveGroups();
       renderContacts();
     }
@@ -637,7 +637,7 @@ async function onIncoming(ev) {
   if (c.g && isMutedIn(groups.get(c.g), sender) && !["typing", "receipt", "react", "vote", "delete"].includes(c.t)) return;
   const conv = c.g ? `#${c.g}` : sender;
   if (c.t === "typing") return showTyping(conv, sender, c.on);
-  if (c.t === "react" || c.t === "edit" || c.t === "delete" || c.t === "vote") return applyAction(conv, sender, c);
+  if (c.t === "react" || c.t === "edit" || c.t === "delete" || c.t === "vote") return applyAction(conv, sender, c, ev.queuedAt);
   if (c.t === "timer") return setTimer(conv, c.secs, { who: sender });
   showTyping(conv, sender, false);
   if (c.mid && chat(conv).messages.some((m) => m.id === c.mid)) {
@@ -689,10 +689,22 @@ function onReceipt(ev) {
   }
 }
 
+// Límite de tiempo para cambiar un mensaje ya enviado (como en otras apps): pasado ese
+// tiempo ni se ofrece la opción ni se acepta el cambio al recibirlo.
+const EDIT_MS = 15 * 60000;        // editar: 15 minutos
+const DELETE_ALL_MS = 60 * 60000;  // eliminar para todos: 1 hora
+const LIMIT_GRACE_MS = 3 * 60000;  // margen al recibir (relojes y mensajes en cola)
+const canStillEdit = (m) => Date.now() - m.time.getTime() <= EDIT_MS;
+const canStillDeleteAll = (m) => Date.now() - m.time.getTime() <= DELETE_ALL_MS;
+
 /** Reacciones, ediciones y borrados que llegan de otros. */
-function applyAction(conv, sender, c) {
+function applyAction(conv, sender, c, queuedAt = null) {
   const m = chat(conv).messages.find((x) => x.id === c.target);
   if (!m) return;
+  // ¿Llega dentro del plazo? (se mide con la hora del servidor si estuvo en cola)
+  const age = (queuedAt ? queuedAt * 1000 : Date.now()) - m.time.getTime();
+  if (!same(sender, me) && ((c.t === "edit" && age > EDIT_MS + LIMIT_GRACE_MS)
+    || (c.t === "delete" && age > DELETE_ALL_MS + LIMIT_GRACE_MS))) return;
   const author = m.from === "me" ? me : (m.sender || conv);
   if (c.t === "vote") {
     if (m.content?.t !== "poll") return;
@@ -956,6 +968,7 @@ function createGroup(name, members, avatar = null, rules = {}) {
   addMsg(conv, { sys: `Has creado el grupo «${name}». Los mensajes van cifrados de extremo a extremo para cada miembro.` });
   queueAction(conv, groupState(g));
   openChat(conv);
+  applyDefaultTimer(conv, true);
 }
 
 function updateGroup(gid, patch) {
@@ -998,7 +1011,9 @@ async function onNewChat(ev) {
     chat(info.user).online = info.online;
     chat(info.user).away = info.away;
     chat(info.user).lastSeen = info.lastSeen;
+    const isNewChat = !chat(info.user).messages.some((m) => !m.sys);
     openChat(info.user);
+    applyDefaultTimer(info.user, isNewChat);
   } catch (e) {
     showNewChatError(e.message);
   } finally {
@@ -1140,6 +1155,22 @@ async function flushOutbox() {
         if (!bytes) { setStatus(conv, m, "failed"); continue; }
         content = { ...content, data: sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL) };
       }
+      // Grupos: con sender keys el mensaje se cifra una vez para todos
+      if (isGroup(conv) && m.to.length) {
+        try {
+          const r = await client.sendGroup(gidOf(conv), m.to, content);
+          for (const f of r.failed) {
+            addMsg(conv, { sys: f.error instanceof P.IdentityMismatch ? f.error.message
+              : `No se pudo enviar a ${displayName(f.user)}: ${f.error.message}`, warn: true });
+          }
+          m.to = [];
+          history?.put(conv, m);
+        } catch (e) {
+          if (isConnectivity(e)) return; // se queda con 🕓 y se reintenta al reconectar
+          addMsg(conv, { sys: `No se pudo enviar al grupo: ${e.message}`, warn: true });
+          m.to = [];
+        }
+      }
       while (m.to.length) {
         try {
           await client.sendContent(m.to[0], content);
@@ -1167,7 +1198,8 @@ async function onSend(ev) {
   ev.preventDefault();
   const t = $("text").value;
   if (editing) {
-    if (t.trim() && t !== editing.content.body) myEdit(active, editing, t);
+    if (editing.status !== "sending" && !canStillEdit(editing)) toast("Ya han pasado más de 15 minutos: ese mensaje no se puede editar.");
+    else if (t.trim() && t !== editing.content.body) myEdit(active, editing, t);
     $("text").value = "";
     cancelReply();
     return;
@@ -1360,6 +1392,13 @@ function showTimer(conv) {
     box,
     text("Ojo: nada impide que alguien haga una captura de pantalla antes de que se borren.", "p", "hint"),
   ]);
+}
+
+/** Si lo has elegido en Privacidad, los chats nuevos que empiezas llevan mensajes temporales. */
+function applyDefaultTimer(conv, isNew) {
+  const secs = prefs().defaultTimer || 0;
+  if (!isNew || !secs || meta(conv).timer || !TIMER_LABEL[secs]) return;
+  setTimer(conv, secs, { send: true });
 }
 
 function setTimer(conv, secs, { who = me, send: share = false } = {}) {
@@ -2255,6 +2294,8 @@ function renderPicker() {
       }
       body.append(grid);
     }
+  } else if (pickerTab === "mine") {
+    renderMyStickers(body);
   } else {
     const grid = text("", "div", "sticker-grid");
     for (const s of STICKERS) {
@@ -3120,6 +3161,8 @@ function showSettings(section = "appearance", back = true) {
       toggle("readReceipts", "Mostrar que he leído (visto)", "Si lo quitas, los demás no verán el doble check azul cuando leas sus mensajes."),
       toggle("lastSeen", "Mostrar mi última conexión", "Si lo quitas, nadie verá a qué hora te conectaste por última vez (y tú tampoco la de los demás)."),
       toggle("linkPreviews", "Vista previa de los enlaces", "Al enviar un enlace, el servidor descarga el título y la imagen de la página para enseñarlos en el chat. El servidor verá esa dirección (no a quién se la mandas). Quien lo recibe no descarga nada."),
+      text("Mensajes temporales por defecto", "h3", "settings-h"),
+      defaultTimerPicker(),
       text("Bloqueo de la app", "h3", "settings-h"),
       lockSettings(),
     ], subActions(back));
@@ -3169,6 +3212,7 @@ function previewOf(c) {
   if (!c) return "";
   if (c.t === "text") return c.body.replace(/([*_~`])(\S(?:[^\n]*?\S)?)\1/g, "$2"); // sin las marcas de formato
   if (c.t === "sticker") return `Sticker ${c.id}`;
+  if (c.t === "image" && c.stk) return "Sticker";
   if (c.once) return c.t === "image" ? "Foto · ver una vez" : c.t === "video" ? "Vídeo · ver una vez" : "Nota de voz · escuchar una vez";
   if (c.t === "image") return c.mime === "image/gif" ? "GIF" : "Foto";
   if (c.t === "video") return "Vídeo";
@@ -3535,7 +3579,10 @@ function renderHeader() {
   $("empty-chat").hidden = has;
 }
 
+let stickBottom = true; // ¿el chat abierto está pegado al último mensaje?
+
 function renderChat() {
+  stickBottom = true; // al abrir un chat se empieza por el final
   renderHeader();
   closeMsgMenu();
   $("messages").replaceChildren();
@@ -3580,6 +3627,7 @@ function buildMessage(conv, m, prev) {
   if (m.deleted) kind = " deleted";
   else if (c.t === "text" && isJumboEmoji(c.body) && !c.reply) kind = " jumbo";
   else if (c.t === "sticker") kind = " sticker";
+  else if (c.t === "image" && c.stk) kind = " sticker own-sticker";
   else if (c.t === "image" || c.t === "video") kind = " media";
   else if (c.t === "audio") kind = " voice";
   li.className = `msg ${side} ${cont}${kind}`;
@@ -3653,10 +3701,13 @@ function buildMessage(conv, m, prev) {
     li.append(icon("mic", "mic-icon"), a, sp);
   } else {
     const el = document.createElement(c.t === "image" ? "img" : "video");
-    if (c.t === "image") {
+    if (c.t === "image" && c.stk) {
+      el.alt = "Sticker";
+      el.className = "sticker-img";
+      el.draggable = false;
+    } else if (c.t === "image") {
       el.alt = c.name || "imagen";
       el.onclick = () => viewImage(m.url, c.name);
-      el.onload = () => { if (isNearBottom()) li.scrollIntoView({ block: "end" }); };
     } else {
       el.controls = true;
       el.playsInline = true;
@@ -3700,8 +3751,87 @@ function buildMessage(conv, m, prev) {
     pressTimer = setTimeout(() => { navigator.vibrate?.(15); openMsgMenu(conv, m, t0.clientX, t0.clientY); }, 450);
   }, { passive: true });
   for (const ev of ["touchend", "touchmove", "touchcancel"]) li.addEventListener(ev, () => clearTimeout(pressTimer), { passive: true });
+  // Doble toque (o doble clic) para reaccionar
+  if (!m.deleted && !m.sys) {
+    const skip = (t) => t.closest?.("a, button, audio, video, input, .poll");
+    li.addEventListener("dblclick", (e) => {
+      if (skip(e.target)) return;
+      e.preventDefault();
+      window.getSelection?.().removeAllRanges();
+      openReactionPicker(conv, m, e.clientX, e.clientY);
+    });
+    let lastTap = null;
+    li.addEventListener("touchend", (e) => {
+      const t = e.changedTouches[0];
+      if (skip(e.target) || e.touches.length) return;
+      const now = Date.now();
+      if (lastTap && now - lastTap.at < 320 && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) < 30) {
+        lastTap = null;
+        e.preventDefault();
+        openReactionPicker(conv, m, t.clientX, t.clientY);
+      } else lastTap = { at: now, x: t.clientX, y: t.clientY };
+    });
+  }
   m.el = li;
   return li;
+}
+
+// Reacciones: una fila con las más usadas y «+» para elegir cualquier emoji
+const MORE_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉", "😍", "👏", "🤔", "😡", "💯", "🥳", "😎", "👀", "🤣", "💪", "✅", "❌"];
+
+function reactionRow(conv, m, onPick) {
+  const row = text("", "div", "react-row");
+  const mine = m.reactions?.[me.toLowerCase()];
+  for (const e of MORE_REACTIONS) {
+    const b = text(e, "button");
+    b.type = "button";
+    b.title = `Reaccionar con ${e}`;
+    if (mine === e) b.classList.add("own");
+    b.onclick = () => onPick(e);
+    row.append(b);
+  }
+  return row;
+}
+
+/** Todos los emojis, por categorías, para reaccionar con cualquiera. */
+function reactionGrid(conv, m, onPick) {
+  const box = text("", "div", "react-grid");
+  for (const [cat, list] of EMOJIS) {
+    box.append(text(cat, "div", "react-cat"));
+    const g = text("", "div", "react-cells");
+    for (const e of list) {
+      const b = text(e, "button");
+      b.type = "button";
+      b.onclick = () => onPick(e);
+      g.append(b);
+    }
+    box.append(g);
+  }
+  return box;
+}
+
+/** Selector de reacción que sale con doble toque sobre un mensaje. */
+function openReactionPicker(conv, m, x, y) {
+  closeMsgMenu();
+  const menu = text("", "div", "msg-menu react-pop");
+  menu.id = "msg-menu";
+  const pick = (e) => { closeMsgMenu(); myReact(conv, m, e); };
+  const row = reactionRow(conv, m, pick);
+  const more = text("+", "button", "react-more");
+  more.type = "button";
+  more.title = "Más emojis";
+  more.setAttribute("aria-label", "Más emojis");
+  more.onclick = () => {
+    menu.replaceChildren(reactionGrid(conv, m, pick));
+    menu.classList.add("expanded");
+    const r = menu.getBoundingClientRect();
+    menu.style.top = `${Math.max(8, Math.min(r.top, innerHeight - r.height - 8))}px`;
+    menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - r.width - 8))}px`;
+  };
+  row.append(more);
+  menu.append(row);
+  navigator.vibrate?.(10);
+  placeMenu(menu, x - 140, y - 70);
 }
 
 function appendMessage(m) {
@@ -3738,8 +3868,12 @@ function withIcon(ic, label, tag = "button", cls = "", after = false) {
 function rerenderMessage(m) {
   const old = m.el;
   if (!old?.isConnected) return;
+  const l = $("messages");
+  const atEnd = stickBottom || l.scrollHeight - l.scrollTop - l.clientHeight < 60;
   const li = buildMessage(active, m, old.previousElementSibling); // ojo: esto ya cambia m.el
   old.replaceWith(li);
+  // Si al reaccionar o editar el mensaje crece, que no se quede tapado por la caja de escribir
+  if (atEnd) l.scrollTop = l.scrollHeight;
 }
 
 // ------------------------------------------------------------- varios archivos a la vez
@@ -4204,6 +4338,17 @@ function openMsgMenu(conv, m, x, y) {
       b.onclick = () => { closeMsgMenu(); myReact(conv, m, e); };
       row.append(b);
     }
+    const more = text("+", "button", "react-more");
+    more.type = "button";
+    more.title = "Más emojis";
+    more.setAttribute("aria-label", "Más emojis");
+    more.onclick = () => {
+      const r = menu.getBoundingClientRect();
+      closeMsgMenu();
+      openReactionPicker(conv, m, r.left + 140, r.top + 70);
+      $("msg-menu")?.querySelector(".react-more")?.click();
+    };
+    row.append(more);
     menu.append(row);
   }
   const item = (ic, label, fn, cls = "") => {
@@ -4219,13 +4364,15 @@ function openMsgMenu(conv, m, x, y) {
   if (!m.deleted && m.content.t === "text") item("copy", "Copiar", () => navigator.clipboard?.writeText(m.content.body));
   if (!m.deleted && m.content.t !== "unsupported" && !m.content.once) item("forward", "Reenviar", () => showForward(conv, m));
   if (!m.deleted) item("star", m.starred ? "Quitar destacado" : "Destacar", () => { m.starred = !m.starred; save(conv, m); });
+  if (!m.deleted && m.content.t === "image" && m.content.stk && m.from !== "me") item("plus", "Añadir a mis stickers", () => saveStickerFrom(conv, m));
   if (!m.deleted) {
     const pinned = meta(conv).pinMsg === m.id;
     item("pin", pinned ? "Desfijar mensaje" : "Fijar mensaje", () => { setMeta(conv, { pinMsg: pinned ? null : m.id }); renderPinned(); });
   }
-  if (m.from === "me" && !m.deleted && m.content.t === "text" && canWrite) item("edit", "Editar", () => startEdit(m));
+  const sent = m.status !== "sending" && m.status !== "failed";
+  if (m.from === "me" && !m.deleted && m.content.t === "text" && canWrite && (!sent || canStillEdit(m))) item("edit", "Editar", () => startEdit(m));
   item("trash", "Eliminar para mí", () => myDelete(conv, m, false), "danger");
-  if (m.from === "me" && !m.deleted && canWrite) item("trash", "Eliminar para todos", () => myDelete(conv, m, true), "danger");
+  if (m.from === "me" && !m.deleted && canWrite && (!sent || canStillDeleteAll(m))) item("trash", "Eliminar para todos", () => myDelete(conv, m, true), "danger");
   document.body.append(menu);
   // Que no se salga de la pantalla
   const r = menu.getBoundingClientRect();
@@ -4651,6 +4798,31 @@ document.addEventListener("visibilitychange", () => {
   } else if (hiddenAt && Date.now() - hiddenAt >= (lockConf().after || 0) * 60000) maybeLock();
 });
 
+/** Mensajes temporales en los chats nuevos: desactivado salvo que lo elijas. */
+function defaultTimerPicker() {
+  const box = text("", "div");
+  const g = text("", "div", "segmented");
+  const hint = text("", "p", "hint");
+  const opts = [[0, "Desactivado"], [86400, "24 horas"], [604800, "7 días"], [7776000, "90 días"]];
+  const paint = () => {
+    const cur = prefs().defaultTimer || 0;
+    for (const b of g.children) b.setAttribute("aria-pressed", String(Number(b.value) === cur));
+    hint.textContent = cur
+      ? `Los chats y grupos nuevos que empieces tendrán mensajes temporales de ${TIMER_LABEL[cur]}. Los que ya tienes no cambian.`
+      : "Los chats nuevos no llevan mensajes temporales. Puedes activarlos en cada chat desde su menú.";
+  };
+  for (const [v, label] of opts) {
+    const b = text(label, "button");
+    b.type = "button";
+    b.value = String(v);
+    b.onclick = () => { window.SC_SET_PREFS({ ...prefs(), defaultTimer: v }); paint(); };
+    g.append(b);
+  }
+  paint();
+  box.append(g, hint);
+  return box;
+}
+
 /** Apartado de Privacidad para activar, cambiar o quitar el bloqueo. */
 function lockSettings() {
   const box = text("", "div", "lock-settings");
@@ -4752,10 +4924,160 @@ document.addEventListener("visibilitychange", async () => {
 // cargar después, el chat sigue pegado abajo en vez de quedarse con el último mensaje tapado.
 (() => {
   const l = $("messages");
-  let atBottom = true;
-  l.addEventListener("scroll", () => { atBottom = l.scrollHeight - l.scrollTop - l.clientHeight < 60; }, { passive: true });
-  l.addEventListener("load", (e) => {
-    if (atBottom && (e.target.tagName === "IMG" || e.target.tagName === "VIDEO")) l.scrollTop = l.scrollHeight;
-  }, true);
-  l.addEventListener("loadedmetadata", () => { if (atBottom) l.scrollTop = l.scrollHeight; }, true);
+  // Solo el usuario «despega» el chat del final: con la rueda, el dedo o el teclado
+  const unstick = () => setTimeout(() => { stickBottom = l.scrollHeight - l.scrollTop - l.clientHeight < 60; }, 120);
+  for (const ev of ["wheel", "touchmove", "keydown"]) l.addEventListener(ev, unstick, { passive: true });
+  l.addEventListener("scroll", () => { if (l.scrollHeight - l.scrollTop - l.clientHeight < 60) stickBottom = true; }, { passive: true });
+  const toEnd = () => { if (stickBottom) l.scrollTop = l.scrollHeight; };
+  l.addEventListener("load", (e) => { if (e.target.tagName === "IMG" || e.target.tagName === "VIDEO") toEnd(); }, true);
+  l.addEventListener("loadedmetadata", toEnd, true);
 })();
+
+
+// ------------------------------------------------------------ stickers propios
+// Se crean a partir de una foto (recortada en cuadrado, círculo o entera, con texto
+// opcional) y se guardan solo en este dispositivo. Se envían como una imagen pequeña
+// cifrada, igual que una foto, pero se enseñan sin burbuja.
+
+const STICKER_SIZE = 320;
+const MAX_MY_STICKERS = 40;
+const stickersKey = () => `sc:stickers:${me.toLowerCase()}`;
+const myStickers = () => store.get(stickersKey()) || [];
+
+function saveMyStickers(list) {
+  if (!store.set(stickersKey(), list.slice(0, MAX_MY_STICKERS))) toast("No queda espacio para más stickers en este dispositivo.");
+}
+
+function renderMyStickers(body) {
+  const grid = text("", "div", "sticker-grid my-stickers");
+  const add = text("", "button", "sticker-add");
+  add.type = "button";
+  add.title = "Crear un sticker con una foto";
+  add.append(text("+", "span"), text("Crear", "small"));
+  add.onclick = () => { closePicker(); showStickerMaker(); };
+  grid.append(add);
+  for (const st of myStickers()) {
+    const b = text("", "button", "sticker-btn mine");
+    b.type = "button";
+    b.title = "Enviar sticker (mantén pulsado o clic derecho para borrarlo)";
+    const img = document.createElement("img");
+    img.src = `data:${st.mime};base64,${st.data}`;
+    img.alt = "Sticker";
+    b.append(img);
+    b.onclick = () => { closePicker(); sendMySticker(st); };
+    const del = () => {
+      if (!confirm("¿Borrar este sticker de tus stickers?")) return;
+      saveMyStickers(myStickers().filter((x) => x.id !== st.id));
+      renderPicker();
+    };
+    b.oncontextmenu = (e) => { e.preventDefault(); del(); };
+    longPress(b, del);
+    grid.append(b);
+  }
+  body.append(grid);
+  if (!myStickers().length) body.append(text("Haz stickers con tus fotos: pulsa «Crear». Solo se guardan en este dispositivo.", "p", "hint"));
+}
+
+async function sendMySticker(st) {
+  if (!active || mutedHere(active)) return;
+  const bytes = sodium.from_base64(st.data, sodium.base64_variants.ORIGINAL);
+  const blob = new Blob([bytes], { type: st.mime });
+  await send({ t: "image", mime: st.mime, name: "sticker", stk: true }, { bytes, url: URL.createObjectURL(blob) });
+}
+
+async function saveStickerFrom(conv, m) {
+  const bytes = await history?.getMedia(conv, m.id);
+  if (!bytes) { toast("Este sticker ya no está en el dispositivo."); return; }
+  const data = sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL);
+  if (myStickers().some((x) => x.data === data)) { toast("Ya lo tienes en tus stickers."); return; }
+  saveMyStickers([{ id: newId(), mime: m.content.mime, data }, ...myStickers()]);
+  toast("Añadido a tus stickers.");
+}
+
+/** Dibuja el sticker: forma (cuadrado redondeado, círculo o entera) y texto opcional. */
+function drawSticker(canvas, bmp, shape, caption) {
+  const S = STICKER_SIZE, pad = 10;
+  const ctx = canvas.getContext("2d");
+  canvas.width = canvas.height = S;
+  ctx.clearRect(0, 0, S, S);
+  ctx.save();
+  if (shape === "fit") {
+    const k = Math.min((S - pad * 2) / bmp.width, (S - pad * 2) / bmp.height);
+    const w = bmp.width * k, h = bmp.height * k;
+    ctx.drawImage(bmp, (S - w) / 2, (S - h) / 2, w, h);
+  } else {
+    const side = Math.min(bmp.width, bmp.height);
+    ctx.beginPath();
+    if (shape === "circle") ctx.arc(S / 2, S / 2, S / 2 - pad, 0, Math.PI * 2);
+    else ctx.roundRect(pad, pad, S - pad * 2, S - pad * 2, 48);
+    ctx.closePath();
+    // Borde blanco como el de un sticker de papel
+    ctx.shadowColor = "rgba(0,0,0,.25)";
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "#fff";
+    ctx.fill();
+    ctx.shadowColor = "transparent";
+    ctx.clip();
+    const inset = 6;
+    ctx.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, pad + inset, pad + inset, S - (pad + inset) * 2, S - (pad + inset) * 2);
+  }
+  ctx.restore();
+  if (caption) {
+    let size = 46;
+    ctx.font = `800 ${size}px system-ui, sans-serif`;
+    while (ctx.measureText(caption).width > S - 30 && size > 18) { size -= 2; ctx.font = `800 ${size}px system-ui, sans-serif`; }
+    ctx.textAlign = "center";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(4, size / 6);
+    ctx.strokeStyle = "#000";
+    ctx.fillStyle = "#fff";
+    const y = S - pad - 14;
+    ctx.strokeText(caption, S / 2, y);
+    ctx.fillText(caption, S / 2, y);
+  }
+}
+
+async function canvasToSticker(canvas) {
+  // WebP mantiene la transparencia y pesa poco; si el navegador no sabe hacerlo, PNG
+  let blob = await new Promise((r) => canvas.toBlob(r, "image/webp", 0.85));
+  if (!blob || blob.type !== "image/webp") blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+  return { mime: blob.type, data: sodium.to_base64(new Uint8Array(await blob.arrayBuffer()), sodium.base64_variants.ORIGINAL) };
+}
+
+function showStickerMaker() {
+  const fileIn = document.createElement("input");
+  fileIn.type = "file";
+  fileIn.accept = "image/png,image/jpeg,image/webp,image/gif";
+  fileIn.onchange = async () => {
+    const f = fileIn.files[0];
+    if (!f) return;
+    let bmp;
+    try { bmp = await createImageBitmap(f); } catch { toast("Esa imagen no se puede usar."); return; }
+    let shape = "rounded";
+    const canvas = document.createElement("canvas");
+    canvas.className = "sticker-canvas";
+    const cap = input("", { max: 24, placeholder: "Texto (opcional)" });
+    const redraw = () => drawSticker(canvas, bmp, shape, cap.value.trim());
+    cap.oninput = redraw;
+    const seg = text("", "div", "segmented");
+    for (const [v, label] of [["rounded", "Cuadrado"], ["circle", "Redondo"], ["fit", "Entera"]]) {
+      const b = text(label, "button");
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(v === shape));
+      b.onclick = () => { shape = v; for (const x of seg.children) x.setAttribute("aria-pressed", String(x === b)); redraw(); };
+      seg.append(b);
+    }
+    redraw();
+    const finish = async (sendNow) => {
+      const st = { id: newId(), ...(await canvasToSticker(canvas)) };
+      saveMyStickers([st, ...myStickers()]);
+      if (sendNow && active) sendMySticker(st);
+      else toast("Sticker guardado en «Mis stickers».");
+    };
+    dialog("Crear sticker", [
+      canvas, seg, field("Texto", cap),
+      text("Se guarda solo en este dispositivo. Al enviarlo va cifrado como una foto.", "p", "hint"),
+    ], [["Cancelar"], ["Guardar", () => finish(false)], ["Guardar y enviar", () => finish(true)]]);
+  };
+  fileIn.click();
+}

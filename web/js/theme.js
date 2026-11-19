@@ -49,6 +49,7 @@ const DEFAULT_PREFS = {
   notifications: true,
   enterSends: true,
   linkPreviews: true,  // vista previa de los enlaces que envías
+  defaultTimer: 0,     // mensajes temporales en los chats nuevos (0 = no; solo si lo eliges tú)
 };
 
 function readPrefs() {

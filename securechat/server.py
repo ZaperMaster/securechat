@@ -52,6 +52,7 @@ MAX_FRAME = 20 * 1024 * 1024
 EMAIL_SENDS_PER_HOUR = 5
 LOOKUP_LIMIT = 30  # búsquedas por minuto y conexión (frena la enumeración de usuarios)
 PREVIEW_LIMIT = 20  # vistas previas de enlaces por minuto y conexión
+MAX_FANOUT = 64 * 6   # destinos de un mensaje de grupo (64 miembros × 6 dispositivos)
 AUTH_TIMEOUT = 10
 AUTH_CONTEXT = b"securechat-auth-v1"
 QUEUE_MAX_MSGS = 300
@@ -401,6 +402,8 @@ class RelayServer:
                 t = msg.get("type")
                 if t == "send":
                     await self._relay(ws, user, device, msg)
+                elif t == "send-many":
+                    await self._relay_many(ws, user, msg)
                 elif t in ("lookup", "bundle"):
                     now = time.monotonic()
                     lookups[:] = [x for x in lookups if now - x < 60] + [now]
@@ -702,6 +705,47 @@ class RelayServer:
             asyncio.get_running_loop().create_task(self._push(ct))
         await _send(ws, type="ack", id=rid, status="queued", devices=devices)
 
+    async def _relay_many(self, ws: ServerConnection, sender: str, msg: dict) -> None:
+        """Mensaje de grupo con sender keys: la MISMA copia cifrada para muchos dispositivos.
+        Devuelve el estado de cada uno y la lista de dispositivos de cada destinatario
+        (para que el cliente detecte dispositivos nuevos y les dé la clave)."""
+        targets, payload, rid = msg.get("targets"), msg.get("payload"), msg.get("id")
+        if not isinstance(targets, list) or not 0 < len(targets) <= MAX_FANOUT or not isinstance(payload, dict):
+            await _send(ws, type="error", code="bad_request", id=rid, message="envío de grupo inválido")
+            return
+        cs = canon(sender)
+        now = int(time.time())
+        results, devices, to_push = [], {}, set()
+        envelope = json.dumps({"type": "deliver", "from": sender, "payload": payload})
+        for tg in targets:
+            to, device = (tg.get("to"), tg.get("device")) if isinstance(tg, dict) else (None, None)
+            ct = canon(to) if isinstance(to, str) else ""
+            if ct not in self.registry or ct == cs:
+                results.append({"to": to, "device": device, "status": "no_user"})
+                continue
+            devs = list(self.registry[ct].get("devices", {}))
+            devices[self.registry[ct]["name"]] = devs
+            if device not in devs:
+                results.append({"to": to, "device": device, "status": "no_device"})
+                continue
+            self.related.setdefault(ct, set()).add(cs)
+            self.related.setdefault(cs, set()).add(ct)
+            conn = self.online.get(ct, {}).get(device)
+            if conn is not None:
+                try:
+                    await conn.send(envelope)
+                    results.append({"to": to, "device": device, "status": "delivered"})
+                    continue
+                except ConnectionClosed:
+                    pass
+            self._enqueue(f"{ct}|{device}", {"from": sender, "payload": payload, "at": now})
+            results.append({"to": to, "device": device, "status": "queued"})
+            if not msg.get("silent") and not self.online.get(ct) and self.registry[ct].get("push"):
+                to_push.add(ct)
+        for ct in to_push:
+            asyncio.get_running_loop().create_task(self._push(ct))
+        await _send(ws, type="ack", id=rid, status="ok", results=results, devices=devices)
+
     async def _push(self, c: str, call: bool = False) -> None:
         r = self.registry.get(c)
         if not r:
@@ -761,7 +805,12 @@ async def run(host: str, port: int, db: Path | None = None, tls: ssl.SSLContext 
     log.info("web y relay en %s://%s:%d", "https" if tls and not tls_port else "http", shown, port)
     if tls and tls_port:
         log.info("web y relay en https://%s:%d", shown, tls_port)
-    await asyncio.gather(*(s.serve_forever() for s in servers))
+    try:
+        await asyncio.gather(*(s.serve_forever() for s in servers))
+    finally:
+        # Al pararlo (p. ej. desde el icono de la bandeja) se liberan los puertos
+        for s in servers:
+            s.close()
 
 
 def main() -> None:
