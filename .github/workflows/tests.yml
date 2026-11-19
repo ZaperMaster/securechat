@@ -29,7 +29,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Pruebas (Python + cliente web con Node)
-        run: pytest -q
+        run: python -m pytest -q
 
       - name: Pruebas del cliente web (detalle)
         run: node --test tests/web/*.test.mjs
