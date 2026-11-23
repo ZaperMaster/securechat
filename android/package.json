@@ -1,0 +1,6 @@
+{
+  "name": "securechat-android",
+  "private": true,
+  "description": "App de Android de SecureChat (Trusted Web Activity) generada con Bubblewrap",
+  "devDependencies": { "@bubblewrap/cli": "1.27.0" }
+}

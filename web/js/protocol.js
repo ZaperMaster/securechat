@@ -73,12 +73,25 @@ export function saveIdentity(seed, password,
   };
 }
 
-/** Devuelve {seed, publicKey, privateKey}. Mismo formato que identity.json de la CLI. */
-export function loadIdentity(blob, password) {
-  if (blob.version !== KEYSTORE_VERSION || blob.kdf !== "argon2id")
+/** Argon2id de la contraseña con los parámetros (y la sal) de una copia de la clave. */
+export function deriveKeystoreKey(params, password) {
+  if (params.version !== KEYSTORE_VERSION || params.kdf !== "argon2id")
     throw new CryptoError("formato de almacén de claves no soportado");
-  const key = S.crypto_pwhash(32, utf8(password), b64d(blob.salt), blob.opslimit, blob.memlimit,
+  return S.crypto_pwhash(32, utf8(password), b64d(params.salt), params.opslimit, params.memlimit,
     S.crypto_pwhash_ALG_ARGON2ID13);
+}
+
+/**
+ * Prueba de contraseña para que el servidor entregue la copia de la clave. Sale de la
+ * MISMA derivación Argon2id que la cifra, pero con otra etiqueta: conocerla no permite
+ * descifrar la copia, y el servidor solo guarda su hash.
+ */
+export const keystoreAuth = (key) => kdf(key, "sc-keystore-auth");
+
+/** Devuelve {seed, publicKey, privateKey, auth}. Mismo formato que identity.json de la CLI.
+ *  key: la derivación ya hecha (para no repetir Argon2id, que es lento a propósito). */
+export function loadIdentity(blob, password, key = null) {
+  key ??= deriveKeystoreKey(blob, password);
   const raw = b64d(blob.ciphertext);
   let seed;
   try { seed = S.crypto_secretbox_open_easy(raw.subarray(24), raw.subarray(0, 24), key); }
@@ -86,7 +99,28 @@ export function loadIdentity(blob, password) {
   const kp = S.crypto_sign_seed_keypair(seed);
   if (!equal(kp.publicKey, b64d(blob.public_key)))
     throw new CryptoError("la clave pública almacenada no coincide");
-  return { seed, publicKey: kp.publicKey, privateKey: kp.privateKey };
+  return { seed, publicKey: kp.publicKey, privateKey: kp.privateKey, auth: keystoreAuth(key) };
+}
+
+// Contraseñas demasiado comunes (y sus variantes obvias): se prueban las primeras en
+// cualquier ataque de diccionario. La lista completa sería enorme; estas cubren lo típico.
+const COMMON = ["123456", "password", "contraseña", "contrasena", "qwerty", "abc123", "111111", "iloveyou",
+  "admin", "welcome", "letmein", "monkey", "dragon", "football", "futbol", "barcelona", "madrid", "realmadrid",
+  "tequiero", "teamo", "hola", "secreto", "secret", "princesa", "superman", "batman", "pokemon", "starwars",
+  "securechat", "asdfgh", "zxcvbn", "1q2w3e", "qazwsx", "passw0rd", "p4ssw0rd", "minecraft", "fortnite"];
+
+/** Devuelve null si la contraseña vale, o el motivo por el que no. */
+export function passwordProblem(pw, username = "") {
+  if (pw.length < 10) return "La contraseña tiene que tener al menos 10 caracteres.";
+  const low = pw.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const bare = low.replace(/[^a-z0-9ñ]/g, "").replace(/\d+$/, "");
+  if (new Set(pw).size < 5) return "La contraseña repite demasiado los mismos caracteres.";
+  if ("01234567890123456789".includes(low) || "abcdefghijklmnopqrstuvwxyz".includes(low) || "qwertyuiopasdfghjklzxcvbnm".includes(low))
+    return "La contraseña no puede ser una secuencia como 1234567890 o qwertyuiop.";
+  if (COMMON.some((w) => bare === w || bare.startsWith(w) && bare.length - w.length < 4))
+    return "Esa contraseña es de las más usadas: elige otra (por ejemplo, tres o cuatro palabras al azar).";
+  if (username && low.includes(username.toLowerCase())) return "La contraseña no puede contener tu nombre de usuario.";
+  return null;
 }
 
 export function newIdentitySeed() { return S.randombytes_buf(32); }

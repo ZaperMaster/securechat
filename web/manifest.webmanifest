@@ -1,7 +1,7 @@
 {
   "name": "SecureChat",
   "short_name": "SecureChat",
-  "description": "Mensajería cifrada extremo a extremo (proyecto educativo)",
+  "description": "Mensajería con cifrado de extremo a extremo",
   "lang": "es",
   "start_url": "./",
   "scope": "./",

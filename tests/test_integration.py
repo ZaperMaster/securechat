@@ -188,10 +188,11 @@ def test_two_devices_same_account(tmp_path):
     run(main())
 
 
-async def http_get(url, path):
+async def http_get(url, path, headers=None):
     host, port = url.removeprefix("ws://").split(":")
     reader, writer = await asyncio.open_connection(host, int(port))
-    writer.write(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+    extra = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
+    writer.write(f"GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n".encode())
     data = await reader.read()
     writer.close()
     head, _, body = data.partition(b"\r\n\r\n")

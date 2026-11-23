@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#e8f5ee">
-  <meta name="description" content="Mensajería cifrada extremo a extremo (proyecto educativo)">
+  <meta name="description" content="Mensajería con cifrado de extremo a extremo">
   <title>SecureChat</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -38,11 +38,11 @@
         </label>
         <label id="login-pass-wrap" class="field">
           <span>Contraseña</span>
-          <input id="login-pass" type="password" required minlength="8" autocomplete="current-password">
+          <input id="login-pass" type="password" required minlength="8" maxlength="200" autocomplete="current-password">
         </label>
         <label id="login-pass2-wrap" class="field register-only">
           <span>Repite la contraseña</span>
-          <input id="login-pass2" type="password" minlength="8" autocomplete="new-password">
+          <input id="login-pass2" type="password" minlength="10" maxlength="200" autocomplete="new-password">
         </label>
         <label id="login-email-wrap" class="field register-only" hidden>
           <span>Correo electrónico</span>

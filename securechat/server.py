@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import hmac
 import secrets
 import json
@@ -75,7 +76,17 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-cache",
+    # Solo HTTPS durante un año (los navegadores la ignoran si se entra por http://localhost)
+    "Strict-Transport-Security": "max-age=31536000",
+    # La web solo puede usar cámara y micrófono (llamadas y notas de voz); nada de ubicación, etc.
+    "Permissions-Policy": "camera=(self), microphone=(self), geolocation=(), payment=(), usb=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
 }
+KEYSTORE_AUTH_FAILS = 10     # contraseñas incorrectas por cuenta antes de bloquear la descarga
+KEYSTORE_LOCK = 15 * 60      # durante 15 minutos
+VERIFY_EMAILS_PER_IP = 5     # correos de verificación por IP y hora (anti-spam)
+VERIFY_EMAILS_PER_ADDR = 3   # y por dirección de correo
 
 
 def auth_message(nonce: bytes, user: str) -> bytes:
@@ -124,15 +135,24 @@ def _response(status: int, reason: str, body: bytes, ctype: str) -> Response:
     return Response(status, reason, headers, body)
 
 
-def client_ip(ws: ServerConnection) -> str:
-    """IP del cliente. Detrás de un túnel local (cloudflared) todas las conexiones
-    llegan desde 127.0.0.1, así que en ese caso usamos la cabecera del túnel."""
-    ip = (ws.remote_address or ("?",))[0]
-    if ip in ("127.0.0.1", "::1") and ws.request is not None:
-        fwd = ws.request.headers.get("CF-Connecting-IP") or ws.request.headers.get("X-Forwarded-For", "")
+def real_ip(remote, headers) -> str:
+    """IP del cliente. Detrás de un túnel local (cloudflared, Tailscale) todas las conexiones
+    llegan desde 127.0.0.1, así que usamos la cabecera del túnel. De X-Forwarded-For se
+    toma la ÚLTIMA dirección: es la que añade el túnel; las anteriores las puede inventar
+    el cliente para saltarse los límites por IP."""
+    ip = (remote or ("?",))[0]
+    if ip in ("127.0.0.1", "::1") and headers is not None:
+        cf = headers.get("CF-Connecting-IP")
+        if cf:
+            return cf.strip()
+        fwd = [x.strip() for x in headers.get("X-Forwarded-For", "").split(",") if x.strip()]
         if fwd:
-            return fwd.split(",")[0].strip()
+            return fwd[-1]
     return ip
+
+
+def client_ip(ws: ServerConnection) -> str:
+    return real_ip(ws.remote_address, ws.request.headers if ws.request is not None else None)
 
 
 def canon(name: str) -> str:
@@ -162,6 +182,9 @@ class RelayServer:
         self._code_fails: dict[str, list[float]] = {}
         self._keystore_hits: dict[str, list[float]] = {}
         self._email_sends: dict[str, list[float]] = {}  # envíos de códigos por cuenta (límite por hora)
+        self._verify_sends: dict[str, list[float]] = {}  # correos de alta por IP y por dirección
+        self._keystore_fails: dict[str, list[float]] = {}  # contraseñas incorrectas por cuenta
+        self._lookups: dict[str, list[float]] = {}  # búsquedas de usuarios por cuenta
         # Relé de llamadas (TURN): direcciones que se dan a los navegadores y secreto de sus credenciales
         self.turn_urls: list[str] = []
         self.turn_port: int | None = None
@@ -177,7 +200,7 @@ class RelayServer:
                     v = {"name": name, "key": v}
                 self.registry[canon(v["name"])] = {
                     "name": v["name"], "key": b64d(v["key"]), "email": v.get("email"),
-                    "keystore": v.get("keystore"), "last_seen": v.get("last_seen"),
+                    "keystore": v.get("keystore"), "keystore_auth": v.get("keystore_auth"), "last_seen": v.get("last_seen"),
                     "hide_last_seen": v.get("hide_last_seen", False), "push": v.get("push", []),
                     "status": v.get("status", "online"),
                     "devices": v.get("devices", {})}
@@ -192,7 +215,7 @@ class RelayServer:
         if not self.db_path:
             return
         data = {c: {"name": r["name"], "key": b64e(r["key"]), "email": r.get("email"),
-                    "keystore": r.get("keystore"), "last_seen": r.get("last_seen"),
+                    "keystore": r.get("keystore"), "keystore_auth": r.get("keystore_auth"), "last_seen": r.get("last_seen"),
                     "hide_last_seen": r.get("hide_last_seen", False), "push": r.get("push", []),
                     "status": r.get("status", "online"),
                     "devices": r.get("devices", {})}
@@ -288,6 +311,15 @@ class RelayServer:
         if any(r.get("email") == h for r in self.registry.values()):
             await _send(ws, type="error", code="email_used", message="ese correo ya tiene una cuenta")
             return None
+        # Que nadie use el servidor para llenar de correos la bandeja de otra persona
+        now, ip = time.monotonic(), f"ip:{client_ip(ws)}"
+        by_ip = [t for t in self._verify_sends.get(ip, []) if now - t < 3600]
+        by_addr = [t for t in self._verify_sends.get(h, []) if now - t < 3600]
+        if len(by_ip) >= VERIFY_EMAILS_PER_IP or len(by_addr) >= VERIFY_EMAILS_PER_ADDR:
+            await _send(ws, type="error", code="too_many",
+                        message="se han pedido demasiados códigos; espera un rato antes de volver a intentarlo")
+            return None
+        self._verify_sends[ip], self._verify_sends[h] = by_ip + [now], by_addr + [now]
         code = new_code()
         try:
             await self.email_sender.send(email, code)
@@ -368,7 +400,6 @@ class RelayServer:
 
     async def handler(self, ws: ServerConnection) -> None:
         user = device = None
-        lookups: list[float] = []
         previews: list[float] = []
         pending_email: dict | None = None  # cambio de correo a medias (código enviado)
         try:
@@ -406,7 +437,8 @@ class RelayServer:
                     await self._relay_many(ws, user, msg)
                 elif t in ("lookup", "bundle"):
                     now = time.monotonic()
-                    lookups[:] = [x for x in lookups if now - x < 60] + [now]
+                    # Por cuenta: abrir más conexiones no da más búsquedas
+                    lookups = self._lookups[c] = [x for x in self._lookups.get(c, []) if now - x < 60] + [now]
                     if len(lookups) > LOOKUP_LIMIT:
                         await _send(ws, type="error", code="rate_limited", id=msg.get("id"),
                                     message="demasiadas búsquedas, espera un momento")
@@ -473,7 +505,7 @@ class RelayServer:
                         self._save()
                 elif t == "keystore":
                     try:
-                        self._store_keystore(c, msg.get("blob"))
+                        self._store_keystore(c, msg.get("blob"), msg.get("auth"))
                     except (ValueError, KeyError, TypeError, CryptoError) as exc:
                         await _send(ws, type="error", code="bad_keystore", message=str(exc))
                 elif t == "preview":
@@ -614,7 +646,7 @@ class RelayServer:
 
     # --------------------------------------------- copia cifrada de la clave
 
-    def _store_keystore(self, c: str, blob) -> None:
+    def _store_keystore(self, c: str, blob, auth=None) -> None:
         """Guarda la clave del usuario CIFRADA con su contraseña (Argon2id + XSalsa20).
 
         Sirve para iniciar sesión desde otro dispositivo. El servidor no puede abrirla;
@@ -629,8 +661,22 @@ class RelayServer:
         if blob.get("opslimit", 0) < 2 or blob.get("memlimit", 0) < 32 * 1024 * 1024:
             raise ValueError("parámetros de Argon2id demasiado débiles")
         clean = {k: blob[k] for k in sorted(required | {"username"}) if k in blob}
-        if r.get("keystore") != clean:
+        changed = r.get("keystore") != clean
+        if changed:
             r["keystore"] = clean
+            r.pop("keystore_auth", None)  # una copia nueva necesita su propia prueba
+        # Prueba de contraseña: el cliente la saca de la MISMA derivación Argon2id que cifra la
+        # copia (con otra etiqueta), así que solo quien sabe la contraseña puede generarla.
+        # Guardamos su hash: con él no se puede ni descifrar la copia ni sacar la prueba.
+        if isinstance(auth, str):
+            raw = b64d(auth)
+            if len(raw) != 32:
+                raise ValueError("prueba de contraseña inválida")
+            digest = hashlib.sha256(raw).hexdigest()
+            if r.get("keystore_auth") != digest:
+                r["keystore_auth"] = digest
+                changed = True
+        if changed:
             self._save()
 
     def keystore_response(self, connection: ServerConnection, request: Request) -> Response:
@@ -641,9 +687,7 @@ class RelayServer:
         """
         from urllib.parse import parse_qs, urlsplit
         q = parse_qs(urlsplit(request.path).query)
-        ip = (connection.remote_address or ("?",))[0]
-        if ip in ("127.0.0.1", "::1"):
-            ip = request.headers.get("CF-Connecting-IP") or request.headers.get("X-Forwarded-For", ip).split(",")[0].strip()
+        ip = real_ip(connection.remote_address, request.headers)
         now = time.monotonic()
         hits = self._keystore_hits[ip] = [t for t in self._keystore_hits.get(ip, []) if now - t < 60] + [now]
         if len(hits) > KEYSTORE_LIMIT:
@@ -660,7 +704,30 @@ class RelayServer:
             r = self.registry.get(canon(name)) if USERNAME_RE.match(name) else None
         if not r or not r.get("keystore"):
             return _response(404, "Not Found", b'{"error": "no encontrada"}', "application/json")
-        body = json.dumps({"user": r["name"], "blob": r["keystore"]}).encode()
+        ks = r["keystore"]
+        if r.get("keystore_auth"):
+            # Sin la prueba de contraseña solo se dan los parámetros de Argon2id (sal incluida):
+            # así nadie puede llevarse la copia para probar contraseñas sin conexión.
+            given = request.headers.get("X-SC-Keystore-Auth", "")
+            if not given:
+                params = {k: ks[k] for k in ("version", "kdf", "opslimit", "memlimit", "salt") if k in ks}
+                body = json.dumps({"user": r["name"], "auth_required": True, "params": params}).encode()
+                return _response(200, "OK", body, "application/json")
+            key = canon(r["name"])
+            fails = self._keystore_fails[key] = [t for t in self._keystore_fails.get(key, []) if now - t < KEYSTORE_LOCK]
+            if len(fails) >= KEYSTORE_AUTH_FAILS:
+                return _response(429, "Too Many Requests",
+                                 b'{"error": "demasiados intentos con esta cuenta, espera 15 minutos"}', "application/json")
+            try:
+                ok = hmac.compare_digest(hashlib.sha256(b64d(given)).hexdigest(), r["keystore_auth"])
+            except (ValueError, CryptoError):
+                ok = False
+            if not ok:
+                fails.append(now)
+                return _response(403, "Forbidden", b'{"error": "contrasena incorrecta", "code": "bad_password"}',
+                                 "application/json")
+            self._keystore_fails.pop(key, None)
+        body = json.dumps({"user": r["name"], "blob": ks}).encode()
         return _response(200, "OK", body, "application/json")
 
     # --------------------------------------------------------------- reenvío

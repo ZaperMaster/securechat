@@ -62,7 +62,7 @@ function updateLoginMode() {
   $("login-pass").autocomplete = reg ? "new-password" : "current-password";
   $("login-hint").textContent = name && (reg || !name.includes("@")) && !NAME_RE.test(name.replace(/^@/, ""))
     ? "El @usuario tiene 3-32 caracteres: letras, números, '_', '.' o '-'."
-    : reg ? "Si olvidas la contraseña no se puede recuperar: nadie (ni el servidor) puede abrir tu cuenta sin ella." : "";
+    : reg ? "Mínimo 10 caracteres. Si la olvidas no se puede recuperar: nadie (ni el servidor) puede abrir tu cuenta sin ella." : "";
   $("login-remember-wrap").hidden = !Vault.canRemember();
 }
 
@@ -80,8 +80,24 @@ async function findKeystore(name) {
   if (r.status === 403) throw Object.assign(new Error("bad code"), { code: "bad_code" });
   if (r.status === 429) throw new Error("Demasiados intentos. Espera un minuto.");
   if (!r.ok) throw new Error("El servidor no ha podido responder. Inténtalo de nuevo.");
-  const { user, blob } = await r.json();
-  return { ...blob, username: user };
+  const data = await r.json();
+  if (data.auth_required) return { auth_required: true, params: data.params, username: data.user };
+  return { ...data.blob, username: data.user };
+}
+
+/** Segunda petición: con la prueba de contraseña en una cabecera (nunca en la URL). */
+async function fetchKeystoreWithAuth(name, auth) {
+  const code = encodeURIComponent($("login-code").value.trim());
+  let r;
+  try {
+    r = await fetch(`keystore?user=${encodeURIComponent(name)}&code=${code}`,
+      { cache: "no-store", headers: { "X-SC-Keystore-Auth": P.b64e(auth) } });
+  } catch { throw Object.assign(new Error("No se puede conectar con el servidor."), { code: "down" }); }
+  if (r.status === 403) return null; // contraseña incorrecta
+  if (r.status === 429) throw new Error("Demasiados intentos con esta cuenta. Espera 15 minutos.");
+  if (!r.ok) throw new Error("El servidor no ha podido responder. Inténtalo de nuevo.");
+  const data = await r.json();
+  return data.blob ? { ...data.blob, username: data.user } : null;
 }
 
 async function onLogin(ev) {
@@ -99,6 +115,8 @@ async function onLogin(ev) {
     if (reg && !NAME_RE.test(name)) throw new Error("El @usuario tiene 3-32 caracteres: letras, números, '_', '.' o '-'.");
     if (!reg && !NAME_RE.test(name) && !EMAIL_LIKE.test(name)) throw new Error("Escribe tu correo o tu @usuario.");
     if (reg) {
+      const weak = P.passwordProblem(pass, name);
+      if (weak) throw new Error(weak);
       if (pass !== $("login-pass2").value) throw new Error("Las contraseñas no coinciden.");
       if (store.get(idKey(name))) throw new Error(`Ya tienes la cuenta @${name} en este dispositivo. Inicia sesión.`);
       const blob = { ...P.saveIdentity(P.newIdentitySeed(), pass), username: name };
@@ -106,12 +124,20 @@ async function onLogin(ev) {
       // La cuenta solo se guarda si el servidor acepta el nombre (y el correo)
       await startApp(name, { mustConnect: true, email: $("login-email").value.trim() || null, blob, isNew: true });
     } else {
-      const blob = await findKeystore(name);
-      if (!blob) throw new Error(name.includes("@") ? "Correo o contraseña incorrectos." : "Usuario o contraseña incorrectos.");
+      const wrong = name.includes("@") ? "Correo o contraseña incorrectos." : "Usuario o contraseña incorrectos.";
+      let blob = await findKeystore(name);
+      if (!blob) throw new Error(wrong);
       $("login-btn").textContent = "Abriendo tu cuenta…";
       await new Promise((r) => setTimeout(r, 30));
-      try { identity = P.loadIdentity(blob, pass); }
-      catch { throw new Error(name.includes("@") ? "Correo o contraseña incorrectos." : "Usuario o contraseña incorrectos."); }
+      let key = null;
+      if (blob.auth_required) {
+        // El servidor solo da la copia a quien demuestra saber la contraseña
+        try { key = P.deriveKeystoreKey(blob.params, pass); } catch { throw new Error(wrong); }
+        blob = await fetchKeystoreWithAuth(name, P.keystoreAuth(key));
+        if (!blob) throw new Error(wrong);
+      }
+      try { identity = P.loadIdentity(blob, pass, key); }
+      catch { throw new Error(wrong); }
       store.set(idKey(blob.username || name), blob);
       await startApp(blob.username || name, { blob });
     }
@@ -259,7 +285,10 @@ function onConnected() {
   sendPrivacy();
   // Copia de la clave cifrada con tu contraseña: permite iniciar sesión desde otro dispositivo
   const blob = store.get(idKey(me));
-  if (blob) { try { client.send({ type: "keystore", blob }); } catch { /* se reintentará */ } }
+  if (blob) {
+    const auth = identity?.auth ? { auth: P.b64e(identity.auth) } : {};
+    try { client.send({ type: "keystore", blob, ...auth }); } catch { /* se reintentará */ }
+  }
   replaced = false;
   $("replaced-banner").hidden = true;
   setConn(true);
@@ -2833,10 +2862,9 @@ function showBackup(back = false) {
 function showAbout(back = false) {
   const items = [
     ["lock", "Cifrado de extremo a extremo", "Tus mensajes, fotos, notas de voz y perfil se cifran en tu dispositivo. El servidor solo ve datos ilegibles."],
-    ["users", "Grupos invisibles", "Cada mensaje de grupo se cifra por separado para cada miembro: el servidor no sabe que el grupo existe."],
+    ["users", "Grupos invisibles", "Cada mensaje de grupo se cifra una vez con claves que solo tienen los miembros (sender keys): el servidor no sabe que el grupo existe."],
     ["clock", "Mensajes en diferido", "Si alguien no está conectado, el servidor guarda el mensaje cifrado hasta que entra."],
     ["key", "Tu clave es tuya", "La copia que guarda el servidor va cifrada con tu contraseña. Si la olvidas, nadie puede recuperarla."],
-    ["alert", "Proyecto educativo", "No está auditado: no lo uses para información sensible real."],
   ];
   dialog("Cómo te protege SecureChat", items.map(([ic, title, desc]) => {
     const row = text("", "div", "about-row");

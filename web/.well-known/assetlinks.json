@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.github.zapermaster.securechat",
+      "sha256_cert_fingerprints": [
+        "F1:A4:8C:6A:96:04:9E:47:EC:95:F0:9C:CF:13:7D:0E:68:3E:06:1A:A3:F0:84:83:86:4F:54:D2:35:E5:2D:DE"
+      ]
+    }
+  }
+]

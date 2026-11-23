@@ -226,6 +226,43 @@ pytest -q                          # todo, incluidas las pruebas de la web
 node --test tests/web/*.test.mjs   # solo las del cliente web
 ```
 
+## Apps de Windows y Android
+
+### Windows (`desktop/`, Electron)
+
+Instalador `SecureChat-Setup-1.0.0.exe` y versión portable. Se abre maximizada, al cerrarla
+se queda en la bandeja (siguen llegando mensajes y llamadas) y puede iniciarse con Windows.
+
+- **El código va dentro del programa**: abre la dirección del servidor, pero las peticiones
+  de HTML/JS/CSS se sirven desde los ficheros empaquetados; a la red solo van los datos
+  (`config.json`, `/keystore` y el WebSocket cifrado). Un servidor comprometido no puede
+  colar código que robe claves.
+- Ventana con `sandbox`, `contextIsolation` y sin Node; no navega a otras webs (los enlaces
+  se abren en el navegador); solo micrófono, cámara y notificaciones, y solo para el servidor.
+- *Fusibles* de Electron: no arranca como Node, sin `NODE_OPTIONS` ni `--inspect`, cookies
+  cifradas y comprobación de integridad del paquete. En la versión instalada tampoco se
+  permite abrir un puerto de depuración remota.
+
+```bash
+cd desktop && npm install && npm run build      # -> desktop/dist/
+```
+
+### Android (`android/`, Trusted Web Activity)
+
+APK firmado (`SecureChat-1.0.0.apk`) y AAB para Google Play. Es una app de Android que usa
+el motor de Chrome: funcionan las llamadas y las notificaciones con la app cerrada. El
+dominio se verifica con *Digital Asset Links* (`web/.well-known/assetlinks.json`), así que
+ninguna otra app puede hacerse pasar por SecureChat. Solo pide el permiso de notificaciones.
+
+```bash
+cd android && npm install
+build-android.cmd        # compila con Gradle
+bash firmar.sh           # firma con la clave de privado/android -> android/salida/
+```
+
+La clave de firma **no está en git** (`privado/android/`). Sin ella no se pueden publicar
+actualizaciones de la app: guarda una copia en lugar seguro.
+
 ## Arquitectura
 
 ```
@@ -355,10 +392,14 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **Sesión recordada**: la semilla de tu identidad queda cifrada con una clave
   WebCrypto no exportable. Nadie puede copiarla a otro equipo, pero quien use tu
   navegador sí podría abrir la app. "Cerrar sesión" la borra del dispositivo.
-- **Copia de la clave en el servidor**: está cifrada con tu contraseña y el servidor
-  no puede abrirla, pero quien la descargue podría intentar adivinar la contraseña sin
-  conexión. Por eso la descarga está limitada (10 por minuto e IP), exige el código de
-  acceso si lo hay, y Argon2id hace cada intento lento. Usa una contraseña larga.
+- **Copia de la clave en el servidor**: está cifrada con tu contraseña (Argon2id) y el
+  servidor no puede abrirla. Además, **el servidor solo la entrega a quien demuestra
+  saber la contraseña**: el cliente saca de la misma derivación Argon2id una "prueba"
+  (con otra etiqueta) y el servidor guarda solo su hash. Así nadie puede llevársela para
+  probar contraseñas sin conexión: tiene que hacerlo contra el servidor, que bloquea la
+  cuenta 15 minutos tras 10 fallos. Quien controle el propio servidor sí podría intentarlo
+  sin conexión, por eso se exigen contraseñas de 10 caracteres o más que no sean de las
+  más comunes.
 - **Historial local**: va cifrado con una clave derivada de tu identidad. Protege
   frente a quien copie los ficheros del navegador sin tu sesión, no frente a malware.
 - **Correo**: el servidor lo ve al crear la cuenta para enviarte el código, pero solo
@@ -368,11 +409,11 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **Presencia**: el servidor sabe cuándo te conectas y se lo dice a quien ha hablado contigo.
 - **Código de acceso**: unos 40 bits, con un máximo de 10 intentos fallidos por IP y
   minuto. Es un filtro para que no entre cualquiera, no una medida de cifrado.
-- **Código servido por el propio servidor (web)**: en la versión web, el servidor
-  entrega el JavaScript que cifra. Un servidor malicioso podría servir código
-  modificado que filtre tus claves. Es el problema clásico del E2E en navegador;
-  la versión de terminal no lo tiene. Mitigaciones reales: app empaquetada y
-  firmada, o extensiones que verifican el código (como Meta Code Verify).
+- **Código servido por el propio servidor (web y Android)**: en la web (y en la app de
+  Android, que la abre con Chrome) el servidor entrega el JavaScript que cifra. Un
+  servidor malicioso podría servir código modificado que filtre tus claves. Es el
+  problema clásico del E2E en navegador. **La app de Windows no lo tiene**: lleva el
+  código dentro del programa y del servidor solo recibe datos. La de terminal tampoco.
 - **`localStorage`**: la clave va cifrada, pero cualquier script inyectado en el
   origen podría leerla mientras la sesión está abierta. La CSP estricta y el uso
   exclusivo de `textContent` reducen ese riesgo.
@@ -387,7 +428,12 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
   y con la sesión abierta puede leer los mensajes nuevos hasta que lo desvincules desde
   otro (*Mi perfil → Seguridad avanzada → Tus dispositivos*).
 - **Notificaciones**: el servicio de avisos del navegador (Google, Mozilla o Apple) sabe
-  cuándo te llega algo, aunque no el qué ni de quién.
+  cuándo te llega algo, aunque no el qué ni de quién. El servidor solo envía avisos a esos
+  servicios (no a cualquier dirección: evita usarlo para llegar a la red interna).
+- **Abusos**: los correos de verificación están limitados por IP y por dirección (nadie
+  puede usar el servidor para llenar de correos la bandeja de otro) y las búsquedas de
+  usuarios, por cuenta. La IP real se toma de la cabecera que añade el túnel, no de la que
+  puede inventar el cliente.
 
 ## Referencias
 

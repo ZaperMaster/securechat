@@ -194,7 +194,7 @@ def test_push_notification_only_for_real_messages(tmp_path):
         srv, url = await start(relay)
         kb = SigningKey.generate()
         bob = await client(url, "bob", kb, tmp_path)
-        sub = {"endpoint": "https://push.example.com/abc", "keys": {"p256dh": "x", "auth": "y"}}
+        sub = {"endpoint": "https://fcm.googleapis.com/fcm/send/abc", "keys": {"p256dh": "x", "auth": "y"}}
         await bob._send(type="push-sub", sub=sub)
         await bob._send(type="push-sub", sub={"endpoint": "http://inseguro", "keys": {}})  # se ignora
         await asyncio.sleep(0.1)

@@ -85,3 +85,26 @@ test("kdf separa claves por etiqueta", () => {
   assert.ok(P.equal(P.kdf(k, "sc-backup"), P.kdf(k, "sc-backup")));
   assert.ok(!P.equal(P.kdf(k, "sc-backup"), P.kdf(k, "sc-history")));
 });
+
+// ------------------------------------------------------- contraseñas y prueba para la copia
+
+test("las contraseñas débiles se rechazan al crear cuenta", () => {
+  for (const pw of ["corta", "1234567890", "qwertyuiop", "aaaaaaaaaaaa", "Contraseña2024", "barcelona12", "password!!", "juanito12345"]) {
+    assert.ok(P.passwordProblem(pw, "juanito"), `debería rechazar ${pw}`);
+  }
+  for (const pw of ["caballo bateria grapa", "Tr3s-Gatos-Azules", "mi perro come sushi"]) {
+    assert.equal(P.passwordProblem(pw, "juanito"), null, `debería aceptar ${pw}`);
+  }
+});
+
+test("la prueba de contraseña sale de la misma derivación y no descifra la copia", () => {
+  const blob = P.saveIdentity(P.newIdentitySeed(), "caballo bateria grapa", ...FAST);
+  const key = P.deriveKeystoreKey(blob, "caballo bateria grapa");
+  const id = P.loadIdentity(blob, "caballo bateria grapa", key); // sin repetir Argon2id
+  assert.ok(P.equal(id.auth, P.keystoreAuth(key)));
+  assert.ok(!P.equal(id.auth, key));
+  // Otra contraseña da otra prueba
+  assert.ok(!P.equal(P.keystoreAuth(P.deriveKeystoreKey(blob, "otra contraseña larga")), id.auth));
+  // Con la prueba en lugar de la clave no se abre la copia
+  assert.throws(() => P.loadIdentity(blob, "x", id.auth));
+});

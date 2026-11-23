@@ -33,12 +33,32 @@ CALL_TTL = 60          # un aviso de llamada que llega tarde ya no sirve
 MAX_SUBS = 5           # dispositivos con avisos por cuenta
 
 
+# Servicios de avisos de los navegadores. Solo a estos se les manda nada: si se aceptara
+# cualquier https://, un usuario podría hacer que el servidor enviara peticiones a
+# direcciones internas de su red (SSRF).
+PUSH_HOSTS = ("fcm.googleapis.com", "updates.push.services.mozilla.com", "web.push.apple.com")
+PUSH_SUFFIXES = (".push.services.mozilla.com", ".notify.windows.com", ".push.apple.com", ".googleapis.com")
+
+
+def valid_push_endpoint(endpoint) -> bool:
+    from urllib.parse import urlsplit
+    if not isinstance(endpoint, str) or len(endpoint) > 1000:
+        return False
+    try:
+        u = urlsplit(endpoint)
+        port = u.port
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower()
+    return (u.scheme == "https" and port in (None, 443) and not u.username and not u.password
+            and (host in PUSH_HOSTS or host.endswith(PUSH_SUFFIXES)))
+
+
 def valid_subscription(sub) -> bool:
     if not isinstance(sub, dict) or len(json.dumps(sub)) > 2000:
         return False
     keys = sub.get("keys") or {}
-    endpoint = sub.get("endpoint", "")
-    return (isinstance(endpoint, str) and endpoint.startswith("https://")
+    return (valid_push_endpoint(sub.get("endpoint"))
             and isinstance(keys.get("p256dh"), str) and isinstance(keys.get("auth"), str))
 
 
