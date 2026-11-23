@@ -37,7 +37,8 @@ jobs:
   # La app completa en un navegador de verdad: crear cuenta, solicitudes, bloquear,
   # recuperar la cuenta con el código y una llamada de voz entre dos personas.
   navegador:
-    runs-on: ubuntu-latest
+    # Playwright aún no instala Chromium en Ubuntu 26.04 (el ubuntu-latest actual)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
