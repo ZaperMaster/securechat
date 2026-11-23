@@ -47,22 +47,27 @@ function setAuthMode(mode) {
 
 function updateLoginMode() {
   const reg = authMode === "register";
+  const rec = authMode === "recover";
   const name = $("login-name").value.trim();
-  $("auth-title").textContent = reg ? "Crear cuenta" : "Iniciar sesión";
+  $("auth-title").textContent = reg ? "Crear cuenta" : rec ? "Recuperar la cuenta" : "Iniciar sesión";
   $("auth-sub").textContent = reg
     ? "Elige tu @usuario y una contraseña. Después podrás poner tu nombre visible y una foto."
-    : "Entra con tu correo (o tu @usuario) y tu contraseña desde cualquier dispositivo.";
+    : rec ? "Escribe tu @usuario (o correo), el código de recuperación que guardaste y una contraseña nueva."
+      : "Entra con tu correo (o tu @usuario) y tu contraseña desde cualquier dispositivo.";
   $("login-name-label").textContent = reg ? "Nombre de usuario" : "Correo o nombre de usuario";
   $("login-name").placeholder = reg ? "Alejandro_99" : "tu@correo.com o Alejandro_99";
   $("login-name").maxLength = reg ? 32 : 254;
-  $("login-pass2").required = reg;
+  $("login-pass-label").textContent = rec ? "Contraseña nueva" : "Contraseña";
+  $("login-pass2").required = reg || rec;
+  $("login-recovery").required = rec;
   $("login-email-wrap").hidden = !(reg && serverConfig.email_required);
   $("login-email").required = reg && serverConfig.email_required;
-  $("login-btn").textContent = reg ? "Crear cuenta" : "Entrar";
-  $("login-pass").autocomplete = reg ? "new-password" : "current-password";
+  $("login-btn").textContent = reg ? "Crear cuenta" : rec ? "Recuperar y entrar" : "Entrar";
+  $("login-pass").autocomplete = reg || rec ? "new-password" : "current-password";
   $("login-hint").textContent = name && (reg || !name.includes("@")) && !NAME_RE.test(name.replace(/^@/, ""))
     ? "El @usuario tiene 3-32 caracteres: letras, números, '_', '.' o '-'."
-    : reg ? "Mínimo 10 caracteres. Si la olvidas no se puede recuperar: nadie (ni el servidor) puede abrir tu cuenta sin ella." : "";
+    : reg ? "Mínimo 10 caracteres. Al crear la cuenta te daremos un código de recuperación por si la olvidas."
+      : rec ? "Sin el código no se puede recuperar: nadie (ni el servidor) puede abrir tu cuenta." : "";
   $("login-remember-wrap").hidden = !Vault.canRemember();
 }
 
@@ -85,6 +90,23 @@ async function findKeystore(name) {
   return { ...data.blob, username: data.user };
 }
 
+/** Copia de recuperación: solo se entrega con la prueba del código (en una cabecera). */
+async function fetchRecovery(name, auth) {
+  const code = encodeURIComponent($("login-code").value.trim());
+  let r;
+  try {
+    r = await fetch(`keystore?user=${encodeURIComponent(name)}&code=${code}&recovery=1`,
+      { cache: "no-store", headers: { "X-SC-Recovery-Auth": P.b64e(auth) } });
+  } catch { throw Object.assign(new Error("No se puede conectar con el servidor."), { code: "down" }); }
+  if (r.status === 403 && serverConfig.code_required && !(await r.clone().json().catch(() => ({}))).code) {
+    throw Object.assign(new Error("bad code"), { code: "bad_code" });
+  }
+  if (r.status === 403 || r.status === 404) return null;
+  if (r.status === 429) throw new Error("Demasiados intentos con esta cuenta. Espera 15 minutos.");
+  if (!r.ok) throw new Error("El servidor no ha podido responder. Inténtalo de nuevo.");
+  return r.json();
+}
+
 /** Segunda petición: con la prueba de contraseña en una cabecera (nunca en la URL). */
 async function fetchKeystoreWithAuth(name, auth) {
   const code = encodeURIComponent($("login-code").value.trim());
@@ -105,6 +127,7 @@ async function onLogin(ev) {
   const name = $("login-name").value.trim().replace(/^@/, "");
   const pass = $("login-pass").value;
   const reg = authMode === "register";
+  const rec = authMode === "recover";
   $("login-error").textContent = "";
   $("login-btn").disabled = true;
   $("login-btn").textContent = reg ? "Creando cuenta…" : "Comprobando…";
@@ -123,6 +146,26 @@ async function onLogin(ev) {
       identity = P.loadIdentity(blob, pass);
       // La cuenta solo se guarda si el servidor acepta el nombre (y el correo)
       await startApp(name, { mustConnect: true, email: $("login-email").value.trim() || null, blob, isNew: true });
+    } else if (rec) {
+      // Contraseña olvidada: el código abre la otra copia de la clave y se pone una contraseña nueva
+      const rc = $("login-recovery").value;
+      if (!P.normalizeRecoveryCode(rc)) throw new Error("El código de recuperación tiene 24 letras y números (XXXX-XXXX-…).");
+      const weak = P.passwordProblem(pass, name.includes("@") ? "" : name);
+      if (weak) throw new Error(weak);
+      if (pass !== $("login-pass2").value) throw new Error("Las contraseñas no coinciden.");
+      const found = await fetchRecovery(name, P.recoveryAuth(rc));
+      if (!found?.recovery) throw new Error("Usuario o código de recuperación incorrectos.");
+      $("login-btn").textContent = "Abriendo tu cuenta…";
+      await new Promise((r) => setTimeout(r, 30));
+      let seed;
+      try { seed = P.openRecovery(found.recovery, rc); } catch { throw new Error("Usuario o código de recuperación incorrectos."); }
+      const blob = { ...P.saveIdentity(seed, pass), username: found.user };
+      identity = P.loadIdentity(blob, pass);
+      store.set(idKey(found.user), blob); // la copia nueva sustituye a la de la contraseña olvidada
+      await startApp(found.user, { blob });
+      seclog("Has recuperado la cuenta con el código de recuperación y has puesto una contraseña nueva.");
+      $("login-recovery").value = "";
+      setAuthMode("login");
     } else {
       const wrong = name.includes("@") ? "Correo o contraseña incorrectos." : "Usuario o contraseña incorrectos.";
       let blob = await findKeystore(name);
@@ -211,6 +254,8 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   });
   const keys = new DeviceKeys(username, identity, loadDeviceData(username), (data) => saveDeviceData(me || username, data));
   client = new ChatClient(username, identity, contacts, onEvent, { keys, code: store.get("sc:code") });
+  // Mi clave de entrega (para el remitente oculto) solo va a quien he aceptado y no he bloqueado
+  client.shareAk = (peer) => !isBlocked(peer) && !isRequest(peer);
   me = username;
   if (mustConnect) {
     connecting = true;
@@ -239,7 +284,7 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   if (connected) onConnected();
   else reconnect();
   // Solo al crear la cuenta: al volver a entrar o desde otro dispositivo no se pregunta
-  if (isNew) showMyProfile({ welcome: true });
+  if (isNew) showRecoveryCode({ then: () => showMyProfile({ welcome: true }) });
   else if (blob) histLoginHere = true; // primer inicio de sesión aquí: al conectar, pediremos los chats
   if (isNew) seclog("Has creado tu cuenta en este dispositivo.");
   else if (blob) seclog("Has iniciado sesión en este dispositivo.");
@@ -459,6 +504,7 @@ function targetsOf(conv) {
 /** Añade un mensaje a la conversación, lo pinta y lo guarda cifrado. */
 function addMsg(conv, entry, { persist = true } = {}) {
   const m = { id: newId(), time: new Date(), ...entry };
+  if (entry.from === "me" && !isGroup(conv) && !meta(conv).accepted) setMeta(conv, { accepted: true, request: null });
   if (!entry.sys && meta(conv).hidden) setMeta(conv, { hidden: null });
   chat(conv).messages.push(m);
   if (conv === active) appendMessage(m);
@@ -553,10 +599,12 @@ function paintTick(el, status) {
 function onEvent(ev) {
   switch (ev.kind) {
     case "message": return onIncoming(ev);
-    case "receipt": return onReceipt(ev);
+    case "receipt": if (isBlocked(ev.peer) && !ev.content?.g) break; return onReceipt(ev);
+    case "blocked": renderContacts(); renderHeader(); break;
     case "sync": return onSync(ev);
     case "history": return onHistory(ev.peer, ev.content);
     case "profile":
+      if (isBlocked(ev.peer)) break;
       client.contacts.setProfile(ev.peer, ev.content);
       renderContacts();
       if (ev.peer === active) renderHeader();
@@ -665,6 +713,14 @@ function memberOf(gid, user) {
 async function onIncoming(ev) {
   const c = ev.content;
   const sender = ev.peer;
+  // Bloqueado: no se muestra nada suyo (en los grupos solo se aplican los cambios del grupo)
+  if (isBlocked(sender) && c.t !== "group" && c.t !== "group-leave") return;
+  // Alguien que no conoces: llega como solicitud (sin llamadas, ni "escribiendo", ni confirmaciones)
+  if (!c.g && c.t !== "join" && wouldBeRequest(sender)) {
+    if (!prefs().strangers || c.t === "call") return;
+    if (["typing", "receipt", "react", "edit", "delete", "vote", "timer"].includes(c.t)) return;
+    if (!meta(sender).request) setMeta(sender, { request: true });
+  }
   if (c.t === "call") return onCallSignal(sender, c, ev.queuedAt);
   if (c.t === "join") return onJoinRequest(sender, c);
   if (c.t === "group") return onGroupState(sender, c);
@@ -804,6 +860,7 @@ function stopTyping() {
 const pendingReceipts = new Map(); // `${peer}|${status}|${g}` -> Set(ids)
 function sendReceipt(peer, ids, status, g) {
   if (status === "read" && !prefs().readReceipts) return;
+  if (!g && (isRequest(peer) || isBlocked(peer))) return;
   const k = `${peer}|${status}|${g || ""}`;
   const first = !pendingReceipts.has(k);
   if (first) pendingReceipts.set(k, new Set());
@@ -2426,6 +2483,215 @@ function showEmailChange() {
   mail.focus();
 }
 
+// ------------------------------------------------------- bloqueos y solicitudes
+
+const isBlocked = (peer) => !!client?.isBlocked(peer);
+const sharesGroup = (peer) => [...groups.keys()].some((g) => memberOf(g, peer));
+
+/** Chat con alguien que no conoces y que aún no has aceptado. */
+function isRequest(conv) {
+  return !!conv && !isGroup(conv) && meta(conv).request === true && !sharesGroup(conv);
+}
+
+/** ¿Un mensaje de esta persona sería una solicitud? (no hay chat con ella ni grupo en común) */
+function wouldBeRequest(peer) {
+  if (meta(peer).request) return !sharesGroup(peer);
+  if (meta(peer).accepted || sharesGroup(peer)) return false;
+  return !chats.get(peer)?.messages.some((m) => !m.sys);
+}
+
+function acceptRequest(peer) {
+  setMeta(peer, { request: null, accepted: true });
+  markRead(peer);
+  renderHeader();
+  renderContacts();
+}
+
+async function setBlocked(peer, on) {
+  if (on && !confirm(`¿Bloquear a ${displayName(peer)} (@${peer})? No recibirás sus mensajes ni sus llamadas y no verá si estás conectado. No se le avisa.`)) return;
+  try { await client.setBlocked(peer, on); }
+  catch (e) { toast(`No se pudo ${on ? "bloquear" : "desbloquear"}: ${e.message}.`); return; }
+  if (on) setMeta(peer, { request: null });
+  seclog(on ? `Has bloqueado a @${peer}.` : `Has desbloqueado a @${peer}.`);
+  if (chats.has(peer)) addMsg(peer, { sys: on ? "Has bloqueado a este contacto." : "Has desbloqueado a este contacto." });
+  renderHeader();
+  renderContacts();
+}
+
+function renderRequestBar(blk, req) {
+  const bar = $("request-bar");
+  bar.hidden = !(blk || req);
+  if (bar.hidden) { bar.replaceChildren(); return; }
+  const peer = active;
+  const btn = (label, fn, cls = "chip") => { const b = text(label, "button", cls); b.type = "button"; b.onclick = fn; return b; };
+  const row = text("", "div", "request-actions");
+  if (blk) {
+    bar.replaceChildren(text(`Has bloqueado a ${displayName(peer)}. No recibirás sus mensajes ni sus llamadas.`, "p"), row);
+    row.append(btn("Desbloquear", () => setBlocked(peer, false), "primary"));
+  } else {
+    bar.replaceChildren(text(`${displayName(peer)} (@${peer}) no está entre tus contactos y quiere escribirte. No sabrá si has leído sus mensajes hasta que aceptes.`, "p"), row);
+    row.append(btn("Bloquear", () => setBlocked(peer, true), "chip danger"), btn("Denunciar", () => showReport(peer), "chip"),
+      btn("Eliminar", () => deleteChat(peer), "chip"), btn("Aceptar", () => acceptRequest(peer), "primary"));
+  }
+}
+
+function blockedList() {
+  const list = text("", "ul", "blocked-list");
+  const names = [...(client?.blocked?.values() || [])].sort((a, b) => a.localeCompare(b));
+  if (!names.length) return text("No has bloqueado a nadie. Puedes bloquear desde el menú de un chat o el perfil de alguien.", "p", "hint");
+  for (const name of names) {
+    const li = text("", "li");
+    const b = text("Desbloquear", "button", "chip");
+    b.type = "button";
+    b.onclick = async () => { await setBlocked(name, false); li.remove(); };
+    li.append(text(`${displayName(name)} · @${name}`, "span"), b);
+    list.append(li);
+  }
+  return list;
+}
+
+const REPORT_REASONS = [["spam", "Spam o publicidad"], ["acoso", "Acoso o amenazas"], ["suplantacion", "Se hace pasar por otra persona"],
+  ["ilegal", "Contenido ilegal"], ["otro", "Otro motivo"]];
+
+function showReport(peer) {
+  const sel = document.createElement("select");
+  for (const [v, label] of REPORT_REASONS) { const o = document.createElement("option"); o.value = v; o.textContent = label; sel.append(o); }
+  const note = document.createElement("textarea");
+  note.rows = 3;
+  note.maxLength = 1000;
+  note.placeholder = "Cuéntalo brevemente (opcional)";
+  const recent = (chats.get(peer)?.messages || []).filter((m) => m.from === "them" && m.content?.t === "text" && !m.deleted).slice(-5);
+  const check = (label, on) => {
+    const l = text("", "label", "check");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = on;
+    l.append(cb, text(label, "span"));
+    return [l, cb];
+  };
+  const [inclWrap, incl] = check(`Adjuntar sus últimos ${recent.length} mensajes de texto`, false);
+  inclWrap.hidden = !recent.length;
+  const [blockWrap, blockToo] = check("Bloquear también", !isBlocked(peer));
+  blockWrap.hidden = isBlocked(peer);
+  const err = text("", "p", "error");
+  const form = text("", "div", "report-form");
+  form.append(field("Motivo", sel), field("Detalles", note), inclWrap,
+    text("Solo si lo marcas: esos mensajes se envían al servidor sin cifrar para que quien lo gestiona pueda revisarlos. Ningún otro mensaje sale de tu dispositivo.", "p", "hint"),
+    blockWrap, err);
+  dialog(`Denunciar a @${peer}`, [form], [["Cancelar"], ["Enviar denuncia", async () => {
+    setTimeout(() => $("dialog").showModal());
+    err.textContent = "";
+    if (!connected) { err.textContent = "Necesitas conexión con el servidor."; return; }
+    const msgs = incl.checked ? recent.map((m) => ({ at: Math.floor(m.time.getTime() / 1000), text: m.content.body.slice(0, 2000) })) : [];
+    try { await client.report(peer, sel.value, note.value.trim(), msgs); }
+    catch (e) { err.textContent = `No se pudo enviar: ${e.message}.`; return; }
+    $("dialog").close();
+    seclog(`Has denunciado a @${peer}.`);
+    toast("Denuncia enviada. Gracias por avisar.");
+    if (blockToo.checked && !isBlocked(peer)) {
+      try { await client.setBlocked(peer, true); setMeta(peer, { request: null }); seclog(`Has bloqueado a @${peer}.`); }
+      catch (e) { toast(`No se pudo bloquear: ${e.message}.`); }
+      renderHeader();
+      renderContacts();
+    }
+  }]]);
+  $("dlg-actions").lastChild.className = "danger";
+}
+
+// ------------------------------------------------------------ código de recuperación
+
+const recoveryKey = () => `sc:recovery:${me.toLowerCase()}`;
+
+/** Crea un código nuevo (el anterior deja de valer) y sube su copia cifrada al servidor. */
+async function createRecoveryCode() {
+  const code = P.newRecoveryCode();
+  await client.request({ type: "recovery", blob: P.recoveryBlob(identity.seed, code), auth: P.b64e(P.recoveryAuth(code)) });
+  store.set(recoveryKey(), { at: Date.now() });
+  seclog("Has creado un código de recuperación nuevo (el anterior ya no vale).");
+  return code;
+}
+
+/** Enseña el código una sola vez, con botones para copiarlo o descargarlo. */
+async function showRecoveryCode({ then = null, back = false } = {}) {
+  let code;
+  try { code = await createRecoveryCode(); }
+  catch (e) {
+    dialog("Código de recuperación", [text(`No se pudo crear ahora (${e.message}). Puedes hacerlo más tarde en Opciones → Código de recuperación.`, "p")],
+      [["Cerrar", then ? () => setTimeout(then) : undefined]]);
+    return;
+  }
+  const box = text(code, "div", "recovery-code");
+  const copy = withIcon("copy", "Copiar", "button", "chip");
+  copy.type = "button";
+  copy.onclick = async () => {
+    try { await navigator.clipboard.writeText(code); toast("Código copiado."); } catch { toast("No se pudo copiar: cópialo a mano."); }
+  };
+  const save = withIcon("download", "Descargar", "button", "chip");
+  save.type = "button";
+  save.onclick = () => {
+    const blob = new Blob([`SecureChat - código de recuperación de @${me}\r\n\r\n${code}\r\n\r\n`
+      + "Sirve para entrar en tu cuenta si olvidas la contraseña. Guárdalo en un sitio seguro y no se lo des a nadie.\r\n"], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `securechat-recuperacion-${me}.txt`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  const btns = text("", "div", "recovery-btns");
+  btns.append(copy, save);
+  const okWrap = text("", "label", "check");
+  const ok = document.createElement("input");
+  ok.type = "checkbox";
+  okWrap.append(ok, text("Lo he guardado en un sitio seguro", "span"));
+  const err = text("", "p", "error");
+  dialog("Tu código de recuperación", [
+    text("Si olvidas la contraseña, con este código podrás entrar en tu cuenta y poner otra. Apúntalo en papel o en tu gestor de contraseñas.", "p"),
+    box, btns,
+    text("Quien tenga el código puede entrar en tu cuenta: no se lo des a nadie. Solo se muestra ahora; si lo pierdes, crea otro en Opciones.", "p", "hint"),
+    okWrap, err,
+  ], [[back ? "Atrás" : "Más tarde", () => setTimeout(back ? showRecoveryOptions : then || (() => {}))], ["Listo", () => {
+    if (!ok.checked) { setTimeout(() => $("dialog").showModal()); err.textContent = "Marca la casilla cuando lo hayas guardado."; return; }
+    if (then) setTimeout(then);
+  }]]);
+}
+
+function showRecoveryOptions() {
+  const info = store.get(recoveryKey());
+  const pass = input("", { max: 200 });
+  pass.type = "password";
+  pass.autocomplete = "current-password";
+  const err = text("", "p", "error");
+  const checkPass = () => {
+    try { P.loadIdentity(store.get(idKey(me)), pass.value); return true; }
+    catch { setTimeout(() => $("dialog").showModal()); err.textContent = "La contraseña no es correcta."; return false; }
+  };
+  const status = info
+    ? `Tienes un código creado el ${new Date(info.at).toLocaleDateString()}. Si lo has perdido o crees que alguien lo ha visto, crea otro: el anterior dejará de valer.`
+    : "Desde este dispositivo no consta que tengas un código. Créalo ahora: sin él, si olvidas la contraseña perderías la cuenta.";
+  dialog("Código de recuperación", [
+    text("Es la única forma de recuperar la cuenta si olvidas la contraseña: ni el servidor puede abrirla sin ella o sin el código.", "p"),
+    text(status, "p", "hint"),
+    field("Tu contraseña (para confirmar)", pass),
+    err,
+  ], [["Atrás", () => setTimeout(showOptions)], ["Quitar código", async () => {
+    if (!checkPass()) return;
+    if (!connected) { setTimeout(() => $("dialog").showModal()); err.textContent = "Necesitas conexión con el servidor."; return; }
+    try {
+      await client.request({ type: "recovery-delete" });
+      store.del(recoveryKey());
+      seclog("Has quitado el código de recuperación.");
+      toast("Código quitado. Si olvidas la contraseña, ya no podrás recuperar la cuenta.");
+    } catch (e) { toast(`No se pudo quitar: ${e.message}.`); }
+  }], [info ? "Crear código nuevo" : "Crear código", () => {
+    if (!checkPass()) return;
+    if (!connected) { setTimeout(() => $("dialog").showModal()); err.textContent = "Necesitas conexión con el servidor."; return; }
+    setTimeout(() => showRecoveryCode({ back: true }));
+  }]]);
+  if (!info) $("dlg-actions").children[1].hidden = true;
+  $("dlg-actions").children[1].className = "ghost danger";
+  pass.focus();
+}
+
 // ------------------------------------------------------------ borrar la cuenta
 
 /** Borra todo lo de esta cuenta que hay en este dispositivo (claves, historial, ajustes). */
@@ -2536,7 +2802,7 @@ function showMyProfile({ welcome = false } = {}) {
   const save = () => {
     profile = { name: nameIn.value.trim().slice(0, 64) || me, bio: bioIn.value.trim().slice(0, 140), avatar };
     if (!store.set(`sc:profile:${me.toLowerCase()}`, profile)) profile.avatar = null;
-    client.setProfile(profile, client.contacts.all().map((c) => c.name));
+    client.setProfile(profile, client.contacts.all().map((c) => c.name).filter((n) => !isBlocked(n) && !isRequest(n)));
     renderMe();
   };
   if (welcome) {
@@ -2561,7 +2827,7 @@ function showMyProfile({ welcome = false } = {}) {
   ], [["Cancelar"], ["Guardar", () => {
     profile = { name: nameIn.value.trim().slice(0, 64) || me, bio: bioIn.value.trim().slice(0, 140), avatar };
     if (!store.set(`sc:profile:${me.toLowerCase()}`, profile)) profile.avatar = null;
-    client.setProfile(profile, client.contacts.all().map((c) => c.name));
+    client.setProfile(profile, client.contacts.all().map((c) => c.name).filter((n) => !isBlocked(n) && !isRequest(n)));
     renderMe();
   }]]);
 }
@@ -2890,7 +3156,9 @@ function showAbout(back = false) {
     ["lock", "Cifrado de extremo a extremo", "Tus mensajes, fotos, notas de voz y perfil se cifran en tu dispositivo. El servidor solo ve datos ilegibles."],
     ["users", "Grupos invisibles", "Cada mensaje de grupo se cifra una vez con claves que solo tienen los miembros (sender keys): el servidor no sabe que el grupo existe."],
     ["clock", "Mensajes en diferido", "Si alguien no está conectado, el servidor guarda el mensaje cifrado hasta que entra."],
-    ["key", "Tu clave es tuya", "La copia que guarda el servidor va cifrada con tu contraseña. Si la olvidas, nadie puede recuperarla."],
+    ["shield", "Remitente oculto", "Cuando escribes a un contacto, el servidor no sabe que el mensaje es tuyo: solo a quién va."],
+    ["lock", "Protección poscuántica", "Las conversaciones nuevas mezclan ML-KEM-768 con X25519 (PQXDH): ni un ordenador cuántico futuro podría descifrar lo que alguien grabe hoy."],
+    ["key", "Tu clave es tuya", "La copia que guarda el servidor va cifrada con tu contraseña (y otra con tu código de recuperación). Sin uno de los dos, nadie puede abrirla."],
   ];
   dialog("Cómo te protege SecureChat", items.map(([ic, title, desc]) => {
     const row = text("", "div", "about-row");
@@ -3031,13 +3299,24 @@ function showPeerProfile(peer) {
     d.append(text(`Seguridad avanzada${c.verified ? " · verificado" : ""}`, "summary"),
       text("El servidor solo reenvía mensajes, pero si alguien lo controlara podría intentar hacerse pasar por este contacto. "
         + "Para descartarlo del todo, comparad estos números en persona o por otra app: si coinciden, nadie está en medio.", "p", "hint"),
-      grid, toggle);
+      grid, toggle,
+      text(client.keys.postQuantum(peer)
+        ? "Protección poscuántica: activada (PQXDH con ML-KEM-768). Aunque alguien grabe hoy vuestros mensajes, un ordenador cuántico futuro no podría descifrarlos."
+        : "Protección poscuántica: no (su app no la admite o aún no habéis empezado una sesión nueva).", "p", "hint"));
     body.push(d);
   }
   const clear = text("Vaciar este chat", "button", "chip danger");
   clear.type = "button";
   clear.onclick = async () => { if (await clearChat(peer)) $("dialog").close(); };
-  body.push(clear);
+  const blk = text(isBlocked(peer) ? "Desbloquear" : "Bloquear", "button", isBlocked(peer) ? "chip" : "chip danger");
+  blk.type = "button";
+  blk.onclick = () => { $("dialog").close(); setBlocked(peer, !isBlocked(peer)); };
+  const rep = text("Denunciar", "button", "chip danger");
+  rep.type = "button";
+  rep.onclick = () => showReport(peer);
+  const acts = text("", "div", "profile-actions");
+  acts.append(clear, blk, rep);
+  body.push(acts);
   dialog("Perfil", body, [["Cerrar", () => { if (nickIn) client.contacts.setNick(peer, nickIn.value); }]]);
 }
 
@@ -3082,6 +3361,7 @@ const OPTIONS = [
   ["star", "Mensajes destacados", "Los mensajes que has marcado con estrella", () => showStarred()],
   ["key", "Registro de seguridad", "Dispositivos nuevos, cambios de clave…", () => showSecLog()],
   ["download", "Copia de seguridad", "Guarda o restaura tu historial cifrado", () => showBackup(true)],
+  ["key", "Código de recuperación", "Por si olvidas la contraseña", () => showRecoveryOptions()],
   ["shield", "Cómo te protege SecureChat", "Qué ve y qué no ve el servidor", () => showAbout(true)],
   ["trash", "Borrar mi cuenta", "Elimina tu cuenta y libera tu @usuario", () => showDeleteAccount(true)],
 ];
@@ -3214,6 +3494,9 @@ function showSettings(section = "appearance", back = true) {
       toggle("typing", "Mostrar que estoy escribiendo", "Si lo quitas, los demás no verán «escribiendo…» cuando escribes."),
       toggle("readReceipts", "Mostrar que he leído (visto)", "Si lo quitas, los demás no verán el doble check azul cuando leas sus mensajes."),
       toggle("lastSeen", "Mostrar mi última conexión", "Si lo quitas, nadie verá a qué hora te conectaste por última vez (y tú tampoco la de los demás)."),
+      toggle("strangers", "Recibir mensajes de desconocidos", "Llegan como solicitud: tú decides si aceptas, bloqueas o borras, y no sabrán si los has leído. Si lo quitas, los mensajes y llamadas de quien no conoces se descartan sin avisarte."),
+      text("Usuarios bloqueados", "h3", "settings-h"),
+      blockedList(),
       toggle("linkPreviews", "Vista previa de los enlaces", "Al enviar un enlace, el servidor descarga el título y la imagen de la página para enseñarlos en el chat. El servidor verá esa dirección (no a quién se la mandas). Quien lo recibe no descarga nada."),
       text("Mensajes temporales por defecto", "h3", "settings-h"),
       defaultTimerPicker(),
@@ -3233,7 +3516,21 @@ function showSettings(section = "appearance", back = true) {
     text("Fondo de los chats", "h3", "settings-h"), walls,
     text("Tamaño de letra", "h3", "settings-h"), seg([[13, "Pequeña"], [15, "Normal"], [17, "Grande"], [19, "Enorme"]], "font"),
     text("Forma de las burbujas", "h3", "settings-h"), seg([[22, "Redondas"], [14, "Suaves"], [4, "Rectas"]], "radius"),
+    text("Idioma · Language", "h3", "settings-h"), langPicker(),
   ], subActions(back));
+}
+
+/** Idioma de la interfaz (se aplica recargando la página). */
+function langPicker() {
+  const g = text("", "div", "segmented no-i18n");
+  for (const [value, label] of [["auto", "Automático (según el dispositivo)"], ["es", "Español"], ["en", "English"]]) {
+    const b = text(value === "auto" ? (window.t || String)(label) : label, "button");
+    b.type = "button";
+    b.setAttribute("aria-pressed", String((window.SC_LANG_PREF || "auto") === value));
+    b.onclick = () => { if ((window.SC_LANG_PREF || "auto") !== value) window.SC_SET_LANG(value); };
+    g.append(b);
+  }
+  return g;
 }
 
 // -------------------------------------------------------------- renderizado
@@ -3327,6 +3624,8 @@ function renderContacts() {
       const who = isGroup(conv) && last ? `${last.from === "me" ? "Tú" : displayName(last.sender)}: ` : "";
       prev.append(last ? who + previewOf(last.content) : isGroup(conv) ? `${groups.get(gidOf(conv))?.members.length || 0} miembros` : `@${conv}`);
     }
+    if (!isGroup(conv) && isBlocked(conv)) prev.prepend(text("Bloqueado", "span", "req-tag blocked"), " ");
+    else if (isRequest(conv)) prev.prepend(text("Solicitud", "span", "req-tag"), " ");
     const nameEl = text("", "strong", "contact-name");
     if (isGroup(conv)) nameEl.append(icon("users", "group-ico"));
     nameEl.append(convName(conv));
@@ -3441,6 +3740,10 @@ function openChatMenu(conv, x, y) {
   item("clock", `Mensajes temporales${mt.timer ? ` · ${TIMER_LABEL[mt.timer]}` : ""}`, () => showTimer(conv));
   item("star", "Mensajes destacados", () => showStarred(conv));
   item("image", "Fotos, documentos y enlaces", () => showGallery(conv));
+  if (!isGroup(conv)) {
+    item("ban", isBlocked(conv) ? "Desbloquear" : "Bloquear", () => setBlocked(conv, !isBlocked(conv)), isBlocked(conv) ? "" : "danger");
+    item("alert", "Denunciar", () => showReport(conv), "danger");
+  }
   item("eraser", "Vaciar chat", () => clearChat(conv), "danger");
   item("trash", "Borrar chat", () => deleteChat(conv), "danger");
   placeMenu(menu, x, y);
@@ -3631,6 +3934,10 @@ function renderHeader() {
     : "Solo los administradores pueden escribir en este grupo";
   $("chat").classList.toggle("is-empty", !has);
   $("empty-chat").hidden = has;
+  const blk = has && !isGroup(active) && isBlocked(active);
+  const req = has && !blk && isRequest(active);
+  $("chat").classList.toggle("locked-chat", blk || req);
+  renderRequestBar(blk, req);
 }
 
 let stickBottom = true; // ¿el chat abierto está pegado al último mensaje?
@@ -4506,6 +4813,8 @@ async function main() {
   $("login-form").addEventListener("submit", onLogin);
   $("to-register").onclick = () => setAuthMode("register");
   $("to-login").onclick = () => setAuthMode("login");
+  $("to-login2").onclick = () => setAuthMode("login");
+  $("to-recover").onclick = () => setAuthMode("recover");
   $("composer").addEventListener("submit", onSend);
   $("text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !prefs().enterSends && window.matchMedia("(pointer: fine)").matches) {

@@ -160,3 +160,48 @@ export function signAuth(identity, nonce, user) {
 }
 
 // Las sesiones (X3DH + Double Ratchet, por dispositivo) están en ratchet.js.
+
+// ------------------------------------------------- código de recuperación
+
+// 24 caracteres de un alfabeto sin ambiguos (0/O, 1/I): 120 bits al azar. Con tanta
+// entropía no hace falta Argon2id: nadie puede probarlos todos, ni el propio servidor.
+const RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+export function newRecoveryCode() {
+  const bytes = S.randombytes_buf(24);
+  const raw = [...bytes].map((b) => RECOVERY_ALPHABET[b & 31]).join(""); // 256 % 32 == 0: sin sesgo
+  return raw.match(/.{4}/g).join("-");
+}
+
+export function normalizeRecoveryCode(code) {
+  const raw = String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return raw.length === 24 && [...raw].every((ch) => RECOVERY_ALPHABET.includes(ch)) ? raw : null;
+}
+
+function recoveryKey(code) {
+  const norm = normalizeRecoveryCode(code);
+  if (!norm) throw new CryptoError("código de recuperación inválido");
+  return S.crypto_generichash(32, encodeFields(utf8("securechat-recovery-v1"), utf8(norm)), null);
+}
+
+/** Prueba para que el servidor entregue la copia de recuperación (guarda solo su hash). */
+export const recoveryAuth = (code) => kdf(recoveryKey(code), "sc-recovery-auth");
+
+/** Copia de la clave cifrada con el código de recuperación (otra distinta de la de la contraseña). */
+export function recoveryBlob(seed, code) {
+  const key = kdf(recoveryKey(code), "sc-recovery-box");
+  const nonce = S.randombytes_buf(24);
+  const kp = S.crypto_sign_seed_keypair(seed);
+  return { version: 1, public_key: b64e(kp.publicKey), ciphertext: b64e(concat(nonce, S.crypto_secretbox_easy(seed, nonce, key))) };
+}
+
+/** Abre la copia de recuperación. Devuelve la semilla de la identidad. */
+export function openRecovery(blob, code) {
+  const key = kdf(recoveryKey(code), "sc-recovery-box");
+  const raw = b64d(blob.ciphertext);
+  let seed;
+  try { seed = S.crypto_secretbox_open_easy(raw.subarray(24), raw.subarray(0, 24), key); }
+  catch { throw new CryptoError("código de recuperación incorrecto"); }
+  if (!equal(S.crypto_sign_seed_keypair(seed).publicKey, b64d(blob.public_key))) throw new CryptoError("la copia no coincide");
+  return seed;
+}

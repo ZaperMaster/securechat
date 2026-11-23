@@ -1,7 +1,7 @@
 // Lógica de red del cliente web (equivalente a securechat/client.py).
 // No toca el DOM: la interfaz recibe eventos por `onEvent`.
 
-import { b64d, b64e, CryptoError, equal, IdentityMismatch, signAuth } from "./protocol.js";
+import { b64d, b64e, CryptoError, equal, IdentityMismatch, kdf, signAuth, utf8 } from "./protocol.js";
 import { decryptFrom, DeviceKeys, encryptFor, initiate } from "./ratchet.js";
 import { distribution, needsRotation, newSenderKey, skDecrypt, skEncrypt, validDistribution } from "./senderkeys.js";
 
@@ -127,6 +127,7 @@ export function decodeContent(plaintext) {
         admins: inGroup(c.admins), muted: inGroup(c.muted), v: Number.isFinite(c.v) ? c.v : 0, avatar, rules };
     }
     case "group-leave": return id(c.g) ? { t: "group-leave", g: c.g } : { t: "ignore" };
+    case "ak": return { t: "ignore" }; // solo trae la clave de entrega (se lee antes, en onContent)
     // Clave de grupo (sender key) de quien escribe: va por el canal 1 a 1
     case "skey": return id(c.g) && validDistribution(c) ? { t: "skey", g: c.g, kid: c.kid, ck: c.ck, n: c.n, spk: c.spk } : { t: "ignore" };
     default: return out({ t: "unsupported" });
@@ -139,6 +140,7 @@ export class Contacts {
     this.items = new Map(Object.entries(data).map(([n, c]) => [n, {
       name: n, key: b64d(c.identity_key), verified: c.verified,
       displayName: c.display_name || "", avatar: c.avatar || null, bio: c.bio || "", nick: c.nick || "",
+      ak: typeof c.ak === "string" ? c.ak : null,
     }]));
     this.onChange = onChange;
   }
@@ -163,18 +165,28 @@ export class Contacts {
     this.save();
   }
   forget(name) { this.items.delete(name); this.save(); }
+  /** Clave de entrega que me dio este contacto (para escribirle sin identificarme ante el servidor). */
+  setAk(name, ak) {
+    const c = this.items.get(name);
+    if (!c || c.ak === ak) return;
+    c.ak = ak;
+    this.save();
+  }
   all() { return [...this.items.values()].sort((a, b) => a.name.localeCompare(b.name)); }
   toJSON() {
     return Object.fromEntries([...this.items.values()].map((c) => [c.name, {
       identity_key: b64e(c.key), verified: c.verified, display_name: c.displayName, avatar: c.avatar,
-      bio: c.bio || "", nick: c.nick || "",
+      bio: c.bio || "", nick: c.nick || "", ...(c.ak ? { ak: c.ak } : {}),
     }]));
   }
   save() { this.onChange(this.toJSON()); }
 }
 
 const DEVICE_CACHE_MS = 60_000;
-const SILENT_TYPES = new Set(["receipt", "profile", "typing", "group-leave", "vote", "join", "skey"]);
+const SILENT_TYPES = new Set(["receipt", "profile", "typing", "group-leave", "vote", "join", "skey", "ak"]);
+const AK_RE = /^[A-Za-z0-9+/]{22}==$/;
+const u32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n); return b; };
+const sodium = () => globalThis.sodium;
 
 /**
  * Protocolo v2 (ver securechat/ratchet.py): cada mensaje se cifra con Double Ratchet
@@ -197,6 +209,12 @@ export class ChatClient {
     this.ws = null;
     this.profile = null;
     this.pendingSk = [];             // mensajes de grupo que llegaron antes que su clave
+    this.anonReady = null;           // conexión anónima para el remitente oculto (sealed sender)
+    this.anonReqs = new Map();
+    this.akEpoch = null;             // versión de mi clave de entrega (cambia al bloquear a alguien)
+    this.myAk = null;
+    this.shareAk = (peer) => !this.isBlocked(peer); // la app lo afina (p. ej. no a solicitudes sin aceptar)
+    this.blocked = new Map();        // usuarios bloqueados (en minúsculas; la lista la guarda el servidor)
   }
 
   get device() { return this.keys.device; }
@@ -206,6 +224,7 @@ export class ChatClient {
    * se llama a `onVerify(destino, error)`, que debe devolver el código recibido.
    */
   connect(url, { email = null, onVerify = null } = {}) {
+    this.url = url;
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       this.ws = ws;
@@ -241,6 +260,11 @@ export class ChatClient {
           this.myDevices = msg.devices || [];
           this.hasEmail = !!msg.has_email;
           this.emailAvailable = !!msg.email_available;
+          this.blocked = new Map((msg.blocked || []).map((u) => [u.toLowerCase(), u]));
+          this.emit("blocked");
+          // Clave de entrega: se deriva de la identidad, así que todos mis dispositivos la conocen
+          if (Number.isInteger(msg.uak_epoch)) this.setAkEpoch(msg.uak_epoch);
+          else this.publishAk(1).catch(() => {});
           this.deviceCache.clear();
           this.profileSent.clear();
           this.request(this.keys.uploadMessage(msg.opks || 0)).catch(() => {});
@@ -253,7 +277,95 @@ export class ChatClient {
     });
   }
 
-  close() { this.ws?.close(); }
+  close() {
+    this.ws?.close();
+    this.anonReady?.then((ws) => ws.close()).catch(() => {});
+  }
+
+  // ------------------------------------------ remitente oculto (sealed sender)
+
+  akFor(epoch) { return b64e(kdf(this.identity.seed, "sc-uak", u32(epoch), 16)); }
+  setAkEpoch(epoch) { this.akEpoch = epoch; this.myAk = this.akFor(epoch); }
+
+  /** Publica en el servidor la clave de entrega `epoch` (la anterior deja de valer). */
+  async publishAk(epoch) {
+    await this.request({ type: "set-uak", uak: this.akFor(epoch), epoch });
+    this.setAkEpoch(epoch);
+  }
+
+  /**
+   * Cambia la clave de entrega (al bloquear a alguien: la suya deja de valer) y se la manda
+   * a mis contactos, que la necesitan para seguir escribiéndome sin identificarse.
+   */
+  async rotateAk() {
+    await this.publishAk((this.akEpoch || 0) + 1);
+    for (const c of this.contacts.all()) {
+      if (this.shareAk(c.name)) this.sendContent(c.name, { t: "ak" }, { sync: false }).catch(() => {});
+    }
+  }
+
+  /** Conexión anónima: no se identifica, solo sirve para entregar sobres sellados. */
+  anonSocket() {
+    if (this.anonReady) return this.anonReady;
+    const ready = new Promise((resolve, reject) => {
+      if (!this.url) return reject(new ClientError("no conectado", "down"));
+      const ws = new WebSocket(this.url);
+      let open = false;
+      ws.onopen = () => ws.send(JSON.stringify({ type: "anon-hello", code: this.code }));
+      ws.onerror = () => {};
+      ws.onclose = () => {
+        if (this.anonReady === ready) this.anonReady = null;
+        if (!open) reject(new ClientError("sin conexión anónima", "down"));
+        for (const r of this.anonReqs.values()) r.reject(new ClientError("conexión cerrada", "down"));
+        this.anonReqs.clear();
+      };
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (!open) {
+          if (msg.type === "anon-ready") { open = true; resolve(ws); }
+          else { reject(new ClientError(msg.message || "sin conexión anónima", msg.code)); ws.close(); }
+          return;
+        }
+        const req = msg.id != null ? this.anonReqs.get(msg.id) : null;
+        if (req) msg.type === "error" ? req.reject(new ClientError(msg.message || "error del servidor", msg.code)) : req.resolve(msg);
+      };
+    });
+    this.anonReady = ready;
+    ready.catch(() => { if (this.anonReady === ready) this.anonReady = null; });
+    return ready;
+  }
+
+  async anonRequest(msg, timeout = 15000) {
+    const ws = await this.anonSocket();
+    const id = ++this.nextId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.anonReqs.delete(id); reject(new ClientError("el servidor no responde")); }, timeout);
+      this.anonReqs.set(id, {
+        resolve: (v) => { clearTimeout(timer); this.anonReqs.delete(id); resolve(v); },
+        reject: (e) => { clearTimeout(timer); this.anonReqs.delete(id); reject(e); },
+      });
+      try { ws.send(JSON.stringify({ ...msg, id })); }
+      catch { this.anonReqs.get(id)?.reject(new ClientError("conexión cerrada", "down")); }
+    });
+  }
+
+  /** Abre un sobre sellado: dentro va quién lo manda y el mensaje cifrado con el ratchet. */
+  onSealed(payload, queuedAt) {
+    let inner;
+    try {
+      const S = sodium();
+      const box = S.crypto_box_seal_open(b64d(payload.box), S.crypto_sign_ed25519_pk_to_curve25519(this.identity.publicKey),
+        S.crypto_sign_ed25519_sk_to_curve25519(this.identity.privateKey));
+      inner = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(box));
+    } catch { return; } // no es para mí o está roto: se descarta sin más
+    const from = inner?.from;
+    if (typeof from !== "string" || !NAME_OK.test(from) || inner.payload?.kind !== "dr" || same(from, this.name)) return;
+    // Solo mis contactos tienen mi clave de entrega. Además el ratchet comprueba que de verdad es
+    // quien dice ser: sin sus claves de sesión (o su identidad fijada) no se puede descifrar.
+    if (!this.contacts.pinned(from)) return;
+    this.onDeliver(from, inner.payload, queuedAt, true);
+  }
 
   /** Petición con id; resuelve con la respuesta del servidor. */
   request(msg, timeout = 15000) {
@@ -321,7 +433,7 @@ export class ChatClient {
   async _send(name, content, { ephemeral, sync, urgent = false }) {
     const peer = await this.resolve(name);
     if (peer.toLowerCase() === this.name.toLowerCase()) throw new ClientError("no puedes escribirte a ti mismo");
-    const plaintext = JSON.stringify(content);
+    const plaintext = JSON.stringify(this.withAk(peer, content));
     const silent = SILENT_TYPES.has(content.t);
     const statuses = await this.sendToUser(peer, plaintext, { silent, ephemeral, urgent });
     if (sync && !ephemeral && content.t !== "receipt" && this.myDevices.length) {
@@ -333,6 +445,11 @@ export class ChatClient {
       this.sendToUser(peer, JSON.stringify({ t: "profile", ...this.profile }), { silent: true, ephemeral: false }).catch(() => this.profileSent.delete(peer));
     }
     return { peer, status: statuses.includes("delivered") ? "delivered" : "queued" };
+  }
+
+  /** Añade mi clave de entrega al contenido (va cifrado: solo lo lee el destinatario). */
+  withAk(peer, content) {
+    return this.myAk && content.t !== "receipt" && content.t !== "typing" && this.shareAk(peer) ? { ...content, ak: this.myAk } : content;
   }
 
   async sendToUser(user, plaintext, { silent, ephemeral, urgent = false, onlyDevice = null }) {
@@ -358,12 +475,29 @@ export class ChatClient {
       }
       const payload = encryptFor(this.device, r, plaintext);
       this.keys.store(user, dev, r);
-      let ack;
-      try {
-        ack = await this.request({ type: "send", to: user, device: dev, payload, ...(silent ? { silent: true } : {}), ...(ephemeral ? { ephemeral: true } : {}), ...(urgent ? { urgent: true } : {}) });
-      } catch (e) {
-        if (e.code === "no_device") { this.keys.drop(user, dev); continue; }
-        throw e;
+      const flags = { ...(silent ? { silent: true } : {}), ...(ephemeral ? { ephemeral: true } : {}), ...(urgent ? { urgent: true } : {}) };
+      let ack = null;
+      // Remitente oculto: si tengo su clave de entrega, el servidor no sabe que el mensaje es mío
+      const ak = mine ? null : this.contacts.get(user)?.ak;
+      if (ak && AK_RE.test(ak)) {
+        try {
+          const S = sodium();
+          const box = S.crypto_box_seal(utf8(JSON.stringify({ from: this.name, payload })), S.crypto_sign_ed25519_pk_to_curve25519(info.ik));
+          ack = await this.anonRequest({ type: "sealed-send", to: user, device: dev, uak: ak, payload: { kind: "sealed", box: b64e(box) }, ...flags });
+        } catch (e) {
+          if (e.code === "no_device") { this.keys.drop(user, dev); continue; }
+          if (e.code === "bad_uak") this.contacts.setAk(user, null); // la ha cambiado: hasta que nos dé la nueva, de la forma normal
+          else if (e.code !== "down" && e.code !== "rate_limited") throw e; // sin respuesta: no se repite (podría llegar dos veces)
+          ack = null;
+        }
+      }
+      if (!ack) {
+        try {
+          ack = await this.request({ type: "send", to: user, device: dev, payload, ...flags });
+        } catch (e) {
+          if (e.code === "no_device") { this.keys.drop(user, dev); continue; }
+          throw e;
+        }
       }
       statuses.push(ack.status);
       // ¿Tiene dispositivos que no conocíamos? También se lo mandamos a ellos
@@ -381,6 +515,21 @@ export class ChatClient {
   sendLive(peer, content) {
     this.sendContent(peer, content, { ephemeral: true, sync: false }).catch(() => {});
     return true;
+  }
+
+  isBlocked(user) { return this.blocked.has(String(user).toLowerCase()); }
+
+  /** Bloquea (o desbloquea): el servidor deja de entregarme lo suyo y de enseñarle si estoy conectado. */
+  async setBlocked(user, on) {
+    await this.request({ type: "block", user, on });
+    if (on) this.blocked.set(user.toLowerCase(), user); else this.blocked.delete(user.toLowerCase());
+    this.emit("blocked");
+    if (on) await this.rotateAk().catch(() => {});
+  }
+
+  /** Denuncia para quien gestiona el servidor. messages: solo los que el usuario decide adjuntar. */
+  report(user, reason, note = "", messages = []) {
+    return this.request({ type: "report", user, reason, note, messages });
   }
 
   /** Notificaciones con la app cerrada: registra (o quita) este dispositivo. */
@@ -413,10 +562,18 @@ export class ChatClient {
 
   async dispatch(msg) {
     const req = msg.id != null ? this.requests.get(msg.id) : null;
-    if (msg.type === "deliver") return this.onDeliver(msg.from, msg.payload, msg.queued_at);
+    if (msg.type === "deliver") {
+      if (msg.payload?.kind === "sealed") return this.onSealed(msg.payload, msg.queued_at);
+      return this.onDeliver(msg.from, msg.payload, msg.queued_at);
+    }
+    if (msg.type === "uak") { if (Number.isInteger(msg.epoch)) this.setAkEpoch(msg.epoch); return; }
     if (msg.type === "presence") {
       this.online.set(msg.user, msg.online);
       return this.emit("presence", msg.user, msg.online ? "online" : "offline", { lastSeen: msg.last_seen ?? null, away: !!msg.away });
+    }
+    if (msg.type === "blocked") { // he bloqueado o desbloqueado a alguien desde otro dispositivo
+      this.blocked = new Map((msg.users || []).map((u) => [u.toLowerCase(), u]));
+      return this.emit("blocked");
     }
     if (msg.type === "my-devices") {
       const before = new Set(this.myDevices);
@@ -430,7 +587,7 @@ export class ChatClient {
     if (msg.type === "error") this.emit("warning", msg.to || "", msg.message || "error del servidor");
   }
 
-  onDeliver(sender, payload, queuedAt) {
+  onDeliver(sender, payload, queuedAt, sealed = false) {
     const mine = sender.toLowerCase() === this.name.toLowerCase();
     try {
       if (payload?.kind === "sk") return this.onGroupPayload(sender, payload, queuedAt);
@@ -442,6 +599,7 @@ export class ChatClient {
       this.onContent(sender, text, queuedAt, mine, payload.dev);
     } catch (e) {
       if (!(e instanceof CryptoError)) throw e;
+      if (sealed) return; // un sobre sellado que no cuadra con la sesión se descarta en silencio
       if (e instanceof IdentityMismatch) this.emit("identity_changed", sender, e.message);
       else this.emit("warning", mine ? "" : sender, `No se pudo leer un mensaje de ${sender}: ${e.message}`);
     }
@@ -508,7 +666,7 @@ export class ChatClient {
       const missing = info.list.filter((d) => !key.sentTo.includes(`${info.user.toLowerCase()}|${d}`));
       if (missing.length) {
         try {
-          await this.sendToUser(info.user, JSON.stringify(distribution(g, key)), { silent: true, ephemeral: false });
+          await this.sendToUser(info.user, JSON.stringify(this.withAk(info.user, distribution(g, key))), { silent: true, ephemeral: false });
           info = await this.peerDevices(info.user, true);
           for (const d of info.list) key.sentTo.push(`${info.user.toLowerCase()}|${d}`);
           this.keys.save();
@@ -574,6 +732,10 @@ export class ChatClient {
       if (c.t === "ignore" || c.t === "unsupported") return;
       return this.emit("sync", raw.to, "", c, queuedAt);
     }
+    try {
+      const ak = JSON.parse(text)?.ak;
+      if (typeof ak === "string" && AK_RE.test(ak)) this.contacts.setAk(sender, ak);
+    } catch { /* no es JSON: texto de la terminal */ }
     c = decodeContent(text);
     if (c.t === "ignore") return;
     if (c.t === "skey") return this.onSenderKey(sender, dev, c);

@@ -139,3 +139,61 @@ async def _try_register(url, name, email):
         except Exception:  # noqa: BLE001
             pass
     return c
+
+
+# ---------------------------------------------------------------- código de recuperación
+
+def test_recovery_copy_needs_the_code_proof():
+    async def main():
+        srv, url, relay = await start_server()
+        srv.relay = relay
+        key = SigningKey.generate()
+        c = await new_client(url, "olvidadiza", key)
+        blob = {"version": 1, "public_key": base64.b64encode(bytes(key.verify_key)).decode(),
+                "ciphertext": base64.b64encode(b"r" * 72).decode()}
+        proof = b"k" * 32
+        await c._send(type="recovery", blob=blob, auth=base64.b64encode(proof).decode())
+        await asyncio.sleep(0.2)
+        assert relay.registry["olvidadiza"]["recovery_auth"] == hashlib.sha256(proof).hexdigest()
+        ok = {"X-SC-Recovery-Auth": base64.b64encode(proof).decode()}
+        status, _, body = await http_get(url, "/keystore?user=olvidadiza&recovery=1", ok)
+        assert status == 200 and json.loads(body)["recovery"]["ciphertext"] == blob["ciphertext"]
+        # Sin prueba o con una falsa: nada (y cuenta como intento fallido)
+        assert (await http_get(url, "/keystore?user=olvidadiza&recovery=1"))[0] == 403
+        bad = {"X-SC-Recovery-Auth": base64.b64encode(b"x" * 32).decode()}
+        assert (await http_get(url, "/keystore?user=olvidadiza&recovery=1", bad))[0] == 403
+        assert len(relay._keystore_fails["olvidadiza"]) == 2
+        # Una copia de OTRA clave se rechaza
+        other = {**blob, "public_key": base64.b64encode(bytes(SigningKey.generate().verify_key)).decode()}
+        await c._send(type="recovery", blob=other, auth=base64.b64encode(b"z" * 32).decode())
+        await asyncio.sleep(0.2)
+        assert relay.registry["olvidadiza"]["recovery_auth"] == hashlib.sha256(proof).hexdigest()
+        # Quitar el código
+        await c._send(type="recovery-delete")
+        await asyncio.sleep(0.2)
+        assert "recovery" not in relay.registry["olvidadiza"]
+        await c.close(); srv.close()
+    run(main())
+
+
+# ---------------------------------------------------------------- bloqueos y denuncias
+
+def test_block_hides_presence_and_report_is_stored(tmp_path):
+    async def main():
+        srv, url, relay = await start_server(RelayServer(tmp_path / "users.json"))
+        ana, troll = await new_client(url, "ana"), await new_client(url, "troll")
+        await ana._send(type="block", user="TROLL", on=True)
+        await asyncio.sleep(0.2)
+        assert relay.registry["ana"]["blocked"] == ["troll"]
+        assert relay._lookup("ana", "troll")["online"] is False
+        await ana._send(type="report", user="troll", reason="acoso", note="me insulta",
+                        messages=[{"at": 1700000000, "text": "eres tonta"}, "basura"])
+        await asyncio.sleep(0.2)
+        lines = (tmp_path / "users_denuncias.jsonl").read_text(encoding="utf-8").splitlines()
+        entry = json.loads(lines[0])
+        assert entry["by"] == "ana" and entry["user"] == "troll" and entry["reason"] == "acoso"
+        assert entry["messages"] == [{"at": 1700000000, "text": "eres tonta"}]
+        # Persiste al reiniciar
+        assert RelayServer(tmp_path / "users.json").registry["ana"]["blocked"] == ["troll"]
+        await ana.close(); await troll.close(); srv.close()
+    run(main())

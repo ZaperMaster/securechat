@@ -9,6 +9,9 @@ Hace pocas cosas, y ninguna requiere ver el contenido de los mensajes:
   4. Reenvía bytes opacos; si el destinatario no está, guarda el sobre cifrado en
      una cola y se lo entrega cuando se conecta.
   5. Avisa a tus contactos de cuándo te conectas o desconectas.
+  6. Remitente oculto (sealed sender): por una conexión anónima entrega sobres en los
+     que ni siquiera pone quién los manda, a quien demuestre tener la "clave de entrega"
+     del destinatario (que este solo da a sus contactos).
 
 Nunca ve el texto de los mensajes ni posee claves capaces de descifrarlos.
 """
@@ -37,7 +40,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request, Response
 
 from .crypto import CryptoError, b64d, b64e, encode_fields, verify_signature
-from .ratchet import DEVICE_RE, spk_message
+from .ratchet import DEVICE_RE, KEM_PUB_BYTES, kem_message, spk_message
 from .push import MAX_SUBS, Pusher, valid_subscription
 from .email_verify import CODE_TTL, MAX_TRIES, EmailHasher, mask, new_code, normalize_email, valid_email
 
@@ -83,6 +86,9 @@ SECURITY_HEADERS = {
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",
 }
+SEALED_LIMIT = 600          # envíos anónimos por minuto e IP
+MAX_BLOCKED = 1000          # usuarios bloqueados por cuenta
+REPORTS_PER_DAY = 10        # denuncias por cuenta y día
 KEYSTORE_AUTH_FAILS = 10     # contraseñas incorrectas por cuenta antes de bloquear la descarga
 KEYSTORE_LOCK = 15 * 60      # durante 15 minutos
 VERIFY_EMAILS_PER_IP = 5     # correos de verificación por IP y hora (anti-spam)
@@ -185,6 +191,9 @@ class RelayServer:
         self._verify_sends: dict[str, list[float]] = {}  # correos de alta por IP y por dirección
         self._keystore_fails: dict[str, list[float]] = {}  # contraseñas incorrectas por cuenta
         self._lookups: dict[str, list[float]] = {}  # búsquedas de usuarios por cuenta
+        self._reports: dict[str, list[float]] = {}  # denuncias por cuenta (límite diario)
+        self._sealed_hits: dict[str, list[float]] = {}  # envíos anónimos por IP
+        self.reports_path = db_path.with_name(db_path.stem + "_denuncias.jsonl") if db_path else None
         # Relé de llamadas (TURN): direcciones que se dan a los navegadores y secreto de sus credenciales
         self.turn_urls: list[str] = []
         self.turn_port: int | None = None
@@ -201,6 +210,8 @@ class RelayServer:
                 self.registry[canon(v["name"])] = {
                     "name": v["name"], "key": b64d(v["key"]), "email": v.get("email"),
                     "keystore": v.get("keystore"), "keystore_auth": v.get("keystore_auth"), "last_seen": v.get("last_seen"),
+                    "recovery": v.get("recovery"), "recovery_auth": v.get("recovery_auth"),
+                    "blocked": v.get("blocked", []), "uak": v.get("uak"), "uak_epoch": v.get("uak_epoch"),
                     "hide_last_seen": v.get("hide_last_seen", False), "push": v.get("push", []),
                     "status": v.get("status", "online"),
                     "devices": v.get("devices", {})}
@@ -216,6 +227,8 @@ class RelayServer:
             return
         data = {c: {"name": r["name"], "key": b64e(r["key"]), "email": r.get("email"),
                     "keystore": r.get("keystore"), "keystore_auth": r.get("keystore_auth"), "last_seen": r.get("last_seen"),
+                    "recovery": r.get("recovery"), "recovery_auth": r.get("recovery_auth"),
+                    "blocked": r.get("blocked", []), "uak": r.get("uak"), "uak_epoch": r.get("uak_epoch"),
                     "hide_last_seen": r.get("hide_last_seen", False), "push": r.get("push", []),
                     "status": r.get("status", "online"),
                     "devices": r.get("devices", {})}
@@ -238,8 +251,25 @@ class RelayServer:
 
     # ------------------------------------------------------------ conexión
 
-    async def _authenticate(self, ws: ServerConnection) -> tuple[str, str] | None:
-        hello = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT))
+    async def _check_code(self, ws: ServerConnection, hello: dict) -> bool:
+        if not self.access_code:
+            return True
+        ip = client_ip(ws)
+        now = time.monotonic()
+        fails = self._code_fails[ip] = [t for t in self._code_fails.get(ip, []) if now - t < 60]
+        if len(fails) >= CODE_FAILS_LIMIT:
+            await _send(ws, type="error", code="too_many", message="demasiados intentos, espera un minuto")
+            return False
+        given = normalize_code(hello.get("code"))
+        if not hmac.compare_digest(given, self.access_code):
+            if given:  # solo cuenta como intento quien prueba un código (no quien no envía ninguno)
+                fails.append(now)
+            await _send(ws, type="error", code="bad_code",
+                        message="código de acceso incorrecto: pídeselo a quien gestiona el servidor")
+            return False
+        return True
+
+    async def _authenticate(self, ws: ServerConnection, hello: dict) -> tuple[str, str] | None:
         user, key = hello.get("user", ""), b64d(hello.get("identity_key", ""))
         device = hello.get("device")
         if hello.get("type") != "hello" or not USERNAME_RE.match(user) or len(key) != 32:
@@ -249,20 +279,8 @@ class RelayServer:
             await _send(ws, type="error", code="old_client",
                         message="tu app está desactualizada: recarga la página para usar la versión nueva")
             return None
-        if self.access_code:
-            ip = client_ip(ws)
-            now = time.monotonic()
-            fails = self._code_fails[ip] = [t for t in self._code_fails.get(ip, []) if now - t < 60]
-            if len(fails) >= CODE_FAILS_LIMIT:
-                await _send(ws, type="error", code="too_many", message="demasiados intentos, espera un minuto")
-                return None
-            given = normalize_code(hello.get("code"))
-            if not hmac.compare_digest(given, self.access_code):
-                if given:  # solo cuenta como intento quien prueba un código (no quien no envía ninguno)
-                    fails.append(now)
-                await _send(ws, type="error", code="bad_code",
-                            message="código de acceso incorrecto: pídeselo a quien gestiona el servidor")
-                return None
+        if not await self._check_code(ws, hello):
+            return None
         nonce = nacl.utils.random(32)
         await _send(ws, type="challenge", nonce=b64e(nonce))
         reply = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT))
@@ -403,7 +421,11 @@ class RelayServer:
         previews: list[float] = []
         pending_email: dict | None = None  # cambio de correo a medias (código enviado)
         try:
-            auth = await self._authenticate(ws)
+            hello = json.loads(await asyncio.wait_for(ws.recv(), AUTH_TIMEOUT))
+            if isinstance(hello, dict) and hello.get("type") == "anon-hello":
+                await self._anon(ws, hello)
+                return
+            auth = await self._authenticate(ws, hello)
             if auth is None:
                 return
             user, device = auth
@@ -418,7 +440,9 @@ class RelayServer:
             await _send(ws, type="welcome", user=user, device=device,
                         devices=[d for d in r["devices"] if d != device],
                         opks=len(r["devices"][device].get("opks", [])),
-                        has_email=bool(r.get("email")), email_available=bool(self.email_sender))
+                        has_email=bool(r.get("email")), email_available=bool(self.email_sender),
+                        blocked=[self.registry[b]["name"] for b in r.get("blocked", []) if b in self.registry],
+                        uak_epoch=r.get("uak_epoch") if r.get("uak") else None)
             log.info("%s conectado desde %s (%d en línea)", user, device, len(self.online))
             await self._flush_queue(c, device, ws)
             # Mis otros dispositivos se enteran de que existe este (para mandarle copias)
@@ -443,7 +467,7 @@ class RelayServer:
                         await _send(ws, type="error", code="rate_limited", id=msg.get("id"),
                                     message="demasiadas búsquedas, espera un momento")
                     elif t == "lookup":
-                        await _send(ws, type="lookup", id=msg.get("id"), **self._lookup(msg.get("user")))
+                        await _send(ws, type="lookup", id=msg.get("id"), **self._lookup(msg.get("user"), c))
                     else:
                         await _send(ws, type="bundle", id=msg.get("id"), **self._bundle(msg.get("user"), c))
                 elif t == "prekeys":
@@ -508,6 +532,33 @@ class RelayServer:
                         self._store_keystore(c, msg.get("blob"), msg.get("auth"))
                     except (ValueError, KeyError, TypeError, CryptoError) as exc:
                         await _send(ws, type="error", code="bad_keystore", message=str(exc))
+                elif t == "set-uak":
+                    # Mi clave de entrega (la que doy a mis contactos para que me escriban sin identificarse)
+                    uak, epoch = msg.get("uak"), msg.get("epoch")
+                    if isinstance(uak, str) and len(b64d(uak)) == 16 and isinstance(epoch, int) and 0 < epoch < 2**31:
+                        self.registry[c]["uak"], self.registry[c]["uak_epoch"] = uak, epoch
+                        self._save()
+                        await _send(ws, type="ack", id=msg.get("id"), status="ok")
+                        for d, conn in list(self.online.get(c, {}).items()):
+                            if conn is not ws:
+                                await _send(conn, type="uak", epoch=epoch)
+                    else:
+                        await _send(ws, type="error", id=msg.get("id"), code="bad_request", message="clave de entrega inválida")
+                elif t == "block":
+                    await self._set_block(ws, c, msg)
+                elif t == "report":
+                    await self._report(ws, c, msg)
+                elif t == "recovery":
+                    try:
+                        self._store_recovery(c, msg.get("blob"), msg.get("auth"))
+                        await _send(ws, type="ack", id=msg.get("id"), status="ok")
+                    except (ValueError, KeyError, TypeError, CryptoError) as exc:
+                        await _send(ws, type="error", id=msg.get("id"), code="bad_recovery", message=str(exc))
+                elif t == "recovery-delete":
+                    self.registry[c].pop("recovery", None)
+                    self.registry[c].pop("recovery_auth", None)
+                    self._save()
+                    await _send(ws, type="ack", id=msg.get("id"), status="ok")
                 elif t == "preview":
                     now = time.monotonic()
                     previews[:] = [x for x in previews if now - x < 60] + [now]
@@ -551,6 +602,128 @@ class RelayServer:
                             self._save()
                             await self._presence(c, False)
 
+    def blocks(self, owner: str, other: str) -> bool:
+        """¿`owner` ha bloqueado a `other`? (los dos en canon)"""
+        r = self.registry.get(owner)
+        return bool(r) and other in r.get("blocked", ())
+
+    async def _set_block(self, ws: ServerConnection, c: str, msg: dict) -> None:
+        """Bloquear o desbloquear: el servidor deja de entregarte lo que esa cuenta te envíe
+        (sin decírselo) y de enseñarle si estás conectado. Así sabe a quién has bloqueado,
+        pero sin esto podría seguir llenándote el móvil de avisos."""
+        other = canon(msg.get("user", "")) if isinstance(msg.get("user"), str) else ""
+        r = self.registry[c]
+        if other not in self.registry or other == c:
+            await _send(ws, type="error", id=msg.get("id"), code="no_user", message="ese usuario no existe")
+            return
+        blocked = [b for b in r.get("blocked", []) if b != other and b in self.registry]
+        if msg.get("on", True):
+            if len(blocked) >= MAX_BLOCKED:
+                await _send(ws, type="error", id=msg.get("id"), code="too_many", message="has bloqueado demasiados usuarios")
+                return
+            blocked.append(other)
+        r["blocked"] = blocked
+        self._save()
+        await _send(ws, type="ack", id=msg.get("id"), status="ok")
+        # Mis otros dispositivos se enteran al momento
+        names = [self.registry[b]["name"] for b in blocked]
+        for conn in list(self.online.get(c, {}).values()):
+            if conn is not ws:
+                await _send(conn, type="blocked", users=names)
+        if msg.get("on", True) and c in self.online and other in self.online:
+            for conn in list(self.online[other].values()):
+                await _send(conn, type="presence", user=r["name"], online=False, away=False, last_seen=None)
+
+    async def _report(self, ws: ServerConnection, c: str, msg: dict) -> None:
+        """Denuncia: la guarda para quien gestiona el servidor. Solo incluye los mensajes
+        que quien denuncia decide adjuntar (el servidor no puede leer ningún otro)."""
+        rid = msg.get("id")
+        other = canon(msg.get("user", "")) if isinstance(msg.get("user"), str) else ""
+        if other not in self.registry or other == c:
+            await _send(ws, type="error", id=rid, code="no_user", message="ese usuario no existe")
+            return
+        now = time.time()
+        recent = self._reports[c] = [t for t in self._reports.get(c, []) if now - t < 86400]
+        if len(recent) >= REPORTS_PER_DAY:
+            await _send(ws, type="error", id=rid, code="too_many", message="has enviado demasiadas denuncias hoy")
+            return
+        recent.append(now)
+        reason = msg.get("reason") if msg.get("reason") in ("spam", "acoso", "suplantacion", "ilegal", "otro") else "otro"
+        note = str(msg.get("note") or "")[:1000]
+        quoted = []
+        for m in (msg.get("messages") or [])[:10] if isinstance(msg.get("messages"), list) else []:
+            if isinstance(m, dict) and isinstance(m.get("text"), str):
+                quoted.append({"at": int(m["at"]) if isinstance(m.get("at"), (int, float)) else None, "text": m["text"][:2000]})
+        entry = {"at": int(now), "by": self.registry[c]["name"], "user": self.registry[other]["name"],
+                 "reason": reason, "note": note, "messages": quoted}
+        if self.reports_path:
+            with self.reports_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        log.warning("denuncia de %s contra %s (%s)", entry["by"], entry["user"], reason)
+        await _send(ws, type="ack", id=rid, status="ok")
+
+    async def _anon(self, ws: ServerConnection, hello: dict) -> None:
+        """Conexión anónima: solo sirve para entregar sobres con remitente oculto.
+        No se sabe de quién es; se limita por IP para que nadie la use para inundar."""
+        if not await self._check_code(ws, hello):
+            return
+        await _send(ws, type="anon-ready")
+        ip = client_ip(ws)
+        try:
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                    if not isinstance(msg, dict) or msg.get("type") != "sealed-send":
+                        await _send(ws, type="error", code="unknown_type", message="tipo desconocido")
+                        continue
+                    now = time.monotonic()
+                    hits = self._sealed_hits[ip] = [t for t in self._sealed_hits.get(ip, []) if now - t < 60] + [now]
+                    if len(hits) > SEALED_LIMIT:
+                        await _send(ws, type="error", id=msg.get("id"), code="rate_limited", message="demasiados envíos, espera")
+                        continue
+                    await self._relay_sealed(ws, msg)
+                except (ValueError, KeyError, TypeError, CryptoError, json.JSONDecodeError):
+                    await _send(ws, type="error", code="bad_request", message="petición inválida")
+        except ConnectionClosed:
+            pass
+
+    async def _relay_sealed(self, ws: ServerConnection, msg: dict) -> None:
+        """Como _relay, pero sin remitente: el sobre (cifrado para el destinatario) lo lleva dentro.
+        Solo pasa si trae la clave de entrega del destinatario."""
+        to, device, payload, rid = msg.get("to"), msg.get("device"), msg.get("payload"), msg.get("id")
+        ct = canon(to) if isinstance(to, str) else ""
+        r = self.registry.get(ct)
+        uak = msg.get("uak")
+        # Mismo error si el usuario no existe o la clave no vale: no se puede usar para buscar cuentas
+        if not r or not r.get("uak") or not isinstance(uak, str) or not hmac.compare_digest(uak.encode(), r["uak"].encode()):
+            await _send(ws, type="error", id=rid, code="bad_uak", message="no se puede entregar sin identificarse")
+            return
+        if not isinstance(payload, dict) or payload.get("kind") != "sealed" or not isinstance(payload.get("box"), str) \
+                or set(payload) != {"kind", "box"}:
+            await _send(ws, type="error", id=rid, code="bad_request", message="sobre inválido")
+            return
+        devices = list(r.get("devices", {}))
+        if device not in devices:
+            await _send(ws, type="error", code="no_device", to=to, id=rid, devices=devices, message="ese dispositivo ya no existe")
+            return
+        if msg.get("urgent") and r.get("push"):
+            asyncio.get_running_loop().create_task(self._push(ct, call=True))
+        target = self.online.get(ct, {}).get(device)
+        if target is not None:
+            try:
+                await target.send(json.dumps({"type": "deliver", "from": None, "payload": payload}))
+                await _send(ws, type="ack", id=rid, status="delivered", devices=devices)
+                return
+            except ConnectionClosed:
+                pass
+        if msg.get("ephemeral"):
+            await _send(ws, type="ack", id=rid, status="dropped", devices=devices)
+            return
+        self._enqueue(f"{ct}|{device}", {"from": None, "payload": payload, "at": int(time.time())})
+        if not msg.get("silent") and not msg.get("urgent") and not self.online.get(ct) and r.get("push"):
+            asyncio.get_running_loop().create_task(self._push(ct))
+        await _send(ws, type="ack", id=rid, status="queued", devices=devices)
+
     async def _preview(self, ws: ServerConnection, msg: dict) -> None:
         """Vista previa de un enlace (en otro hilo, para no frenar al resto)."""
         from .preview import PreviewError, link_preview
@@ -578,6 +751,9 @@ class RelayServer:
             self._forget_device(c, d)
         conns = list(self.online.pop(c, {}).values())
         del self.registry[c]
+        for other in self.registry.values():
+            if c in other.get("blocked", ()):
+                other["blocked"] = [b for b in other["blocked"] if b != c]
         for other in self.related.pop(c, set()):
             self.related.get(other, set()).discard(c)
         self._save()
@@ -591,20 +767,22 @@ class RelayServer:
         last = None if online or r.get("hide_last_seen") else r.get("last_seen")
         away = online and r.get("status") == "away"
         for other in self.related.get(c, ()):
-            if other == c:
+            if other == c or self.blocks(c, other):
                 continue  # las copias a mis otros dispositivos no me hacen "contacto" de mí mismo
             for conn in list(self.online.get(other, {}).values()):
                 await _send(conn, type="presence", user=r["name"], online=online, away=away, last_seen=last)
 
     # ------------------------------------------------------------ directorio
 
-    def _lookup(self, name) -> dict:
+    def _lookup(self, name, asker: str | None = None) -> dict:
         """¿Existe el usuario? Devuelve su grafía oficial y si está conectado."""
         if not isinstance(name, str) or not USERNAME_RE.match(name):
             return {"exists": False, "user": None, "online": False}
         known = self.registry.get(canon(name))
         if known is None:
             return {"exists": False, "user": None, "online": False}
+        if asker and self.blocks(canon(name), asker):
+            return {"exists": True, "user": known["name"], "online": False, "away": False}
         status = known.get("status", "online")
         online = bool(self.online.get(canon(name))) and status != "invisible"
         info = {"exists": True, "user": known["name"], "online": online, "away": online and status == "away"}
@@ -614,7 +792,7 @@ class RelayServer:
 
     def _bundle(self, name, asker: str) -> dict:
         """Prekeys de cada dispositivo de un usuario. Entrega (y borra) una OPK por dispositivo."""
-        info = self._lookup(name)
+        info = self._lookup(name, asker)
         if not info["exists"]:
             return info
         c = canon(name)
@@ -638,6 +816,13 @@ class RelayServer:
         verify_signature(r["key"], spk_message(r["name"], device, spk, created), b64d(msg["sig"]))
         d = r["devices"][device]
         d["bundle"] = {"spk": msg["spk"], "sig": msg["sig"], "created": created}
+        if msg.get("kem") is not None:
+            # Prekey poscuántica (PQXDH): firmada con la identidad, como la clásica
+            kem, kem_created = b64d(msg["kem"]), int(msg["kem_created"])
+            if len(kem) != KEM_PUB_BYTES:
+                raise ValueError("prekey poscuántica inválida")
+            verify_signature(r["key"], kem_message(r["name"], device, kem, kem_created), b64d(msg["kem_sig"]))
+            d["bundle"].update(kem=msg["kem"], kem_sig=msg["kem_sig"], kem_created=kem_created)
         new = [k for k in msg.get("opks", []) if isinstance(k, str) and len(b64d(k)) == 32]
         known = set(d.get("opks", []))
         d["opks"] = (d.get("opks", []) + [k for k in new if k not in known])[-MAX_OPKS:]
@@ -679,6 +864,23 @@ class RelayServer:
         if changed:
             self._save()
 
+    def _store_recovery(self, c: str, blob, auth) -> None:
+        """Copia de la clave cifrada con el código de recuperación (por si olvidas la contraseña).
+
+        Como la de la contraseña, el servidor no puede abrirla; solo la entrega a quien
+        demuestra conocer el código (guardamos el hash de esa prueba, nunca el código).
+        """
+        r = self.registry[c]
+        if not isinstance(blob, dict) or set(blob) != {"version", "public_key", "ciphertext"} \
+                or blob["version"] != 1 or len(json.dumps(blob)) > 1024 or b64d(blob["public_key"]) != r["key"]:
+            raise ValueError("copia de recuperación inválida")
+        raw = b64d(auth) if isinstance(auth, str) else b""
+        if len(raw) != 32:
+            raise ValueError("prueba de recuperación inválida")
+        r["recovery"] = dict(blob)
+        r["recovery_auth"] = hashlib.sha256(raw).hexdigest()
+        self._save()
+
     def keystore_response(self, connection: ServerConnection, request: Request) -> Response:
         """GET /keystore?user=NOMBRE[&code=CODIGO]: copia cifrada para iniciar sesión.
 
@@ -702,6 +904,8 @@ class RelayServer:
             r = next((x for x in self.registry.values() if h and x.get("email") == h), None)
         else:
             r = self.registry.get(canon(name)) if USERNAME_RE.match(name) else None
+        if q.get("recovery"):
+            return self._recovery_response(r, request, now)
         if not r or not r.get("keystore"):
             return _response(404, "Not Found", b'{"error": "no encontrada"}', "application/json")
         ks = r["keystore"]
@@ -730,6 +934,30 @@ class RelayServer:
         body = json.dumps({"user": r["name"], "blob": ks}).encode()
         return _response(200, "OK", body, "application/json")
 
+    def _recovery_response(self, r: dict | None, request: Request, now: float) -> Response:
+        """GET /keystore?user=NOMBRE&recovery=1 con la prueba del código en X-SC-Recovery-Auth."""
+        not_found = _response(404, "Not Found", b'{"error": "no encontrada"}', "application/json")
+        if not r:
+            return not_found
+        key = canon(r["name"])
+        fails = self._keystore_fails[key] = [t for t in self._keystore_fails.get(key, []) if now - t < KEYSTORE_LOCK]
+        if len(fails) >= KEYSTORE_AUTH_FAILS:
+            return _response(429, "Too Many Requests",
+                             b'{"error": "demasiados intentos con esta cuenta, espera 15 minutos"}', "application/json")
+        try:
+            given = b64d(request.headers.get("X-SC-Recovery-Auth", ""))
+        except (ValueError, CryptoError):
+            given = b""
+        # Sin copia de recuperación se responde igual que con un código incorrecto (y cuenta como fallo):
+        # así no se puede averiguar quién tiene código configurado.
+        ok = bool(r.get("recovery_auth")) and len(given) == 32 and \
+            hmac.compare_digest(hashlib.sha256(given).hexdigest(), r["recovery_auth"])
+        if not ok:
+            fails.append(now)
+            return _response(403, "Forbidden", b'{"error": "codigo incorrecto", "code": "bad_recovery"}', "application/json")
+        self._keystore_fails.pop(key, None)
+        return _response(200, "OK", json.dumps({"user": r["name"], "recovery": r["recovery"]}).encode(), "application/json")
+
     # --------------------------------------------------------------- reenvío
 
     async def _relay(self, ws: ServerConnection, sender: str, sender_dev: str, msg: dict) -> None:
@@ -743,6 +971,10 @@ class RelayServer:
         if device not in devices:
             await _send(ws, type="error", code="no_device", to=to, id=rid, devices=devices,
                         message="ese dispositivo ya no existe")
+            return
+        if self.blocks(ct, cs):
+            # Bloqueado: no se entrega ni se avisa, y no se le dice (parece que se ha guardado)
+            await _send(ws, type="ack", id=rid, status="queued", devices=devices)
             return
         if ct != cs:
             self.related.setdefault(ct, set()).add(cs)
@@ -795,6 +1027,9 @@ class RelayServer:
             if device not in devs:
                 results.append({"to": to, "device": device, "status": "no_device"})
                 continue
+            if self.blocks(ct, cs):
+                results.append({"to": to, "device": device, "status": "queued"})
+                continue
             self.related.setdefault(ct, set()).add(cs)
             self.related.setdefault(cs, set()).add(ct)
             conn = self.online.get(ct, {}).get(device)
@@ -836,7 +1071,7 @@ class RelayServer:
         if not q:
             return
         for item in q:
-            other = canon(item["from"])
+            other = canon(item["from"]) if item.get("from") else c  # remitente oculto: no se sabe
             if other != c:
                 self.related.setdefault(c, set()).add(other)
                 self.related.setdefault(other, set()).add(c)
@@ -899,9 +1134,13 @@ def main() -> None:
                    help="verificación por correo, pero el código se muestra en esta consola")
     p.add_argument("--turn", type=int, metavar="PUERTO",
                    help="arranca el relé de llamadas (TURN por TCP) en este puerto, solo para este equipo")
+    p.add_argument("--denuncias", action="store_true", help="muestra las denuncias recibidas y sale")
     p.add_argument("--cert", type=Path, help="certificado TLS (PEM) para servir por HTTPS")
     p.add_argument("--key", type=Path, help="clave privada TLS (PEM)")
     args = p.parse_args()
+    if args.denuncias:
+        print_reports(args.db.with_name(args.db.stem + "_denuncias.jsonl"))
+        return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     tls = None
     if args.cert:
@@ -927,6 +1166,25 @@ def main() -> None:
         asyncio.run(run(host, args.port, relay=relay, tls=tls))
     except KeyboardInterrupt:
         pass
+
+
+def print_reports(path: Path) -> None:
+    """Lista las denuncias (las más recientes al final)."""
+    if not path.exists():
+        print("No hay denuncias.")
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(e.get("at", 0)))
+        print(f"\n[{when}] @{e.get('by')} denuncia a @{e.get('user')} por {e.get('reason')}")
+        if e.get("note"):
+            print(f"  Nota: {e['note']}")
+        for m in e.get("messages", []):
+            at = time.strftime("%Y-%m-%d %H:%M", time.localtime(m["at"])) if m.get("at") else "?"
+            print(f"  > [{at}] {m.get('text', '')}")
 
 
 def local_ips() -> list[str]:

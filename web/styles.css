@@ -693,6 +693,10 @@ dialog { max-height: min(88vh, 900px); overflow-y: auto; }
 .auth-sub { margin: -8px 0 0; font-size: 13px; color: var(--muted); }
 #login-form[data-mode="login"] .register-only { display: none !important; }
 #login-form[data-mode="register"] .login-only { display: none !important; }
+#login-form:not([data-mode="recover"]) .recover-only,
+#login-form[data-mode="recover"] .login-only,
+#login-form[data-mode="recover"] .not-recover { display: none !important; }
+#login-recovery { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .04em; }
 .auth-switch { text-align: center; font-size: 14px; color: var(--muted); margin: 0; }
 button.link-strong { color: var(--accent); font-weight: 700; padding: 2px 4px; background: none; }
 button.link-strong:hover { text-decoration: underline; }
@@ -1332,10 +1336,10 @@ html:has(#app:not([hidden])), html:has(#app:not([hidden])) body { overflow: hidd
   .login-card .hint { font-size: 12px; }
 }
 /* Al crear cuenta, las dos contraseñas van una al lado de la otra */
-#login-form[data-mode="register"] { grid-template-columns: 1fr 1fr; column-gap: 10px; }
-#login-form[data-mode="register"] > * { grid-column: 1 / -1; }
-#login-form[data-mode="register"] > #login-pass-wrap { grid-column: 1; }
-#login-form[data-mode="register"] > #login-pass2-wrap { grid-column: 2; }
+#login-form[data-mode="register"], #login-form[data-mode="recover"] { grid-template-columns: 1fr 1fr; column-gap: 10px; }
+#login-form[data-mode="register"] > *, #login-form[data-mode="recover"] > * { grid-column: 1 / -1; }
+#login-form[data-mode="register"] > #login-pass-wrap, #login-form[data-mode="recover"] > #login-pass-wrap { grid-column: 1; }
+#login-form[data-mode="register"] > #login-pass2-wrap, #login-form[data-mode="recover"] > #login-pass2-wrap { grid-column: 2; }
 @media (max-height: 720px) { #login-email-wrap .hint { display: none; } }
 
 /* Mensaje que no se pudo enviar */
@@ -1463,3 +1467,25 @@ details.advanced > .switch { margin-top: 10px; }
   .chat-title .status .handle, .chat-title .status .handle + span { display: none; }
   .chat-title .status > span:not(:first-child) { margin-left: 0; }
 }
+
+/* Código de recuperación */
+.recovery-code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 1.15rem; font-weight: 600;
+  letter-spacing: .06em; text-align: center; padding: 14px 10px; border-radius: 14px; background: var(--panel-2, rgb(127 127 127 / .1));
+  border: 1px dashed rgb(127 127 127 / .45); user-select: all; word-break: break-all; margin: 8px 0; }
+.recovery-btns { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 8px; }
+
+/* Solicitudes de mensaje y contactos bloqueados */
+.request-bar { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: var(--panel, #fff);
+  border-top: 1px solid rgb(127 127 127 / .2); text-align: center; }
+.request-bar p { margin: 0 0 10px; font-size: .92rem; }
+.request-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.locked-chat #composer, .locked-chat #reply-bar { display: none !important; }
+.req-tag { display: inline-block; font-size: .72rem; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+  background: var(--accent, #2f9e6e); color: #fff; margin-right: 4px; vertical-align: 1px; }
+.req-tag.blocked { background: #b42318; }
+.blocked-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.blocked-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.report-form select, .report-form textarea { width: 100%; box-sizing: border-box; }
+.profile-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.request-actions .chip.danger, .profile-actions .chip.danger { margin-top: 0; }
+.profile-actions { margin-top: 14px; }

@@ -14,6 +14,7 @@
 const { app, BrowserWindow, Menu, Tray, nativeImage, net, session, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
+const { setupUpdates } = require("./actualizaciones.js");
 
 // En el programa instalado el servidor es fijo; SECURECHAT_URL solo sirve para probar en desarrollo
 // (si no, un acceso directo manipulado podría llevar la app a un servidor falso).
@@ -38,6 +39,9 @@ const FROM_NETWORK = new Set(["/config.json", "/keystore"]);
 let win = null;
 let tray = null;
 let quitting = false;
+let update = null; // {version, install}: actualización descargada y verificada
+// Textos de la bandeja en español o inglés según el idioma de Windows
+const L = (es, en) => (/^es/i.test(app.getLocale()) ? es : en);
 
 // En el programa instalado no se permite abrir un puerto de depuración remota
 // (permitiría a otro programa del equipo controlar la ventana y leer los mensajes).
@@ -140,24 +144,27 @@ function createTray() {
   tray.setToolTip("SecureChat");
   const autostart = () => app.getLoginItemSettings().openAtLogin;
   const build = () => Menu.buildFromTemplate([
-    { label: "Abrir SecureChat", click: showWindow },
+    { label: L("Abrir SecureChat", "Open SecureChat"), click: showWindow },
+    ...(update ? [{ label: L(`Reiniciar para actualizar (${update.version})`, `Restart to update (${update.version})`), click: () => { quitting = true; update.install(); } }] : []),
     { type: "separator" },
     {
-      label: "Iniciar con Windows", type: "checkbox", checked: autostart(),
+      label: L("Iniciar con Windows", "Start with Windows"), type: "checkbox", checked: autostart(),
       click: (item) => { app.setLoginItemSettings({ openAtLogin: item.checked, args: ["--oculto"] }); tray.setContextMenu(build()); },
     },
     { type: "separator" },
-    { label: "Salir", click: () => { quitting = true; app.quit(); } },
+    { label: L("Salir", "Quit"), click: () => { quitting = true; app.quit(); } },
   ]);
   tray.setContextMenu(build());
   tray.on("click", showWindow);
+  return () => tray.setContextMenu(build());
 }
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null); // sin menú (ni atajos para abrir herramientas de desarrollo)
   setupNetwork();
   createWindow();
-  createTray();
+  const refreshTray = createTray();
+  setupUpdates({ L, onReady: (version, install) => { update = { version, install }; refreshTray(); } });
 });
 
 app.on("before-quit", () => { quitting = true; });

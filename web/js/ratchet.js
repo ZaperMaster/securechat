@@ -1,7 +1,14 @@
 // Port a JavaScript de securechat/ratchet.py: X3DH con one-time prekeys +
 // Double Ratchet, por dispositivo. Debe producir los mismos bytes que Python.
+//
+// Además, PQXDH: si el otro dispositivo publica una prekey poscuántica (ML-KEM-768,
+// firmada con su identidad), el secreto inicial mezcla también un secreto encapsulado
+// con ella. Así, quien grabe hoy el tráfico no podrá descifrarlo en el futuro con un
+// ordenador cuántico (que sí rompería X25519). Con clientes que no la publican (la
+// terminal), se usa X3DH clásico.
 
 import { b64d, b64e, CryptoError, encodeFields, IdentityMismatch, kdf, utf8, verifySignature } from "./protocol.js";
+import { ml_kem768 } from "../vendor/noble-pq.js";
 
 const S = () => globalThis.sodium;
 const PROTO = utf8("securechat-v2");
@@ -38,11 +45,17 @@ const ikPub = (edPub) => S().crypto_sign_ed25519_pk_to_curve25519(edPub);
 export const spkMessage = (user, device, spk, created) =>
   encodeFields(PROTO, utf8("spk"), utf8(user), utf8(device), spk, u64(created));
 
+// Prekey poscuántica (ML-KEM-768): también firmada con la clave de identidad
+export const KEM_PUB_BYTES = 1184;
+export const kemMessage = (user, device, kem, created) =>
+  encodeFields(PROTO, utf8("kem"), utf8(user), utf8(device), kem, u64(created));
+const kemId = (pub) => b64e(S().crypto_generichash(16, pub, null));
+
 const x3dhAd = (a, aDev, b, bDev, ikA, ikB) => encodeFields(PROTO, utf8("ad"), utf8(a), utf8(aDev), utf8(b), utf8(bDev), ikA, ikB);
 
-function x3dhSecret(dhs, ad) {
+function x3dhSecret(dhs, ad, pq = false) {
   const ikm = S().crypto_generichash(32, encodeFields(...dhs), null);
-  return kdf(ikm, "sc-x3dh", ad);
+  return kdf(ikm, pq ? "sc-pqxdh" : "sc-x3dh", ad); // etiqueta distinta: nunca se confunden
 }
 
 function kdfRk(rk, dhOut) {
@@ -162,7 +175,19 @@ export function initiate(me, myDev, identity, peer, peerDev, peerIk, bundle, pin
   if (opk) dhs.push(dh(ekPriv, opk));
   const ad = x3dhAd(me, myDev, peer, peerDev, identity.publicKey, peerIk);
   const x3dh = { ik: b64e(identity.publicKey), ek: b64e(ekPub), spk: bundle.spk, opk: bundle.opk || null };
-  return Ratchet.asInitiator(x3dhSecret(dhs, ad), ad, spk, x3dh);
+  let pq = false;
+  if (bundle.kem) {
+    const kem = b64d(bundle.kem);
+    if (kem.length !== KEM_PUB_BYTES) throw new CryptoError("prekey poscuántica inválida");
+    verifySignature(peerIk, kemMessage(peer, peerDev, kem, bundle.kem_created), b64d(bundle.kem_sig || ""));
+    const { cipherText, sharedSecret } = ml_kem768.encapsulate(kem);
+    dhs.push(sharedSecret);
+    x3dh.kem = { id: kemId(kem), ct: b64e(cipherText) };
+    pq = true;
+  }
+  const r = Ratchet.asInitiator(x3dhSecret(dhs, ad, pq), ad, spk, x3dh);
+  if (pq) r.st.pq = true;
+  return r;
 }
 
 function accept(me, myDev, identity, peer, peerDev, x3dh, keys, pinned) {
@@ -179,8 +204,19 @@ function accept(me, myDev, identity, peer, peerDev, x3dh, keys, pinned) {
   const ek = b64d(x3dh.ek);
   const dhs = [dh(spkPriv, ikPub(peerIk)), dh(ikPriv(identity), ek), dh(spkPriv, ek)];
   if (opkPriv) dhs.push(dh(opkPriv, ek));
+  let pq = false;
+  if (x3dh.kem) {
+    const kemPriv = typeof x3dh.kem.id === "string" ? keys.kemPrivate(x3dh.kem.id) : null;
+    if (!kemPriv) throw new CryptoError("mensaje para una prekey poscuántica que ya no existe");
+    const ct = b64d(x3dh.kem.ct || "");
+    if (ct.length !== 1088) throw new CryptoError("cifrado poscuántico inválido");
+    dhs.push(ml_kem768.decapsulate(ct, kemPriv));
+    pq = true;
+  }
   const ad = x3dhAd(peer, peerDev, me, myDev, peerIk, identity.publicKey);
-  return [Ratchet.asResponder(x3dhSecret(dhs, ad), ad, spkPriv, spk), peerIk];
+  const r = Ratchet.asResponder(x3dhSecret(dhs, ad, pq), ad, spkPriv, spk);
+  if (pq) r.st.pq = true;
+  return [r, peerIk];
 }
 
 // --------------------------------------------- claves de este dispositivo
@@ -196,6 +232,7 @@ export class DeviceKeys {
     this._save = save;
     this.device = data?.device || newDeviceId();
     this.spks = data?.spks || [];
+    this.kems = data?.kems || []; // prekeys poscuánticas (ML-KEM-768) de este dispositivo
     this.opks = data?.opks || {};
     this.sessions = data?.sessions || {};
     this.seen = data?.seen || [];
@@ -206,7 +243,7 @@ export class DeviceKeys {
   }
 
   save() {
-    this._save({ device: this.device, spks: this.spks, opks: this.opks, sessions: this.sessions, seen: this.seen.slice(-2000),
+    this._save({ device: this.device, spks: this.spks, kems: this.kems, opks: this.opks, sessions: this.sessions, seen: this.seen.slice(-2000),
       skMine: this.skMine, skPeers: this.skPeers });
   }
 
@@ -218,6 +255,27 @@ export class DeviceKeys {
       this.save();
     }
     return this.spks.at(-1);
+  }
+
+  currentKem() {
+    const now = Math.floor(Date.now() / 1000);
+    if (!this.kems.length || now - this.kems.at(-1).created > SPK_LIFETIME) {
+      const { publicKey, secretKey } = ml_kem768.keygen();
+      this.kems = [...this.kems, { priv: b64e(secretKey), pub: b64e(publicKey), id: kemId(publicKey), created: now }].slice(-3);
+      this.save();
+    }
+    return this.kems.at(-1);
+  }
+
+  kemPrivate(id) {
+    const k = this.kems.find((x) => x.id === id);
+    return k ? b64d(k.priv) : null;
+  }
+
+  /** ¿Alguna sesión con este usuario empezó con PQXDH (protección poscuántica)? */
+  postQuantum(user) {
+    const prefix = `${user.toLowerCase()}|`;
+    return Object.entries(this.sessions).some(([k, v]) => k.startsWith(prefix) && (Array.isArray(v) ? v : [v]).some((st) => st?.pq));
   }
 
   spkPrivate(pub) {
@@ -249,7 +307,10 @@ export class DeviceKeys {
     const spk = this.currentSpk();
     const sig = S().crypto_sign_detached(spkMessage(this.user, this.device, b64d(spk.pub), spk.created), this.identity.privateKey);
     const opks = opksOnServer < OPK_BATCH / 2 ? this.newOpks() : [];
-    return { type: "prekeys", spk: spk.pub, sig: b64e(sig), created: spk.created, opks };
+    const kem = this.currentKem();
+    const kemSig = S().crypto_sign_detached(kemMessage(this.user, this.device, b64d(kem.pub), kem.created), this.identity.privateKey);
+    return { type: "prekeys", spk: spk.pub, sig: b64e(sig), created: spk.created, opks,
+      kem: kem.pub, kem_sig: b64e(kemSig), kem_created: kem.created };
   }
 
   key(user, device) { return `${user.toLowerCase()}|${device}`; }

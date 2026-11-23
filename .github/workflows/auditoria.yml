@@ -1,0 +1,48 @@
+# Auditoría de dependencias: busca fallos de seguridad conocidos en las librerías.
+# Se ejecuta en cada push y además cada lunes (salen avisos nuevos aunque no cambie nada).
+name: Auditoría de dependencias
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pip-audit
+      # Servidor y cliente de terminal: si hay un fallo conocido, se marca en rojo
+      - run: pip-audit -r requirements.txt --strict
+
+  windows-app:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: desktop } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      # Lo que va DENTRO de la app (Electron y el actualizador): bloquea si hay algo moderado o peor
+      - run: npm audit --omit=dev --audit-level=moderate
+      # Herramientas de compilación (no se distribuyen): solo informa
+      - run: npm audit --audit-level=high
+        continue-on-error: true
+
+  android-app:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: android } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      # Bubblewrap solo se usa para compilar en tu equipo (la app no lo lleva): solo informa
+      - run: npm audit --audit-level=high
+        continue-on-error: true

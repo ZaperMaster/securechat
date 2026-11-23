@@ -59,6 +59,23 @@ pasa paquetes).
 - **X3DH + Double Ratchet** (el diseño de Signal): cada mensaje usa una clave nueva
   y la sesión se "cura" sola tras un compromiso. Funciona igual esté el otro
   conectado o no, gracias a las *signed prekeys* y las *one-time prekeys*.
+- **Protección poscuántica (PQXDH)**: entre clientes web, el inicio de cada sesión mezcla
+  además un secreto de **ML-KEM-768** (FIPS 203) con los X25519. Quien grabe hoy el
+  tráfico no podrá descifrarlo mañana con un ordenador cuántico. El perfil de cada
+  contacto dice si vuestra sesión la tiene.
+- **Remitente oculto (*sealed sender*)**: a tus contactos les das, dentro de los mensajes
+  cifrados, una "clave de entrega". Con ella te escriben por una conexión anónima y en un
+  sobre sellado para ti: el servidor sabe a quién va el mensaje, pero no quién lo manda.
+- **Solicitudes de mensaje, bloquear y denunciar**: lo que te escribe un desconocido llega
+  como solicitud (no sabe si lo has leído ni te puede llamar) hasta que lo aceptas. Puedes
+  no recibir nada de desconocidos, bloquear a alguien (deja de llegarte todo, no ve si
+  estás conectado y la clave de entrega cambia) y denunciarle a quien gestiona el servidor,
+  adjuntando, si quieres, sus últimos mensajes.
+- **Código de recuperación**: al crear la cuenta te da un código de 24 caracteres (120 bits).
+  Si olvidas la contraseña, con él entras y pones otra. El servidor guarda una segunda copia
+  de tu clave cifrada con el código y solo la entrega a quien demuestra conocerlo.
+- **En español o en inglés**: según el idioma del dispositivo, o el que elijas en
+  *Opciones → Apariencia*.
 - **Varios dispositivos por cuenta** (móvil y ordenador a la vez): cada mensaje se
   cifra para cada dispositivo, y lo que envías desde uno aparece en los demás.
 - **Fotos, GIF, vídeos, stickers y emojis**, cifrados igual que el texto. El tipo
@@ -224,14 +241,29 @@ Tests (los de interoperabilidad web ↔ Python necesitan Node.js; si no está, s
 ```bash
 pytest -q                          # todo, incluidas las pruebas de la web
 node --test tests/web/*.test.mjs   # solo las del cliente web
+pip install -r requirements-e2e.txt && python -m playwright install chromium
+pytest -q tests/test_browser.py    # la app en un navegador de verdad (registro, solicitudes,
+                                   # bloquear, recuperar la cuenta y una llamada de voz)
 ```
+
+GitHub Actions ejecuta todo en cada push. Además, **Dependabot** propone actualizar las
+dependencias cada semana y una **auditoría** (`pip-audit`, `npm audit`) avisa de fallos de
+seguridad conocidos en las librerías.
 
 ## Apps de Windows y Android
 
 ### Windows (`desktop/`, Electron)
 
-Instalador `SecureChat-Setup-1.0.0.exe` y versión portable. Se abre maximizada, al cerrarla
+Instalador `SecureChat-Setup-1.1.0.exe` y versión portable. Se abre maximizada, al cerrarla
 se queda en la bandeja (siguen llegando mensajes y llamadas) y puede iniciarse con Windows.
+
+- **Se actualiza sola**: cada 6 horas mira si hay una versión nueva en las
+  [Releases de GitHub](https://github.com/ZaperMaster/securechat/releases), la descarga y
+  se instala al cerrarla (o desde *Reiniciar para actualizar* en la bandeja). Antes de
+  instalar nada **comprueba una firma Ed25519** del instalador con una clave que solo tiene
+  quien publica la app (`privado/actualizaciones`, fuera de git). La firma cubre la versión
+  y el SHA-512, así que ni un instalador subido por otro ni uno viejo se aceptan. La versión
+  portable solo avisa de que hay una nueva.
 
 - **El código va dentro del programa**: abre la dirección del servidor, pero las peticiones
   de HTML/JS/CSS se sirven desde los ficheros empaquetados; a la red solo van los datos
@@ -244,8 +276,11 @@ se queda en la bandeja (siguen llegando mensajes y llamadas) y puede iniciarse c
   permite abrir un puerto de depuración remota.
 
 ```bash
-cd desktop && npm install && npm run build      # -> desktop/dist/
+cd desktop && npm install && npm run build      # -> desktop/dist/ (y firma la actualización)
 ```
+
+Para publicar una versión: sube a una release `vX.Y.Z` de GitHub el instalador, su
+`.blockmap`, su `.sig` y `latest.yml` (todo sale en `desktop/dist/`).
 
 ### Android (`android/`, Trusted Web Activity)
 
@@ -285,12 +320,15 @@ web/
   js/vault.js      sesión recordada (WebCrypto) e historial cifrado (IndexedDB)
   js/emoji.js      emojis y stickers
   sw.js, manifest.webmanifest   PWA instalable y notificaciones
-  vendor/          libsodium.js 0.7.15 (copiado, sin CDN)
+  js/i18n.js, js/lang-en.js   traducción al inglés de la interfaz
+  vendor/          libsodium.js 0.7.15 y ML-KEM-768 de @noble/post-quantum 0.7.1 (copiados, sin CDN)
 tests/
   test_ratchet.py      el protocolo, incluido un fuzz de 200 mensajes desordenados
   test_web_interop.py  ejecuta el JS en Node y conversa con Python mensaje a mensaje
   test_preview.py      vista previa de enlaces y protección contra SSRF
   test_web_client.py   lanza las pruebas del cliente web (tests/web/*.test.mjs) con Node
+  test_web_e2e.py      clientes web reales contra el servidor: remitente oculto, bloqueos, PQXDH
+  test_browser.py      la app completa en Chromium/Edge con Playwright
   web/                 pruebas del JS de la web: relleno, validación del contenido,
                        identidad, firmas y números de seguridad
 ```
@@ -321,6 +359,7 @@ la copia cifrada con tu contraseña) pero cada uno tiene sus propias prekeys.
 ```
 SPK  = X25519 firmada: Sig_IK("spk" | user | device | SPK | fecha)   (se renueva cada 7 días)
 OPK  = 20 X25519 de un solo uso; el servidor entrega una por petición y la borra
+KEM  = ML-KEM-768 firmada: Sig_IK("kem" | user | device | KEM | fecha)   (solo la web; cada 7 días)
 ```
 
 **X3DH** (para escribir a un dispositivo por primera vez, aunque esté desconectado)
@@ -329,7 +368,12 @@ OPK  = 20 X25519 de un solo uso; el servidor entrega una por petición y la borr
 DH1 = DH(IK_A, SPK_B)   DH2 = DH(EK_A, IK_B)   DH3 = DH(EK_A, SPK_B)   DH4 = DH(EK_A, OPK_B)
 AD  = A | dispositivo_A | B | dispositivo_B | IK_A | IK_B
 SK  = KDF(BLAKE2b(DH1 | DH2 | DH3 | DH4), "sc-x3dh", AD)
+
+Con KEM (PQXDH):  (CT, SS) = ML-KEM-768.Encaps(KEM_B)      el primer mensaje lleva CT
+SK  = KDF(BLAKE2b(DH1 | DH2 | DH3 | DH4 | SS), "sc-pqxdh", AD)
 ```
+
+Si el otro no publica prekey poscuántica (la terminal), se usa X3DH clásico.
 
 **Double Ratchet** (el algoritmo de Signal, tal cual)
 
@@ -347,6 +391,19 @@ sesión se guarda en el dispositivo cifrado con una clave derivada de la identid
 **Varios dispositivos**: cada mensaje se cifra una vez por cada dispositivo del
 destinatario y otra por cada uno de mis otros dispositivos (envuelto como `sync`). El
 servidor entrega a cada dispositivo o lo guarda en su cola si está desconectado.
+
+**Remitente oculto**
+
+```
+UAK   = KDF(semilla_IK, "sc-uak", época)[0..16]     cada cuenta publica la suya en el servidor
+        (va dentro de los mensajes cifrados a mis contactos; cambia de época al bloquear a alguien)
+sobre = crypto_box_seal({ from, mensaje_ratchet }, X25519(IK_destinatario))
+C -> S  (conexión anónima) sealed-send { to, device, UAK_destinatario, sobre }
+S -> B  deliver { from: null, sobre }
+```
+
+B abre el sobre y lo acepta solo si `from` es un contacto con la identidad ya fijada; el
+ratchet comprueba que de verdad es él (sin sus claves de sesión no se puede descifrar).
 
 ## Modelo de amenazas
 
@@ -367,8 +424,18 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 
 **No protegido** (limitaciones conocidas):
 
-- **Metadatos**: el servidor sabe quién habla con quién, cuándo y cuánto ocupa cada
-  mensaje. Usa TLS (`wss://`) delante del relay para ocultarlos al menos a la red.
+- **Metadatos**: con el remitente oculto, en los mensajes 1 a 1 entre contactos el
+  servidor no sabe quién envía. Aun así ve a quién va cada mensaje, cuándo y su tamaño
+  aproximado, la IP de cada conexión (y podría relacionar por tiempos la conexión anónima
+  con la normal), quién pide las prekeys de quién (al empezar una sesión) y el remitente de
+  los mensajes de grupo y de los que se mandan a quien aún no te ha dado su clave de entrega.
+  Usa TLS (`wss://`) delante del relay para ocultarlos al menos a la red.
+- **Bloqueos y denuncias**: para que un bloqueado deje de llegarte (ni avisos al móvil), el
+  servidor guarda tu lista de bloqueados. Las denuncias las lee quien gestiona el servidor
+  (`python -m securechat.server --denuncias`), con los mensajes que hayas decidido adjuntar.
+- **Poscuántico**: solo protege el *inicio* de la sesión frente a quien grabe hoy y tenga un
+  ordenador cuántico mañana; las firmas (Ed25519) y el ratchet siguen siendo clásicos, y un
+  servidor malicioso podría quitar la prekey poscuántica (el perfil lo enseñaría como "no").
 - **Primer contacto sin verificar**: si el servidor es malicioso desde el principio
   y nunca comparáis los números de seguridad, puede hacer de intermediario.
   Escribir bien el @usuario no basta: quien controla el servidor decide a quién
@@ -400,6 +467,9 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
   cuenta 15 minutos tras 10 fallos. Quien controle el propio servidor sí podría intentarlo
   sin conexión, por eso se exigen contraseñas de 10 caracteres o más que no sean de las
   más comunes.
+- **Código de recuperación**: quien lo tenga entra en tu cuenta, igual que con la contraseña.
+  No se puede adivinar (120 bits) y el servidor solo guarda el hash de la prueba, pero hay que
+  guardarlo bien. Se puede cambiar o quitar en *Opciones → Código de recuperación*.
 - **Historial local**: va cifrado con una clave derivada de tu identidad. Protege
   frente a quien copie los ficheros del navegador sin tu sesión, no frente a malware.
 - **Correo**: el servidor lo ve al crear la cuenta para enviarte el código, pero solo
@@ -439,6 +509,9 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 
 - [The X3DH Key Agreement Protocol](https://signal.org/docs/specifications/x3dh/) – Signal
 - [The Double Ratchet Algorithm](https://signal.org/docs/specifications/doubleratchet/) – Signal
+- [The PQXDH Key Agreement Protocol](https://signal.org/docs/specifications/pqxdh/) – Signal
+- [Sealed sender](https://signal.org/blog/sealed-sender/) – Signal
+- [FIPS 203: ML-KEM](https://csrc.nist.gov/pubs/fips/203/final) – NIST
 - [The Noise Protocol Framework](https://noiseprotocol.org/noise.html)
 - H. Krawczyk, [SIGMA: the "SIGn-and-MAc" approach to authenticated Diffie-Hellman](https://www.iacr.org/cryptodb/archive/2003/CRYPTO/1495/1495.pdf) (CRYPTO 2003)
 - [Documentación de libsodium](https://doc.libsodium.org/)

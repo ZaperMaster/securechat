@@ -1,0 +1,31 @@
+# Dependabot: abre un pull request cuando sale una versión nueva de una dependencia
+# (o una corrección de seguridad). Revisa cada semana Python, la app de Windows,
+# la de Android y las acciones de GitHub.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      electron-build:
+        patterns: ["electron-builder", "@electron/*"]
+
+  - package-ecosystem: npm
+    directory: /android
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: gradle
+    directory: /android
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }

@@ -33,3 +33,24 @@ jobs:
 
       - name: Pruebas del cliente web (detalle)
         run: node --test tests/web/*.test.mjs
+
+  # La app completa en un navegador de verdad: crear cuenta, solicitudes, bloquear,
+  # recuperar la cuenta con el código y una llamada de voz entre dos personas.
+  navegador:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-e2e.txt
+
+      - name: Instalar dependencias y Chromium
+        run: |
+          pip install -r requirements-e2e.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Pruebas en el navegador
+        run: python -m pytest -q tests/test_browser.py

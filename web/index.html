@@ -12,6 +12,8 @@
   <link rel="stylesheet" href="styles.css">
   <!-- Aplica el tema guardado antes de pintar, para evitar un parpadeo -->
   <script src="js/theme.js"></script>
+  <script src="js/lang-en.js"></script>
+  <script src="js/i18n.js"></script>
   <script src="vendor/libsodium-sumo.js"></script>
   <script src="vendor/libsodium-wrappers.js"></script>
   <script type="module" src="js/app.js"></script>
@@ -36,8 +38,13 @@
           <input id="login-name" required placeholder="tu@correo.com o Alejandro_99"
                  autocapitalize="none" spellcheck="false" maxlength="254" autocomplete="username">
         </label>
+        <label id="login-recovery-wrap" class="field recover-only">
+          <span>Código de recuperación</span>
+          <input id="login-recovery" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" autocapitalize="characters"
+                 spellcheck="false" maxlength="40" autocomplete="off">
+        </label>
         <label id="login-pass-wrap" class="field">
-          <span>Contraseña</span>
+          <span id="login-pass-label">Contraseña</span>
           <input id="login-pass" type="password" required minlength="8" maxlength="200" autocomplete="current-password">
         </label>
         <label id="login-pass2-wrap" class="field register-only">
@@ -60,8 +67,10 @@
         <p id="login-hint" class="hint"></p>
         <button id="login-btn" class="primary" type="submit">Entrar</button>
         <p id="login-error" class="error" role="alert"></p>
+        <p class="auth-switch login-only"><button id="to-recover" class="link" type="button">¿Has olvidado la contraseña?</button></p>
         <p class="auth-switch login-only">¿No tienes cuenta? <button id="to-register" class="link-strong" type="button">Regístrate</button></p>
-        <p class="auth-switch register-only">¿Ya tienes cuenta? <button id="to-login" class="link-strong" type="button">Inicia sesión</button></p>
+        <p class="auth-switch recover-only">¿Te has acordado? <button id="to-login2" class="link-strong" type="button">Inicia sesión</button></p>
+        <p class="auth-switch register-only not-recover">¿Ya tienes cuenta? <button id="to-login" class="link-strong" type="button">Inicia sesión</button></p>
       </form>
       <div id="verify-step" class="verify-step" hidden>
         <div class="state-icon"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M4 7l8 6 8-6"/></svg></div>
@@ -269,6 +278,7 @@
         <div class="reply-body"><strong id="reply-title"></strong><span id="reply-text"></span></div>
         <button id="reply-cancel" class="icon-btn" type="button" aria-label="Cancelar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg></button>
       </div>
+      <div id="request-bar" class="request-bar" hidden></div>
       <form id="composer" class="composer">
         <button id="emoji-btn" class="icon-btn" type="button" title="Emojis y stickers" aria-label="Emojis y stickers" disabled>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" class="ring"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5h.01M15 9.5h.01" stroke-width="3"/></svg>

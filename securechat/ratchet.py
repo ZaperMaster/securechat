@@ -90,6 +90,14 @@ def ik_x25519_pub(ed_pub: bytes) -> bytes:
     return sodium.crypto_sign_ed25519_pk_to_curve25519(ed_pub)
 
 
+KEM_PUB_BYTES = 1184  # ML-KEM-768 (la usa el cliente web para PQXDH)
+
+
+def kem_message(user: str, device: str, kem: bytes, created: int) -> bytes:
+    """Lo que firma la identidad para publicar una prekey poscuántica (igual que en ratchet.js)."""
+    return encode_fields(PROTO, b"kem", user.encode(), device.encode(), kem, created.to_bytes(8, "big"))
+
+
 def spk_message(user: str, device: str, spk: bytes, created: int) -> bytes:
     return encode_fields(PROTO, b"spk", user.encode(), device.encode(), spk, created.to_bytes(8, "big"))
 
