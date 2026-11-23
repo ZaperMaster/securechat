@@ -240,6 +240,7 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   else reconnect();
   // Solo al crear la cuenta: al volver a entrar o desde otro dispositivo no se pregunta
   if (isNew) showMyProfile({ welcome: true });
+  else if (blob) histLoginHere = true; // primer inicio de sesión aquí: al conectar, pediremos los chats
   if (isNew) seclog("Has creado tu cuenta en este dispositivo.");
   else if (blob) seclog("Has iniciado sesión en este dispositivo.");
   sweepExpired();
@@ -283,6 +284,11 @@ async function reconnect() {
 function onConnected() {
   setupPush();
   sendPrivacy();
+  // Dispositivo nuevo sin chats: los pedimos a los otros dispositivos de la cuenta
+  if (histLoginHere && ![...chats.values()].some((ch) => ch.messages.some((m) => !m.sys))) {
+    histLoginHere = false;
+    setTimeout(() => requestHistory({ quiet: true }), 1500);
+  }
   // Copia de la clave cifrada con tu contraseña: permite iniciar sesión desde otro dispositivo
   const blob = store.get(idKey(me));
   if (blob) {
@@ -549,6 +555,7 @@ function onEvent(ev) {
     case "message": return onIncoming(ev);
     case "receipt": return onReceipt(ev);
     case "sync": return onSync(ev);
+    case "history": return onHistory(ev.peer, ev.content);
     case "profile":
       client.contacts.setProfile(ev.peer, ev.content);
       renderContacts();
@@ -2765,20 +2772,37 @@ async function importBackup(file) {
     throw new Error("Esta copia no es de tu cuenta o está dañada.");
   }
   if (data.magic !== BACKUP_MAGIC) throw new Error("No es una copia de SecureChat.");
+  const added = await mergeMessages(data.convs);
+  mergeAccountData(data);
+  renderContacts();
+  renderChat();
+  return added;
+}
+
+/** Junta mensajes (de una copia o de otro dispositivo) sin duplicar los que ya hay. */
+async function mergeMessages(convs) {
   let added = 0;
-  for (const [conv, msgs] of data.convs) {
+  for (const [conv, msgs] of convs) {
+    if (typeof conv !== "string" || !Array.isArray(msgs)) continue;
     const have = new Set(chat(conv).messages.map((m) => m.id));
     for (const raw of msgs) {
-      if (have.has(raw.id)) continue;
-      const { media, ...m } = raw;
+      if (!raw || typeof raw.id !== "string" || have.has(raw.id)) continue;
+      const { media, el, url, ...m } = raw;
       m.time = new Date(m.time);
+      if (Number.isNaN(m.time.getTime())) continue;
       if (media) await history.putMedia(conv, m.id, sodium.from_base64(media, sodium.base64_variants.ORIGINAL));
       chat(conv).messages.push(m);
+      have.add(m.id);
       await history.put(conv, m);
       added++;
     }
     chat(conv).messages.sort((a, b) => a.time - b.time);
   }
+  return added;
+}
+
+/** Grupos, ajustes de los chats, programados y contactos (de una copia o de otro dispositivo). */
+function mergeAccountData(data) {
   for (const [gid, g] of Object.entries(data.groups || {})) {
     const mine = groups.get(gid);
     if (!mine || (g.v || 0) > (mine.v || 0)) groups.set(gid, g);
@@ -2798,9 +2822,6 @@ async function importBackup(file) {
       catch { /* clave distinta: se respeta la que ya teníamos */ }
     }
   }
-  renderContacts();
-  renderChat();
-  return added;
 }
 
 function lastBackupText() {
@@ -2851,11 +2872,16 @@ function showBackup(back = false) {
   const imp = withIcon("upload", "Restaurar una copia", "button", "chip");
   imp.type = "button";
   imp.onclick = () => fileIn.click();
+  const fromOther = withIcon("laptop", "Traer mis chats de otro dispositivo", "button", "chip");
+  fromOther.type = "button";
+  fromOther.onclick = () => { $("dialog").close(); requestHistory(); };
   dialog("Copia de seguridad", [
     text("Guarda todo tu historial (mensajes, fotos, notas de voz, grupos y contactos) en un fichero cifrado.", "p"),
     text("Solo tu cuenta puede abrirlo: la clave sale de tu identidad. Sirve para pasar tu historial a otro móvil u ordenador: inicia sesión allí y restaura la copia.", "p", "hint"),
     text("Ten en cuenta que si borras tu cuenta, la copia ya no se podrá abrir.", "p", "hint"),
     last, mediaL, exp, imp, fileIn, status,
+    text("¿Has entrado en un móvil u ordenador nuevo? Pide tus chats al otro dispositivo (tiene que estar abierto con tu cuenta).", "p", "hint"),
+    fromOther,
   ], subActions(back));
 }
 
@@ -5108,4 +5134,159 @@ function showStickerMaker() {
     ], [["Cancelar"], ["Guardar", () => finish(false)], ["Guardar y enviar", () => finish(true)]]);
   };
   fileIn.click();
+}
+
+
+// ---------------------------------------------------------- pasar los chats a otro dispositivo
+// Los chats solo existen en tus dispositivos (el servidor nunca los guarda). Cuando entras en
+// uno nuevo, este pide el historial a los demás; el que lo tiene pregunta «¿has sido tú?» y,
+// si aceptas, lo envía cifrado de extremo a extremo SOLO a ese dispositivo.
+
+const HIST_CHUNK = 150;                 // mensajes por trozo
+const HIST_MEDIA_MAX = 6 * 1024 * 1024; // fotos y vídeos de hasta 6 MB (los más grandes no se pasan)
+const histKey = () => `sc:histwait:${me.toLowerCase()}`;
+let histLoginHere = false;              // acabo de iniciar sesión aquí con la contraseña
+let histIncoming = null;                // {dev, msgs, media} mientras llega un historial
+const histAsked = new Set();            // dispositivos que ya me han pedido (para no preguntar dos veces)
+
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const os = /Android/i.test(ua) ? "Android" : /iPhone|iPad/i.test(ua) ? "iPhone/iPad" : /Windows/i.test(ua) ? "Windows"
+    : /Mac OS/i.test(ua) ? "Mac" : /Linux/i.test(ua) ? "Linux" : "otro sistema";
+  const app = /Electron/i.test(ua) ? "app de escritorio" : /EdgA?\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox"
+    : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "navegador";
+  return `${app} en ${os}`;
+}
+
+/** Desde el dispositivo nuevo: pide los chats a mis otros dispositivos. */
+async function requestHistory({ quiet = false } = {}) {
+  if (!client) return;
+  if (!client.myDevices.length) {
+    if (!quiet) toast("No hay otro dispositivo con tu cuenta. Abre SecureChat en el que tenga tus chats y vuelve a intentarlo.");
+    return;
+  }
+  store.set(histKey(), Date.now());
+  try {
+    await client.sendToMine({ t: "hist-req", name: deviceLabel() });
+    toast("Hemos pedido tus chats a tu otro dispositivo. Ábrelo y acepta enviarlos.");
+  } catch {
+    if (!quiet) toast("No se pudo pedir el historial ahora. Inténtalo cuando haya conexión.");
+  }
+}
+
+const waitingHistory = () => Date.now() - (store.get(histKey()) || 0) < 7 * 86400000;
+
+// Los trozos se procesan de uno en uno y en orden (guardar en el dispositivo es asíncrono:
+// sin esto, una foto podía llegar antes de que su mensaje estuviera guardado).
+let histQueue = Promise.resolve();
+function onHistory(dev, c) {
+  histQueue = histQueue.then(() => handleHistory(dev, c)).catch(() => {});
+  return histQueue;
+}
+
+async function handleHistory(dev, c) {
+  if (!me) return;
+  switch (c.t) {
+    case "hist-req": {
+      if (histAsked.has(dev)) return;
+      histAsked.add(dev);
+      const media = document.createElement("input");
+      media.type = "checkbox";
+      media.checked = true;
+      const l = text("", "label", "check");
+      l.append(media, text("Incluir fotos, vídeos y notas de voz (tarda más)", "span"));
+      const who = typeof c.name === "string" ? c.name.slice(0, 60) : "un dispositivo nuevo";
+      seclog(`Un dispositivo nuevo (${who}) ha pedido tus chats.`);
+      dialog("¿Pasar tus chats al dispositivo nuevo?", [
+        text(`Se ha iniciado sesión con tu cuenta en ${who} y pide tus chats.`, "p"),
+        text("Solo acepta si has sido tú. Se envían cifrados de extremo a extremo únicamente a ese dispositivo: el servidor no puede leerlos.", "p", "hint"),
+        l,
+      ], [["No, no he sido yo", () => { histAsked.delete(dev); client.sendToMine({ t: "hist-no" }, dev).catch(() => {}); seclog("Has rechazado enviar tus chats a un dispositivo nuevo."); }],
+        ["Enviar mis chats", () => sendHistory(dev, media.checked)]]);
+      return;
+    }
+    case "hist-no":
+      if (waitingHistory()) toast("Tu otro dispositivo no ha enviado los chats.");
+      return;
+    case "hist-meta":
+      if (!waitingHistory()) return; // solo si lo hemos pedido nosotros
+      histIncoming = { dev, msgs: 0, media: 0, total: Number(c.total) || 0 };
+      mergeAccountData(c);
+      if (c.profile && (!profile.avatar && (profile.name || me) === me)) {
+        profile = { name: String(c.profile.name || me).slice(0, 64), bio: String(c.profile.bio || "").slice(0, 140), avatar: c.profile.avatar || null };
+        store.set(`sc:profile:${me.toLowerCase()}`, profile);
+        renderMe();
+      }
+      if (Array.isArray(c.stickers) && !myStickers().length) saveMyStickers(c.stickers.slice(0, MAX_MY_STICKERS));
+      toast("Recibiendo tus chats…");
+      renderContacts();
+      return;
+    case "hist-msgs":
+      if (!histIncoming || histIncoming.dev !== dev) return;
+      histIncoming.msgs += await mergeMessages([[c.conv, c.msgs]]);
+      renderContacts();
+      if (active === c.conv) renderChat();
+      return;
+    case "hist-media": {
+      if (!histIncoming || histIncoming.dev !== dev || typeof c.data !== "string") return;
+      const m = chats.get(c.conv)?.messages.find((x) => x.id === c.id);
+      if (!m) return;
+      await history.putMedia(c.conv, c.id, sodium.from_base64(c.data, sodium.base64_variants.ORIGINAL));
+      m.hasMedia = true;
+      delete m.url;
+      history.put(c.conv, m);
+      histIncoming.media++;
+      if (active === c.conv && m.el) rerenderMessage(m);
+      return;
+    }
+    case "hist-done":
+      if (!histIncoming || histIncoming.dev !== dev) return;
+      toast(`Listo: ${histIncoming.msgs} mensajes${histIncoming.media ? ` y ${histIncoming.media} archivos` : ""} pasados desde tu otro dispositivo.`);
+      seclog("Has recibido tus chats desde otro dispositivo.");
+      histIncoming = null;
+      store.del(histKey());
+      renderContacts();
+      renderChat();
+      return;
+  }
+}
+
+/** Desde el dispositivo que tiene los chats: los envía (por trozos) al nuevo. */
+async function sendHistory(dev, withMedia) {
+  try {
+    const convs = [...chats.entries()].filter(([, ch]) => ch.messages.some((m) => !m.sys || m.id));
+    const total = convs.reduce((n, [, ch]) => n + ch.messages.length, 0);
+    toast("Enviando tus chats al dispositivo nuevo…");
+    await client.sendToMine({
+      t: "hist-meta", total, groups: Object.fromEntries(groups), contacts: client.contacts.toJSON(), meta: chatMeta,
+      scheduled: [], profile, stickers: myStickers(),
+    }, dev);
+    const mediaList = [];
+    for (const [conv, ch] of convs) {
+      // Lo que aún está saliendo (🕓) no se copia: lo enviará este dispositivo y llegará al otro como copia normal
+      const plain = ch.messages.filter((m) => m.status !== "sending").map((m) => {
+        const { el, url, ...p } = m;
+        const keepMedia = withMedia && m.hasMedia && !m.content?.once;
+        if (keepMedia) mediaList.push([conv, m.id]);
+        return { ...p, time: m.time.getTime(), hasMedia: false };
+      });
+      for (let i = 0; i < plain.length; i += HIST_CHUNK) {
+        await client.sendToMine({ t: "hist-msgs", conv, msgs: plain.slice(i, i + HIST_CHUNK) }, dev);
+      }
+    }
+    let sentMedia = 0;
+    for (const [conv, id] of mediaList) {
+      const bytes = await history.getMedia(conv, id);
+      if (!bytes || bytes.length > HIST_MEDIA_MAX) continue;
+      await client.sendToMine({ t: "hist-media", conv, id, data: sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL) }, dev);
+      sentMedia++;
+    }
+    await client.sendToMine({ t: "hist-done" }, dev);
+    seclog("Has enviado tus chats a un dispositivo nuevo.");
+    toast(`Chats enviados: ${total} mensajes${sentMedia ? ` y ${sentMedia} archivos` : ""}.`);
+  } catch (e) {
+    toast(`No se pudieron enviar los chats: ${e.message}`);
+  } finally {
+    histAsked.delete(dev);
+  }
 }

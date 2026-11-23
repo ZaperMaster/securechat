@@ -335,10 +335,10 @@ export class ChatClient {
     return { peer, status: statuses.includes("delivered") ? "delivered" : "queued" };
   }
 
-  async sendToUser(user, plaintext, { silent, ephemeral, urgent = false }) {
+  async sendToUser(user, plaintext, { silent, ephemeral, urgent = false, onlyDevice = null }) {
     const mine = user.toLowerCase() === this.name.toLowerCase();
     let info = mine ? null : await this.peerDevices(user);
-    const targets = mine ? [...this.myDevices] : [...info.list];
+    const targets = (mine ? [...this.myDevices] : [...info.list]).filter((d) => !onlyDevice || d === onlyDevice);
     plaintext = padJson(plaintext);
     const tried = new Set();
     const statuses = [];
@@ -367,7 +367,7 @@ export class ChatClient {
       }
       statuses.push(ack.status);
       // ¿Tiene dispositivos que no conocíamos? También se lo mandamos a ellos
-      const fresh = (ack.devices || []).filter((d) => d !== this.device && !tried.has(d) && !targets.includes(d));
+      const fresh = onlyDevice ? [] : (ack.devices || []).filter((d) => d !== this.device && !tried.has(d) && !targets.includes(d));
       if (fresh.length) {
         if (mine) this.myDevices = ack.devices.filter((d) => d !== this.device);
         else info = await this.peerDevices(user, true);
@@ -545,6 +545,17 @@ export class ChatClient {
     return { failed, status: (ack.results || []).some((r) => r.status === "delivered") ? "delivered" : "queued" };
   }
 
+  /**
+   * Algo solo para mis otros dispositivos (o para uno), por el canal 1 a 1 cifrado:
+   * por ejemplo, pasar el historial a un móvil nuevo. El servidor no puede leerlo.
+   */
+  sendToMine(content, device = null) {
+    const job = this.queue.then(() => this.sendToUser(this.name, JSON.stringify(content),
+      { silent: true, ephemeral: false, onlyDevice: device }));
+    this.queue = job.catch(() => {});
+    return job;
+  }
+
   /** Olvida mi cadena del grupo: el siguiente mensaje usará una nueva (alguien salió). */
   rotateGroupKey(g) {
     if (this.keys.skMine[g]) { delete this.keys.skMine[g]; this.keys.save(); }
@@ -556,6 +567,8 @@ export class ChatClient {
       // Copia de algo que envié desde otro dispositivo
       let raw;
       try { raw = JSON.parse(text); } catch { return; }
+      // Pasar el historial entre mis dispositivos (pedir, aceptar, trozos…)
+      if (typeof raw?.t === "string" && raw.t.startsWith("hist-") && dev) return this.emit("history", dev, "", raw, queuedAt);
       if (raw?.t !== "sync" || typeof raw.to !== "string") return;
       c = decodeContent(JSON.stringify(raw.c));
       if (c.t === "ignore" || c.t === "unsupported") return;
