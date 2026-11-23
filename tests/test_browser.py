@@ -205,3 +205,25 @@ def test_voice_call_between_contacts(server, browser):
     ana.page.click("#call-buttons button[aria-label='Colgar']")
     luis.page.wait_for_selector("#call-info", state="detached")
     ana.ctx.close(); luis.ctx.close()
+
+
+def test_logout_without_service_worker(server, browser):
+    """Como en la app de Windows (sin service worker): cerrar sesión no se puede quedar colgado."""
+    ctx = browser.new_context(locale="es-ES", service_workers="block")
+    page = ctx.new_page()
+    page.on("dialog", lambda d: d.accept())
+    page.goto(server)
+    page.click("#to-register")
+    page.fill("#login-name", "sinsw")
+    page.fill("#login-pass", PASSWORD)
+    page.fill("#login-pass2", PASSWORD)
+    page.click("#login-btn")
+    page.wait_for_selector(".recovery-code")
+    page.check("#dlg-body input[type=checkbox]")
+    page.click("#dlg-actions button:has-text('Listo')")
+    page.click("#dlg-actions button:has-text('Ahora no')")
+    page.wait_for_selector("#app:not([hidden])")
+    page.click("#menu-btn")
+    page.click("[data-action=logout]")
+    page.wait_for_selector("#login:not([hidden])", timeout=8000)
+    ctx.close()

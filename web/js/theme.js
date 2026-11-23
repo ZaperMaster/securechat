@@ -29,7 +29,9 @@ window.applyTheme = function (id) {
   // Color de la barra del sistema en móvil / ventana de la app instalada
   const meta = document.querySelector('meta[name="theme-color"]');
   const dark = t.id === "system" ? matchMedia("(prefers-color-scheme: dark)").matches : null;
-  if (meta) meta.content = t.id === "system" ? (dark ? "#0f1220" : "#f6f7fb") : t.swatch[0];
+  // El color de fondo real del tema (la app de Windows lo usa para su barra de título)
+  const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
+  if (meta) meta.content = bg || (t.id === "system" ? (dark ? "#0f1220" : "#f6f7fb") : t.swatch[0]);
   return t.id;
 };
 

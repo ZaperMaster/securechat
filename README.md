@@ -1,6 +1,8 @@
 # SecureChat
 
 [![Pruebas](https://github.com/ZaperMaster/securechat/actions/workflows/tests.yml/badge.svg)](https://github.com/ZaperMaster/securechat/actions/workflows/tests.yml)
+[![Web](https://img.shields.io/badge/Web-SecureChat-3ddc97?logo=googlechrome&logoColor=white&labelColor=0b1813)](https://zapermaster.github.io/securechat/)
+[![Descargar](https://img.shields.io/github/v/release/ZaperMaster/securechat?label=Descargar&color=2f9e6e)](https://github.com/ZaperMaster/securechat/releases/latest)
 
 Mensajería 1 a 1 con cifrado extremo a extremo (E2E) sobre
 [libsodium](https://doc.libsodium.org/). Tiene dos clientes que se entienden entre sí:
@@ -254,7 +256,7 @@ seguridad conocidos en las librerías.
 
 ### Windows (`desktop/`, Electron)
 
-Instalador `SecureChat-Setup-1.1.0.exe` y versión portable. Se abre maximizada, al cerrarla
+Instalador `SecureChat-Setup-1.1.1.exe` y versión portable. Se abre maximizada, al cerrarla
 se queda en la bandeja (siguen llegando mensajes y llamadas) y puede iniciarse con Windows.
 
 - **Se actualiza sola**: cada 6 horas mira si hay una versión nueva en las
@@ -283,6 +285,9 @@ Para publicar una versión: sube a una release `vX.Y.Z` de GitHub el instalador,
 `.blockmap`, su `.sig` y `latest.yml` (todo sale en `desktop/dist/`).
 
 ### Android (`android/`, Trusted Web Activity)
+
+**Descarga:** `SecureChat-Android-1.0.0.apk` en las [Releases](https://github.com/ZaperMaster/securechat/releases/latest).
+Ábrelo en el móvil y permite instalar apps de este origen cuando te lo pida.
 
 APK firmado (`SecureChat-1.0.0.apk`) y AAB para Google Play. Es una app de Android que usa
 el motor de Chrome: funcionan las llamadas y las notificaciones con la app cerrada. El

@@ -2327,12 +2327,23 @@ function reviewVoice(blob, type, dur) {
   $("composer").classList.add("reviewing");
 }
 
+/**
+ * El service worker listo, o null. Ojo: `navigator.serviceWorker.ready` no termina NUNCA si no
+ * hay ninguno registrado (la app de Windows no usa service worker): por eso el límite de tiempo.
+ */
+async function swReady(ms = 3000) {
+  if (!navigator.serviceWorker || !window.isSecureContext) return null;
+  if (!(await navigator.serviceWorker.getRegistration().catch(() => null))) return null;
+  return Promise.race([navigator.serviceWorker.ready, new Promise((r) => setTimeout(() => r(null), ms))]);
+}
+
 /** Suscribe este dispositivo a los avisos con la app cerrada (Web Push). */
 async function setupPush() {
   try {
     if (!prefs().notifications || !serverConfig.push_key || !("PushManager" in window) || !navigator.serviceWorker
       || Notification.permission !== "granted" || !client) return;
-    const reg = await navigator.serviceWorker.ready;
+    const reg = await swReady(10000);
+    if (!reg) return;
     let sub = await reg.pushManager.getSubscription();
     if (!sub) {
       const key = Uint8Array.from(atob(serverConfig.push_key.replace(/-/g, "+").replace(/_/g, "/")), (ch) => ch.charCodeAt(0));
@@ -2344,7 +2355,7 @@ async function setupPush() {
 
 async function removePush() {
   try {
-    const sub = await (await navigator.serviceWorker?.ready)?.pushManager.getSubscription();
+    const sub = await (await swReady())?.pushManager.getSubscription();
     if (sub) { client?.removePushSubscription(sub.endpoint); await sub.unsubscribe(); }
   } catch { /* */ }
 }
@@ -3523,7 +3534,7 @@ function showSettings(section = "appearance", back = true) {
 /** Idioma de la interfaz (se aplica recargando la página). */
 function langPicker() {
   const g = text("", "div", "segmented no-i18n");
-  for (const [value, label] of [["auto", "Automático (según el dispositivo)"], ["es", "Español"], ["en", "English"]]) {
+  for (const [value, label] of [["auto", "Automático"], ["es", "Español"], ["en", "English"]]) {
     const b = text(value === "auto" ? (window.t || String)(label) : label, "button");
     b.type = "button";
     b.setAttribute("aria-pressed", String((window.SC_LANG_PREF || "auto") === value));

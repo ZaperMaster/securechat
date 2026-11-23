@@ -1,7 +1,7 @@
 {
   "name": "securechat-desktop",
   "productName": "SecureChat",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "SecureChat para Windows: mensajería con cifrado de extremo a extremo",
   "author": "Alejandro Zapata",
   "license": "MIT",

@@ -804,11 +804,12 @@ self.SC_EN = {
   "últ. vez {0} a las {1}": "last seen {0} at {1}",
   "Tienes un mensaje nuevo 🔒": "You have a new message 🔒",
   "Idioma": "Language",
+  "{0} mensajes nuevos · {1}": "{0} new messages · {1}",
   "Remitente oculto": "Sealed sender",
   "Cuando escribes a un contacto, el servidor no sabe que el mensaje es tuyo: solo a quién va.": "When you write to a contact, the server doesn't know the message is from you: only who it's for.",
   "Protección poscuántica": "Post-quantum protection",
   "Las conversaciones nuevas mezclan ML-KEM-768 con X25519 (PQXDH): ni un ordenador cuántico futuro podría descifrar lo que alguien grabe hoy.": "New conversations combine ML-KEM-768 with X25519 (PQXDH): not even a future quantum computer could decrypt what someone records today.",
   "La copia que guarda el servidor va cifrada con tu contraseña (y otra con tu código de recuperación). Sin uno de los dos, nadie puede abrirla.": "The copy the server keeps is encrypted with your password (and another with your recovery code). Without one of them, nobody can open it.",
   "Idioma · Language": "Language · Idioma",
-  "Automático (según el dispositivo)": "Automatic (follow the device)",
+  "Automático": "Automatic",
 };

@@ -103,10 +103,33 @@ function setupNetwork() {
   ses.setPermissionCheckHandler((wc, permission, requestingOrigin) => allowed.has(permission) && requestingOrigin === ORIGIN);
 }
 
+// Sin barra de título de Windows: la app llega hasta arriba y los botones de minimizar,
+// maximizar y cerrar se pintan encima con el color de fondo del tema (cambia con él).
+const TITLEBAR_H = 34;
+const TITLEBAR_CSS = `
+  :root { --titlebar-h: ${TITLEBAR_H}px; }
+  body::after { content: ""; position: fixed; top: 0; left: 0; right: 0; height: ${TITLEBAR_H}px;
+    -webkit-app-region: drag; z-index: 2147483000; }
+  dialog, .msg-menu, .app-menu, .call-screen button, input, button { -webkit-app-region: no-drag; }
+  .app { height: calc(var(--app-h, 100vh) - ${TITLEBAR_H}px) !important; margin-top: ${TITLEBAR_H}px !important; }
+  .login-card { padding-top: ${TITLEBAR_H + 8}px !important; }
+`;
+
+/** Color de los símbolos (−, □, ×) que se lee bien sobre el fondo. */
+function symbolColorFor(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return "#888888";
+  const n = parseInt(m[1], 16);
+  const lum = (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum > 0.55 ? "#1f2a24" : "#e8eee9";
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1200, height: 820, minWidth: 380, minHeight: 560,
-    title: "SecureChat", icon: ICON, show: false, backgroundColor: "#0c1512", autoHideMenuBar: true,
+    title: "SecureChat", icon: ICON, show: false, backgroundColor: "#e3f1e9", autoHideMenuBar: true,
+    titleBarStyle: "hidden",
+    titleBarOverlay: { color: "#00000000", symbolColor: symbolColorFor("#e3f1e9"), height: TITLEBAR_H },
     webPreferences: {
       sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true,
       allowRunningInsecureContent: false, spellcheck: true, devTools: !app.isPackaged,
@@ -118,6 +141,14 @@ function createWindow() {
   wc.setWindowOpenHandler(({ url }) => { external(url); return { action: "deny" }; });
   wc.on("will-navigate", (e, url) => { if (new URL(url).origin !== ORIGIN) { e.preventDefault(); external(url); } });
   wc.on("will-attach-webview", (e) => e.preventDefault());
+  wc.on("dom-ready", () => wc.insertCSS(TITLEBAR_CSS).catch(() => {}));
+  // La web pone en <meta name="theme-color"> el fondo del tema: la barra lo copia
+  wc.on("did-change-theme-color", (_e, color) => {
+    if (!color || !/^#[0-9a-f]{6}$/i.test(color)) return;
+    // Transparente: debajo se ve el propio fondo de la app (con sus degradados); solo cambia el color de los símbolos
+    try { win.setTitleBarOverlay({ color: "#00000000", symbolColor: symbolColorFor(color), height: TITLEBAR_H }); } catch { /* */ }
+    win.setBackgroundColor(color);
+  });
 
   // Se abre ocupando toda la pantalla (maximizada: la barra de tareas sigue a la vista).
   // Con --oculto (al iniciar Windows) espera en la bandeja hasta que la abras.
