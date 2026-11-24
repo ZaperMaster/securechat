@@ -289,7 +289,7 @@ Para publicar una versión: sube a una release `vX.Y.Z` de GitHub el instalador,
 
 ### Android (`movil/`, Capacitor)
 
-**Descarga:** [SecureChat-Android-2.0.0.apk](https://github.com/ZaperMaster/securechat/releases/download/android-2.0.0/SecureChat-Android-2.0.0.apk).
+**Descarga:** [SecureChat-Android-2.0.1.apk](https://github.com/ZaperMaster/securechat/releases/download/v1.1.2/SecureChat-Android-2.0.1.apk).
 Ábrelo en el móvil y permite instalar apps de este origen cuando te lo pida. Se instala encima de
 la versión anterior (misma firma), pero los chats de la app vieja no pasan solos: entra con tu
 contraseña y usa *Opciones → Copia de seguridad → Traer mis chats de otro dispositivo*.
