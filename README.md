@@ -174,8 +174,11 @@ Opciones útiles:
   *contraseña de aplicación*.
 - `--email-pruebas`: igual, pero el código se muestra en la consola del servidor.
 
-Los datos del servidor (usuarios y mensajes en espera, siempre cifrados) se guardan
-en `server_users.json` y `server_queue/`.
+Los datos del servidor (usuarios y mensajes en espera, siempre cifrados) se guardan en una
+base de datos **SQLite** (`server_users.db`): cada cuenta es una fila, solo se escribe lo que
+cambia y siempre dentro de una transacción, así que un corte de luz no la deja a medias. Si
+tenías la versión anterior (`server_users.json` y `server_queue/`), se migra sola al arrancar y
+los ficheros viejos quedan como copia (`*.migrado`).
 
 ### Web
 
@@ -284,24 +287,33 @@ cd desktop && npm install && npm run build      # -> desktop/dist/ (y firma la a
 Para publicar una versión: sube a una release `vX.Y.Z` de GitHub el instalador, su
 `.blockmap`, su `.sig` y `latest.yml` (todo sale en `desktop/dist/`).
 
-### Android (`android/`, Trusted Web Activity)
+### Android (`movil/`, Capacitor)
 
-**Descarga:** `SecureChat-Android-1.0.0.apk` en las [Releases](https://github.com/ZaperMaster/securechat/releases/latest).
-Ábrelo en el móvil y permite instalar apps de este origen cuando te lo pida.
+**Descarga:** `SecureChat-Android-<versión>.apk` en las [Releases](https://github.com/ZaperMaster/securechat/releases/latest).
+Ábrelo en el móvil y permite instalar apps de este origen cuando te lo pida. Se instala encima de
+la versión anterior (misma firma), pero los chats de la app vieja no pasan solos: entra con tu
+contraseña y usa *Opciones → Copia de seguridad → Traer mis chats de otro dispositivo*.
 
-APK firmado (`SecureChat-1.0.0.apk`) y AAB para Google Play. Es una app de Android que usa
-el motor de Chrome: funcionan las llamadas y las notificaciones con la app cerrada. El
-dominio se verifica con *Digital Asset Links* (`web/.well-known/assetlinks.json`), así que
-ninguna otra app puede hacerse pasar por SecureChat. Solo pide el permiso de notificaciones.
+- **El código va dentro del APK**, como en Windows: del servidor solo llegan datos
+  (`config.json`, `/keystore` y el WebSocket). Un servidor comprometido no puede colar
+  JavaScript que robe claves. La página lleva una CSP que solo deja conectar con el servidor.
+- **Avisos con la app cerrada por Firebase Cloud Messaging** (Android no admite Web Push dentro
+  de una app). Como en la web, el aviso solo dice "tienes un mensaje nuevo" o "te están
+  llamando": ni Google ni el servidor ven el contenido ni quién lo envía. Al pasar a segundo
+  plano la app cierra la conexión para que el servidor sepa que debe avisar.
+- Sin copias en la nube ni traspaso por cable de los datos de la app (`allowBackup=false` y
+  reglas de extracción): las claves no salen del móvil.
+- Permisos: notificaciones, micrófono y cámara (llamadas y notas de voz).
 
 ```bash
-cd android && npm install
-build-android.cmd        # compila con Gradle
-bash firmar.sh           # firma con la clave de privado/android -> android/salida/
+cd movil && npm install
+bash compilar.sh         # copia la web, compila con Gradle y firma -> movil/salida/
 ```
 
-La clave de firma **no está en git** (`privado/android/`). Sin ella no se pueden publicar
-actualizaciones de la app: guarda una copia en lugar seguro.
+Necesita JDK 21 y el SDK de Android. La clave de firma y `google-services.json` de Firebase
+**no están en git** (`privado/android/`): sin la clave no se pueden publicar actualizaciones.
+En el servidor, la cuenta de servicio de Firebase va junto a la base de datos como
+`<base>_fcm.json` (por ejemplo `usuarios_fcm.json`); sin ella simplemente no hay avisos en Android.
 
 ## Arquitectura
 
@@ -433,7 +445,9 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
   servidor no sabe quién envía. Aun así ve a quién va cada mensaje, cuándo y su tamaño
   aproximado, la IP de cada conexión (y podría relacionar por tiempos la conexión anónima
   con la normal), quién pide las prekeys de quién (al empezar una sesión) y el remitente de
-  los mensajes de grupo y de los que se mandan a quien aún no te ha dado su clave de entrega.
+  los mensajes que se mandan a quien aún no te ha dado su clave de entrega. En los grupos
+  también va oculto: el cuerpo se cifra una vez y cada miembro recibe una cabecera sellada
+  con el autor, su dispositivo y el grupo.
   Usa TLS (`wss://`) delante del relay para ocultarlos al menos a la red.
 - **Bloqueos y denuncias**: para que un bloqueado deje de llegarte (ni avisos al móvil), el
   servidor guarda tu lista de bloqueados. Las denuncias las lee quien gestiona el servidor
@@ -484,11 +498,11 @@ reordenar, repetir e inyectar mensajes, y registrar usuarios falsos.
 - **Presencia**: el servidor sabe cuándo te conectas y se lo dice a quien ha hablado contigo.
 - **Código de acceso**: unos 40 bits, con un máximo de 10 intentos fallidos por IP y
   minuto. Es un filtro para que no entre cualquiera, no una medida de cifrado.
-- **Código servido por el propio servidor (web y Android)**: en la web (y en la app de
-  Android, que la abre con Chrome) el servidor entrega el JavaScript que cifra. Un
-  servidor malicioso podría servir código modificado que filtre tus claves. Es el
-  problema clásico del E2E en navegador. **La app de Windows no lo tiene**: lleva el
-  código dentro del programa y del servidor solo recibe datos. La de terminal tampoco.
+- **Código servido por el propio servidor (solo la web)**: en el navegador, el servidor
+  entrega el JavaScript que cifra. Un servidor malicioso podría servir código modificado que
+  filtre tus claves. Es el problema clásico del E2E en navegador. **Las apps de Windows y
+  Android no lo tienen**: llevan el código dentro y del servidor solo reciben datos. La de
+  terminal tampoco.
 - **`localStorage`**: la clave va cifrada, pero cualquier script inyectado en el
   origen podría leerla mientras la sesión está abierta. La CSP estricta y el uso
   exclusivo de `textContent` reducen ese riesgo.

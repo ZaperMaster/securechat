@@ -55,7 +55,13 @@ def valid_push_endpoint(endpoint) -> bool:
 
 
 def valid_subscription(sub) -> bool:
-    if not isinstance(sub, dict) or len(json.dumps(sub)) > 2000:
+    if not isinstance(sub, dict) or len(json.dumps(sub)) > 5000:
+        return False
+    if "fcm" in sub:  # app de Android: token de Firebase (la "dirección" es fcm:<token>)
+        from .fcm import valid_fcm_token
+        return (valid_fcm_token(sub["fcm"]) and sub.get("endpoint") == f"fcm:{sub['fcm']}"
+                and sub.get("lang", "es") in ("es", "en") and set(sub) <= {"fcm", "endpoint", "lang"})
+    if len(json.dumps(sub)) > 2000:
         return False
     keys = sub.get("keys") or {}
     return (valid_push_endpoint(sub.get("endpoint"))
@@ -63,8 +69,16 @@ def valid_subscription(sub) -> bool:
 
 
 class Pusher:
-    def __init__(self, key_path: Path | None, contact: str = "mailto:securechat@localhost"):
+    def __init__(self, key_path: Path | None, contact: str = "mailto:securechat@localhost", fcm_path: Path | None = None):
         self.enabled = AVAILABLE
+        self.fcm = None
+        if fcm_path and fcm_path.exists():
+            try:
+                from .fcm import Fcm
+                self.fcm = Fcm(fcm_path)
+                log.info("avisos para la app de Android (Firebase) activados")
+            except Exception:  # noqa: BLE001 - fichero mal copiado, etc.
+                log.exception("no se pudo cargar %s", fcm_path)
         self.contact = contact
         self._last: dict[str, float] = {}
         self._last_call: dict[str, float] = {}
@@ -83,6 +97,10 @@ class Pusher:
 
     def _send_sync(self, sub: dict, call: bool = False) -> bool:
         """Devuelve False si la suscripción ya no vale (hay que borrarla)."""
+        if "fcm" in sub:
+            return self.fcm.send(sub["fcm"], call, sub.get("lang", "es")) if self.fcm else True
+        if not self.enabled:
+            return True
         body = {"title": "SecureChat", "kind": "call", "body": "📞 Te están llamando"} if call \
             else {"title": "SecureChat", "body": "Tienes un mensaje nuevo 🔒"}
         try:
@@ -104,7 +122,7 @@ class Pusher:
     async def notify(self, account: str, subs: list[dict], call: bool = False) -> list[dict]:
         """Envía el aviso a todos los dispositivos. Devuelve las suscripciones que siguen vivas.
         call=True: aviso de llamada entrante (prioridad alta y caduca en un minuto)."""
-        if not self.enabled or not subs:
+        if not subs or (not self.enabled and not self.fcm):
             return subs
         now = time.monotonic()
         last, gap = (self._last_call, CALL_INTERVAL) if call else (self._last, MIN_INTERVAL)

@@ -17,8 +17,19 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="Node.js no está instalado
 def scenario(name, spy=None):
     async def main():
         srv, url, relay = await start_server()
-        seen = {"sealed": [], "identified": []}
+        seen = {"sealed": [], "identified": [], "sealed_many": [], "many": []}
         orig_sealed, orig_relay = relay._relay_sealed, relay._relay
+        orig_smany, orig_many = relay._relay_sealed_many, relay._relay_many
+
+        async def smany(ws, msg):
+            seen["sealed_many"].append(msg)
+            await orig_smany(ws, msg)
+
+        async def many(ws, sender, msg):
+            seen["many"].append((sender, msg))
+            await orig_many(ws, sender, msg)
+
+        relay._relay_sealed_many, relay._relay_many = smany, many
 
         async def sealed(ws, msg):
             seen["sealed"].append(msg)
@@ -67,3 +78,15 @@ def test_web_clients_use_pqxdh():
     assert log["bobInbox"] == ["cuántico"]
     assert log["alicePq"] and log["bobPq"]
     assert all("kem" in d["bundle"] for d in relay.registry["bob"]["devices"].values())
+
+
+def test_group_messages_hide_the_sender_too():
+    log, seen, relay = scenario("group")
+    assert "hola grupo" in log["bobInbox"] and "hola grupo" in log["carolInbox"]
+    assert "segundo" in log["bobInbox"] and "segundo" in log["carolInbox"]
+    # Fueron con cabeceras selladas: en lo que ve el servidor no está ni el autor, ni su dispositivo, ni el grupo
+    assert seen["sealed_many"] and not seen["many"]
+    for m in seen["sealed_many"]:
+        assert set(m["body"]) == {"nonce", "ct", "sig"}
+        assert all(set(t) == {"to", "device", "uak", "hdr"} for t in m["targets"])
+        assert "grupoPrueba01" not in json.dumps(m)

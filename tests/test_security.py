@@ -197,3 +197,25 @@ def test_block_hides_presence_and_report_is_stored(tmp_path):
         assert RelayServer(tmp_path / "users.json").registry["ana"]["blocked"] == ["troll"]
         await ana.close(); await troll.close(); srv.close()
     run(main())
+
+
+# ---------------------------------------------------------------- base de datos
+
+def test_old_json_database_is_migrated_to_sqlite(tmp_path):
+    key = SigningKey.generate()
+    old = {"ana": {"name": "Ana", "key": base64.b64encode(bytes(key.verify_key)).decode(), "blocked": ["luis"]}}
+    (tmp_path / "users.json").write_text(json.dumps(old), encoding="utf-8")
+    q = tmp_path / "queue"
+    q.mkdir()
+    (q / "ana__dev123456.json").write_text(json.dumps([{"from": "luis", "payload": {"x": 1}, "at": 1}]), encoding="utf-8")
+    relay = RelayServer(tmp_path / "users.json", q)
+    assert relay.registry["ana"]["name"] == "Ana" and relay.registry["ana"]["blocked"] == ["luis"]
+    assert relay.queues["ana|dev123456"][0]["payload"] == {"x": 1}
+    # Los ficheros viejos quedan como copia y no se vuelven a importar
+    assert (tmp_path / "users.json.migrado").exists() and not (tmp_path / "users.json").exists()
+    assert (tmp_path / "queue.migrado").exists()
+    relay.registry["ana"]["status"] = "away"
+    relay._save()
+    relay.store.close()
+    again = RelayServer(tmp_path / "users.json", q)
+    assert again.registry["ana"]["status"] == "away" and "ana|dev123456" in again.queues

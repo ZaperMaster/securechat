@@ -26,6 +26,20 @@ async def client(url, name, key, tmp_path, code=None):
     return c
 
 
+def stored_bytes(db):
+    """Todo lo que el servidor ha escrito en disco (base de datos y su diario WAL)."""
+    return b"".join(p.read_bytes() for p in (db.with_suffix(".db"), db.with_suffix(".db-wal")) if p.exists())
+
+
+def srv_relay_queue_empty(db, prefix):
+    from securechat.storage import Store
+    st = Store(db.with_suffix(".db"))
+    try:
+        return st.queued_count(prefix) == 0
+    finally:
+        st.close()
+
+
 def test_message_to_offline_user_survives_server_restart(tmp_path):
     async def main():
         db, queue = tmp_path / "users.json", tmp_path / "queue"
@@ -42,14 +56,14 @@ def test_message_to_offline_user_survives_server_restart(tmp_path):
         await srv.wait_closed()
 
         # El servidor se reinicia: la cola (cifrada) sigue en disco
-        files = list(queue.glob("*.json"))
-        assert files and all("diferido" not in f.read_text(encoding="utf-8") for f in files)
+        stored = stored_bytes(db)
+        assert b"bob|" in stored and "diferido".encode() not in stored
         srv, url = await start(RelayServer(db, queue))
         bob = await client(url, "bob", kb, tmp_path)
         assert (await next_event(bob, "message")).text == "¿estás?"
         assert (await next_event(bob, "message")).text == "te escribo en diferido 🕓"
         await asyncio.sleep(0.1)
-        assert not [f for f in queue.glob("bob__*.json")]  # entregados: la cola se vacía
+        assert srv_relay_queue_empty(db, "bob|")  # entregados: la cola se vacía
         await bob.close()
         srv.close()
     run(main())
@@ -135,7 +149,7 @@ def test_email_verification_for_new_accounts(tmp_path):
         c = ChatClient("persona", key, Contacts(None), prekeys_path=tmp_path / "p.json")
         await c.connect(url, email="Persona.Real@Example.com", on_verify=on_verify)
         assert tries[0] == ("p**********l@example.com", None) and "incorrecto" in tries[1][1]
-        assert "example.com" not in db.read_text()  # solo se guarda la huella del correo
+        assert b"example.com" not in stored_bytes(db)  # solo se guarda la huella del correo
         await c.close()
 
         # Las cuentas ya verificadas entran sin volver a pedirlo
@@ -274,7 +288,7 @@ def test_login_with_email_and_change_it(tmp_path):
         assert (await c._request(type="confirm-email", code=sender.sent[-1][1]))["type"] == "email-ok"
         assert (await http_get(url, "/keystore?user=laura.nueva%40example.com"))[0] == 200
         assert (await http_get(url, "/keystore?user=laura%40example.com"))[0] == 404
-        assert "example.com" not in db.read_text(encoding="utf-8")
+        assert b"example.com" not in stored_bytes(db)
 
         # Otro usuario no puede quedarse con un correo ya usado
         other = ChatClient("Pablo", SigningKey.generate(), Contacts(None), prekeys_path=tmp_path / "p.json")

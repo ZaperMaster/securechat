@@ -32,6 +32,13 @@ let reconnectTimer = null;
 let serverConfig = { code_required: false, email_required: false };
 const prefs = () => window.SC_PREFS();
 
+// App de Android (Capacitor): el código va dentro del APK y el servidor está fuera.
+// SC_SERVER lo pone movil/scripts/copiar-web.js; en la web y en Windows está vacío (mismo origen).
+const NATIVE = !!window.Capacitor?.isNativePlatform?.();
+const SERVER = String(window.SC_SERVER || "").replace(/\/$/, "");
+const api = (path) => (SERVER ? `${SERVER}/${path}` : path);
+const plugin = (name) => window.Capacitor?.Plugins?.[name] || null;
+
 // ---------------------------------------------------------------- acceso
 
 // Pantalla de acceso con dos modos: "login" (principal) y "register"
@@ -79,7 +86,7 @@ async function findKeystore(name) {
   if (local) return local;
   const code = encodeURIComponent($("login-code").value.trim());
   let r;
-  try { r = await fetch(`keystore?user=${encodeURIComponent(name)}&code=${code}`, { cache: "no-store" }); }
+  try { r = await fetch(api(`keystore?user=${encodeURIComponent(name)}&code=${code}`), { cache: "no-store" }); }
   catch { throw Object.assign(new Error("No se puede conectar con el servidor."), { code: "down" }); }
   if (r.status === 404) return null;
   if (r.status === 403) throw Object.assign(new Error("bad code"), { code: "bad_code" });
@@ -95,7 +102,7 @@ async function fetchRecovery(name, auth) {
   const code = encodeURIComponent($("login-code").value.trim());
   let r;
   try {
-    r = await fetch(`keystore?user=${encodeURIComponent(name)}&code=${code}&recovery=1`,
+    r = await fetch(api(`keystore?user=${encodeURIComponent(name)}&code=${code}&recovery=1`),
       { cache: "no-store", headers: { "X-SC-Recovery-Auth": P.b64e(auth) } });
   } catch { throw Object.assign(new Error("No se puede conectar con el servidor."), { code: "down" }); }
   if (r.status === 403 && serverConfig.code_required && !(await r.clone().json().catch(() => ({}))).code) {
@@ -112,7 +119,7 @@ async function fetchKeystoreWithAuth(name, auth) {
   const code = encodeURIComponent($("login-code").value.trim());
   let r;
   try {
-    r = await fetch(`keystore?user=${encodeURIComponent(name)}&code=${code}`,
+    r = await fetch(api(`keystore?user=${encodeURIComponent(name)}&code=${code}`),
       { cache: "no-store", headers: { "X-SC-Keystore-Auth": P.b64e(auth) } });
   } catch { throw Object.assign(new Error("No se puede conectar con el servidor."), { code: "down" }); }
   if (r.status === 403) return null; // contraseña incorrecta
@@ -297,7 +304,7 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
 
 const sendPrivacy = () => client?.setPrivacy({ lastSeen: prefs().lastSeen, status: prefs().status });
 
-const wsUrl = () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;
+const wsUrl = () => (SERVER ? `${SERVER.replace(/^http/, "ws")}/` : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`);
 
 async function reconnect() {
   if (!client || connecting || connected) return;
@@ -355,6 +362,20 @@ function scheduleReconnect(ms = 3000) {
 }
 
 /** En móvil la conexión se corta al pasar la app a segundo plano: al volver, reconectamos ya. */
+// App de Android: al pasar a segundo plano se cierra la conexión (si no hay una llamada), así el
+// servidor sabe que no estás y te avisa por Firebase; Android congelaría la app de todas formas.
+let bgPaused = false, bgTimer = null;
+function pauseInBackground() {
+  if (!NATIVE) return;
+  clearTimeout(bgTimer);
+  bgTimer = setTimeout(() => {
+    if (!document.hidden || !client || !connected || call || gcall) return;
+    bgPaused = true;
+    clearTimeout(reconnectTimer);
+    client.close();
+  }, 8000);
+}
+
 function wakeUp() {
   if (client && !connected && !replaced && !connecting) scheduleReconnect(50);
 }
@@ -373,7 +394,7 @@ let downTimer = null;
 /** Comprueba si el servidor responde. Devuelve true/false. */
 async function probe() {
   try {
-    const r = await fetch(`config.json?t=${Date.now()}`, { cache: "no-store" });
+    const r = await fetch(api(`config.json?t=${Date.now()}`), { cache: "no-store" });
     if (!r.ok) return false;
     serverConfig = await r.json();
     $("login-code-wrap").hidden = !serverConfig.code_required;
@@ -636,6 +657,7 @@ function onEvent(ev) {
     case "disconnected":
       if (!client) break;
       connected = false;
+      if (bgPaused) { setConn(false); break; } // cerrada a propósito en segundo plano
       if (ev.text === "deleted") {
         // La cuenta se ha borrado desde otro dispositivo: aquí tampoco debe quedar nada
         const name = me;
@@ -1383,9 +1405,24 @@ function fmtSize(n) {
 
 function downloadBytes(bytes, name) {
   // Siempre como binario genérico: un HTML recibido nunca se ejecuta en nuestra web
+  saveFile(new Blob([bytes], { type: "application/octet-stream" }), name);
+}
+
+/** Guarda un archivo. En la app de Android abre «Compartir» (guardar en Archivos, Drive, etc.). */
+async function saveFile(blob, name) {
+  const safe = String(name || "archivo").replace(/[\\/:*?"<>|]+/g, "_").slice(0, 120);
+  const fs = plugin("Filesystem"), share = plugin("Share");
+  if (NATIVE && fs && share) {
+    try {
+      const data = sodium.to_base64(new Uint8Array(await blob.arrayBuffer()), sodium.base64_variants.ORIGINAL);
+      const { uri } = await fs.writeFile({ path: safe, data, directory: "CACHE" });
+      await share.share({ title: safe, files: [uri] });
+    } catch (e) { if (!/cancel/i.test(e?.message || "")) toast("No se pudo guardar el archivo."); }
+    return;
+  }
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
-  a.download = name;
+  a.href = URL.createObjectURL(blob);
+  a.download = safe;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
@@ -1587,7 +1624,7 @@ function toast(msg) {
 // ------------------------------------------------------------- enlaces de invitación
 
 const INVITE_RE = /^#unirse=([A-Za-z0-9_-]{8,32})~([0-9a-f]{32})~([^~]{1,80})$/;
-const inviteUrl = (g) => `${location.origin}${location.pathname}#unirse=${g.id}~${g.invite}~${encodeURIComponent(me)}`;
+const inviteUrl = (g) => `${SERVER || location.origin + location.pathname.replace(/index\.html$/, "")}${SERVER ? "/" : ""}#unirse=${g.id}~${g.invite}~${encodeURIComponent(me)}`;
 
 function inviteBox(g) {
   const box = text("", "div", "invite-box");
@@ -2337,8 +2374,36 @@ async function swReady(ms = 3000) {
   return Promise.race([navigator.serviceWorker.ready, new Promise((r) => setTimeout(() => r(null), ms))]);
 }
 
+/**
+ * App de Android: los avisos con la app cerrada llegan por Firebase (no hay Web Push).
+ * El servidor recibe solo el token de Firebase; el aviso no lleva el contenido.
+ */
+let nativePushToken = null;
+async function setupNativePush() {
+  const PN = plugin("PushNotifications");
+  if (!PN || !client) return;
+  try {
+    await PN.createChannel({ id: "mensajes", name: t("Mensajes"), importance: 4, visibility: 0 });
+    await PN.createChannel({ id: "llamadas", name: t("Llamadas"), importance: 5, visibility: 1, vibration: true });
+    let perm = await PN.checkPermissions();
+    if (perm.receive === "prompt" || perm.receive === "prompt-with-rationale") perm = await PN.requestPermissions();
+    if (perm.receive !== "granted") return;
+    if (!setupNativePush.listening) {
+      setupNativePush.listening = true;
+      PN.addListener("registration", ({ value }) => {
+        nativePushToken = value;
+        client?.setPushSubscription({ fcm: value, endpoint: `fcm:${value}`, lang: window.SC_LANG === "en" ? "en" : "es" });
+      });
+      PN.addListener("registrationError", () => {});
+    }
+    await PN.register();
+  } catch { /* sin Google Play Services: sin avisos con la app cerrada */ }
+}
+const t = (s) => (window.t ? window.t(s) : s);
+
 /** Suscribe este dispositivo a los avisos con la app cerrada (Web Push). */
 async function setupPush() {
+  if (NATIVE) { if (prefs().notifications) setupNativePush(); return; }
   try {
     if (!prefs().notifications || !serverConfig.push_key || !("PushManager" in window) || !navigator.serviceWorker
       || Notification.permission !== "granted" || !client) return;
@@ -2354,6 +2419,12 @@ async function setupPush() {
 }
 
 async function removePush() {
+  if (NATIVE) {
+    if (nativePushToken) client?.removePushSubscription(`fcm:${nativePushToken}`);
+    try { await plugin("PushNotifications")?.unregister(); } catch { /* */ }
+    nativePushToken = null;
+    return;
+  }
   try {
     const sub = await (await swReady())?.pushManager.getSubscription();
     if (sub) { client?.removePushSubscription(sub.endpoint); await sub.unsubscribe(); }
@@ -2642,11 +2713,7 @@ async function showRecoveryCode({ then = null, back = false } = {}) {
   save.onclick = () => {
     const blob = new Blob([`SecureChat - código de recuperación de @${me}\r\n\r\n${code}\r\n\r\n`
       + "Sirve para entrar en tu cuenta si olvidas la contraseña. Guárdalo en un sitio seguro y no se lo des a nadie.\r\n"], { type: "text/plain" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `securechat-recuperacion-${me}.txt`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    saveFile(blob, `securechat-recuperacion-${me}.txt`);
   };
   const btns = text("", "div", "recovery-btns");
   btns.append(copy, save);
@@ -3030,11 +3097,7 @@ async function exportBackup({ media = true } = {}) {
   const ct = sodium.crypto_secretbox_easy(new TextEncoder().encode(JSON.stringify(data)), nonce, key);
   const out = new Uint8Array(24 + ct.length);
   out.set(nonce); out.set(ct, 24);
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([out], { type: "application/octet-stream" }));
-  a.download = `securechat-${me}-${new Date().toISOString().slice(0, 10)}.scbackup`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  saveFile(new Blob([out], { type: "application/octet-stream" }), `securechat-${me}-${new Date().toISOString().slice(0, 10)}.scbackup`);
   store.set(backupKey(), Date.now());
   return convs.reduce((n, [, l]) => n + l.length, 0);
 }
@@ -4772,6 +4835,7 @@ function viewImage(url, name) {
   a.download = name || "imagen";
   a.textContent = "Descargar";
   a.className = "chip";
+  if (NATIVE) a.onclick = async (e) => { e.preventDefault(); saveFile(await (await fetch(url)).blob(), name || "imagen.jpg"); };
   dialog(name || "Imagen", [img, a]);
 }
 
@@ -4974,7 +5038,9 @@ async function main() {
   };
   $("messages").addEventListener("scroll", closeMsgMenu, { passive: true });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) return;
+    if (document.hidden) { pauseInBackground(); return; }
+    clearTimeout(bgTimer);
+    if (bgPaused) { bgPaused = false; reconnect(); }
     wakeUp();
     if (active) markRead(active);
   });
@@ -4994,7 +5060,7 @@ async function main() {
   } else if (!up) {
     showDown(true);
   }
-  if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js");
+  if (!NATIVE && "serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js");
 }
 
 main();

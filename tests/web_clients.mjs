@@ -67,6 +67,24 @@ if (scenario === "sealed") {
   log.aliceInbox = alice.inbox;
   log.bobInbox = bob.inbox;
   alice.close(); bob.close();
+} else if (scenario === "group") {
+  const alice = await user("alice"), bob = await user("bob"), carol = await user("carol");
+  await until(() => alice.myAk && bob.myAk && carol.myAk);
+  // Se conocen: así cada uno tiene la clave de entrega de los demás
+  for (const [a, b] of [[alice, bob], [alice, carol], [bob, carol]]) {
+    await a.sendText(b.name, `hola ${b.name}`);
+    await until(() => b.inbox.includes(`hola ${b.name}`));
+    await b.sendText(a.name, `hola ${a.name}`);
+    await until(() => a.inbox.includes(`hola ${a.name}`));
+  }
+  const g = "grupoPrueba01";
+  await alice.sendGroup(g, ["bob", "carol"], { t: "text", body: "hola grupo", mid: "mensajeGrupo01", g });
+  await until(() => bob.inbox.includes("hola grupo") && carol.inbox.includes("hola grupo"));
+  await alice.sendGroup(g, ["bob", "carol"], { t: "text", body: "segundo", mid: "mensajeGrupo02", g });
+  await until(() => bob.inbox.includes("segundo") && carol.inbox.includes("segundo"));
+  log.bobInbox = bob.inbox;
+  log.carolInbox = carol.inbox;
+  alice.close(); bob.close(); carol.close();
 } else if (scenario === "pq") {
   const alice = await user("alice"), bob = await user("bob");
   await wait(300); // que suban sus prekeys

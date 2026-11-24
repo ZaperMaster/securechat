@@ -38,11 +38,12 @@ jobs:
 
   android-app:
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: android } }
+    defaults: { run: { working-directory: movil } }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with: { node-version: "22" }
-      # Bubblewrap solo se usa para compilar en tu equipo (la app no lo lleva): solo informa
+      # Capacitor y sus plugins van dentro del APK: bloquea si hay algo moderado o peor
+      - run: npm audit --omit=dev --audit-level=moderate
       - run: npm audit --audit-level=high
         continue-on-error: true

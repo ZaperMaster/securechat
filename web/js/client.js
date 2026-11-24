@@ -350,6 +350,27 @@ export class ChatClient {
     });
   }
 
+  /** Abre una caja sellada para mí (crypto_box_seal con mi identidad convertida a X25519). */
+  openSealed(b64) {
+    const S = sodium();
+    const box = S.crypto_box_seal_open(b64d(b64), S.crypto_sign_ed25519_pk_to_curve25519(this.identity.publicKey),
+      S.crypto_sign_ed25519_sk_to_curve25519(this.identity.privateKey));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(box));
+  }
+
+  /** Mensaje de grupo con remitente oculto: la cabecera sellada dice quién, desde qué dispositivo y de qué grupo. */
+  onSealedGroup(payload, queuedAt) {
+    let h;
+    try { h = this.openSealed(payload.hdr); } catch { return; }
+    const b = payload.body;
+    if (!h || typeof h.from !== "string" || !NAME_OK.test(h.from) || same(h.from, this.name) || !this.contacts.pinned(h.from)) return;
+    if (!b || typeof b.nonce !== "string" || typeof b.ct !== "string" || typeof b.sig !== "string") return;
+    // La firma de su sender key (que cubre grupo, autor, dispositivo y número) comprueba que es él
+    const sk = { kind: "sk", g: h.g, dev: h.dev, kid: h.kid, n: h.n, nonce: b.nonce, ct: b.ct, sig: b.sig };
+    try { this.onGroupPayload(h.from, sk, queuedAt); }
+    catch (e) { if (!(e instanceof CryptoError)) throw e; }
+  }
+
   /** Abre un sobre sellado: dentro va quién lo manda y el mensaje cifrado con el ratchet. */
   onSealed(payload, queuedAt) {
     let inner;
@@ -564,6 +585,7 @@ export class ChatClient {
     const req = msg.id != null ? this.requests.get(msg.id) : null;
     if (msg.type === "deliver") {
       if (msg.payload?.kind === "sealed") return this.onSealed(msg.payload, msg.queued_at);
+      if (msg.payload?.kind === "sealed-g") return this.onSealedGroup(msg.payload, msg.queued_at);
       return this.onDeliver(msg.from, msg.payload, msg.queued_at);
     }
     if (msg.type === "uak") { if (Number.isInteger(msg.epoch)) this.setAkEpoch(msg.epoch); return; }
@@ -684,7 +706,7 @@ export class ChatClient {
     const payload = skEncrypt(key, g, this.name, this.device, padJson(JSON.stringify(content)));
     this.keys.save();
     const silent = SILENT_TYPES.has(content.t);
-    const ack = await this.request({ type: "send-many", targets, payload, ...(silent ? { silent: true } : {}) }, 30000);
+    const ack = await this.sendManyMaybeSealed(targets, payload, silent);
     // 3) ¿Algún miembro tiene un dispositivo nuevo? Le damos la clave y se lo mandamos a él
     for (const [user, devs] of Object.entries(ack.devices || {})) {
       const fresh = devs.filter((d) => !key.sentTo.includes(`${user.toLowerCase()}|${d}`));
@@ -693,7 +715,7 @@ export class ChatClient {
         await this.sendToUser(user, JSON.stringify(distribution(g, { ...key, ...before })), { silent: true, ephemeral: false });
         for (const d of fresh) key.sentTo.push(`${user.toLowerCase()}|${d}`);
         this.keys.save();
-        await this.request({ type: "send-many", targets: fresh.map((device) => ({ to: user, device })), payload });
+        await this.sendManyMaybeSealed(fresh.map((device) => ({ to: user, device })), payload, silent);
       } catch { /* lo recibirá con el siguiente mensaje */ }
     }
     // Copia para mis otros dispositivos (por el canal 1 a 1, como siempre)
@@ -701,6 +723,50 @@ export class ChatClient {
       await this.sendToUser(this.name, JSON.stringify({ t: "sync", to: members[0], c: content }), { silent: true, ephemeral: false }).catch(() => {});
     }
     return { failed, status: (ack.results || []).some((r) => r.status === "delivered") ? "delivered" : "queued" };
+  }
+
+  /**
+   * Reparte un mensaje de grupo. A quien me ha dado su clave de entrega se le manda por la
+   * conexión anónima con una cabecera sellada (el servidor no sabe quién lo envía ni de qué
+   * grupo es); al resto, de la forma normal. Devuelve el ack combinado.
+   */
+  async sendManyMaybeSealed(targets, payload, silent) {
+    const flags = silent ? { silent: true } : {};
+    const S = sodium();
+    const sealed = [], plain = [];
+    for (const t of targets) {
+      const ak = this.contacts.get(t.to)?.ak;
+      const ik = this.deviceCache.get(t.to.toLowerCase())?.ik;
+      if (ak && AK_RE.test(ak) && ik) {
+        const hdr = { from: this.name, g: payload.g, dev: payload.dev, kid: payload.kid, n: payload.n };
+        sealed.push({ to: t.to, device: t.device, uak: ak,
+          hdr: b64e(S.crypto_box_seal(utf8(JSON.stringify(hdr)), S.crypto_sign_ed25519_pk_to_curve25519(ik))) });
+      } else plain.push(t);
+    }
+    const results = [], devices = {};
+    if (sealed.length) {
+      let ack = null;
+      try {
+        ack = await this.anonRequest({ type: "sealed-send-many", targets: sealed,
+          body: { nonce: payload.nonce, ct: payload.ct, sig: payload.sig }, ...flags }, 30000);
+      } catch (e) {
+        if (e.code !== "down" && e.code !== "rate_limited") throw e; // sin respuesta: no se repite
+      }
+      if (!ack) plain.push(...sealed.map(({ to, device }) => ({ to, device })));
+      else {
+        Object.assign(devices, ack.devices || {});
+        for (const r of ack.results || []) {
+          if (r.status === "bad_uak") { this.contacts.setAk(r.to, null); plain.push({ to: r.to, device: r.device }); }
+          else results.push(r);
+        }
+      }
+    }
+    if (plain.length) {
+      const ack = await this.request({ type: "send-many", targets: plain, payload, ...flags }, 30000);
+      results.push(...(ack.results || []));
+      for (const [u, d] of Object.entries(ack.devices || {})) devices[u] = d;
+    }
+    return { results, devices };
   }
 
   /**

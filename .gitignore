@@ -12,3 +12,11 @@ dist/
 *.spec
 *_secret.key
 *_vapid.pem
+*_fcm.json
+*.db
+*.db-wal
+*.db-shm
+*.migrado
+movil/www/
+movil/node_modules/
+salida/

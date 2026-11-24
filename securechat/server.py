@@ -182,7 +182,8 @@ class RelayServer:
         # Con email_sender, las cuentas nuevas deben confirmar un correo (anti-bots)
         self.email_sender = email_sender
         self.email_hash = EmailHasher(db_path.with_name(db_path.stem + "_secret.key") if db_path else None)
-        self.pusher = Pusher(db_path.with_name(db_path.stem + "_vapid.pem") if db_path else None)
+        self.pusher = Pusher(db_path.with_name(db_path.stem + "_vapid.pem") if db_path else None,
+                             fcm_path=db_path.with_name(db_path.stem + "_fcm.json") if db_path else None)
         # Si hay código, solo entra quien lo conozca (el dueño se lo da a sus amigos)
         self.access_code = normalize_code(access_code) or None
         self._code_fails: dict[str, list[float]] = {}
@@ -203,51 +204,41 @@ class RelayServer:
         self.online: dict[str, dict[str, ServerConnection]] = {}  # canon -> {dispositivo: conexión}
         self.queues: dict[str, list[dict]] = {}                   # "canon|dispositivo" -> sobres
         self.related: dict[str, set[str]] = {}                    # con quién ha hablado cada uno
-        if db_path and db_path.exists():
-            for name, v in json.loads(db_path.read_text(encoding="utf-8")).items():
-                if isinstance(v, str):  # formato antiguo: {"nombre": "clave"}
-                    v = {"name": name, "key": v}
-                self.registry[canon(v["name"])] = {
-                    "name": v["name"], "key": b64d(v["key"]), "email": v.get("email"),
-                    "keystore": v.get("keystore"), "keystore_auth": v.get("keystore_auth"), "last_seen": v.get("last_seen"),
-                    "recovery": v.get("recovery"), "recovery_auth": v.get("recovery_auth"),
-                    "blocked": v.get("blocked", []), "uak": v.get("uak"), "uak_epoch": v.get("uak_epoch"),
-                    "hide_last_seen": v.get("hide_last_seen", False), "push": v.get("push", []),
-                    "status": v.get("status", "online"),
-                    "devices": v.get("devices", {})}
-        if queue_dir and queue_dir.exists():
-            for f in queue_dir.glob("*__*.json"):
-                c, dev = f.stem.split("__", 1)
-                self.queues[f"{c}|{dev}"] = json.loads(f.read_text(encoding="utf-8"))
+        # Datos en SQLite (usuarios.db junto a donde antes iba usuarios.json, que se migra solo)
+        self.store = None
+        if db_path:
+            from .storage import Store, migrate_legacy
+            self.store = Store(db_path.with_suffix(".db"))
+            migrate_legacy(self.store, db_path, queue_dir)
+            for c, v in self.store.load_accounts().items():
+                self.registry[canon(v["name"])] = self._from_row(v)
+            self.queues = self.store.load_queues()
 
     # ------------------------------------------------------------ persistencia
 
+    _FIELDS = ("email", "keystore", "keystore_auth", "last_seen", "recovery", "recovery_auth", "uak", "uak_epoch")
+
+    @classmethod
+    def _from_row(cls, v: dict) -> dict:
+        r = {"name": v["name"], "key": b64d(v["key"]), **{k: v.get(k) for k in cls._FIELDS},
+             "blocked": v.get("blocked", []), "hide_last_seen": v.get("hide_last_seen", False),
+             "push": v.get("push", []), "status": v.get("status", "online"), "devices": v.get("devices", {})}
+        return r
+
+    @classmethod
+    def _to_row(cls, r: dict) -> dict:
+        return {"name": r["name"], "key": b64e(r["key"]), **{k: r.get(k) for k in cls._FIELDS},
+                "blocked": r.get("blocked", []), "hide_last_seen": r.get("hide_last_seen", False),
+                "push": r.get("push", []), "status": r.get("status", "online"), "devices": r.get("devices", {})}
+
     def _save(self) -> None:
-        if not self.db_path:
-            return
-        data = {c: {"name": r["name"], "key": b64e(r["key"]), "email": r.get("email"),
-                    "keystore": r.get("keystore"), "keystore_auth": r.get("keystore_auth"), "last_seen": r.get("last_seen"),
-                    "recovery": r.get("recovery"), "recovery_auth": r.get("recovery_auth"),
-                    "blocked": r.get("blocked", []), "uak": r.get("uak"), "uak_epoch": r.get("uak_epoch"),
-                    "hide_last_seen": r.get("hide_last_seen", False), "push": r.get("push", []),
-                    "status": r.get("status", "online"),
-                    "devices": r.get("devices", {})}
-                for c, r in self.registry.items()}
-        tmp = self.db_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, self.db_path)
+        """Guarda en la base de datos las cuentas que han cambiado (en una transacción)."""
+        if self.store:
+            self.store.save_accounts({c: self._to_row(r) for c, r in self.registry.items()})
 
     def _save_queue(self, qk: str) -> None:
-        if not self.queue_dir:
-            return
-        self.queue_dir.mkdir(parents=True, exist_ok=True)
-        f = self.queue_dir / (qk.replace("|", "__") + ".json")
-        if self.queues.get(qk):
-            tmp = f.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.queues[qk]), encoding="utf-8")
-            os.replace(tmp, f)
-        elif f.exists():
-            f.unlink()
+        if self.store:
+            self.store.save_queue(qk, self.queues.get(qk, []))
 
     # ------------------------------------------------------------ conexión
 
@@ -673,7 +664,7 @@ class RelayServer:
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
-                    if not isinstance(msg, dict) or msg.get("type") != "sealed-send":
+                    if not isinstance(msg, dict) or msg.get("type") not in ("sealed-send", "sealed-send-many"):
                         await _send(ws, type="error", code="unknown_type", message="tipo desconocido")
                         continue
                     now = time.monotonic()
@@ -681,7 +672,10 @@ class RelayServer:
                     if len(hits) > SEALED_LIMIT:
                         await _send(ws, type="error", id=msg.get("id"), code="rate_limited", message="demasiados envíos, espera")
                         continue
-                    await self._relay_sealed(ws, msg)
+                    if msg["type"] == "sealed-send":
+                        await self._relay_sealed(ws, msg)
+                    else:
+                        await self._relay_sealed_many(ws, msg)
                 except (ValueError, KeyError, TypeError, CryptoError, json.JSONDecodeError):
                     await _send(ws, type="error", code="bad_request", message="petición inválida")
         except ConnectionClosed:
@@ -723,6 +717,52 @@ class RelayServer:
         if not msg.get("silent") and not msg.get("urgent") and not self.online.get(ct) and r.get("push"):
             asyncio.get_running_loop().create_task(self._push(ct))
         await _send(ws, type="ack", id=rid, status="queued", devices=devices)
+
+    async def _relay_sealed_many(self, ws: ServerConnection, msg: dict) -> None:
+        """Mensaje de grupo con remitente oculto: el cuerpo (cifrado una vez con la sender key)
+        es el mismo para todos, y cada destinatario trae su cabecera sellada (quién lo envía,
+        su dispositivo y el grupo, que solo ese destinatario puede abrir) y su clave de entrega."""
+        targets, body, rid = msg.get("targets"), msg.get("body"), msg.get("id")
+        if not isinstance(targets, list) or not 0 < len(targets) <= MAX_FANOUT or not isinstance(body, dict) \
+                or set(body) != {"nonce", "ct", "sig"} or not all(isinstance(body[k], str) for k in body):
+            await _send(ws, type="error", code="bad_request", id=rid, message="envío de grupo inválido")
+            return
+        now = int(time.time())
+        results, devices, to_push = [], {}, set()
+        for tg in targets:
+            if not isinstance(tg, dict):
+                results.append({"status": "bad_request"})
+                continue
+            to, device, uak, hdr = tg.get("to"), tg.get("device"), tg.get("uak"), tg.get("hdr")
+            ct = canon(to) if isinstance(to, str) else ""
+            r = self.registry.get(ct)
+            if not r or not r.get("uak") or not isinstance(uak, str) or not hmac.compare_digest(uak.encode(), r["uak"].encode()):
+                results.append({"to": to, "device": device, "status": "bad_uak"})
+                continue
+            if not isinstance(hdr, str) or len(hdr) > 2048:
+                results.append({"to": to, "device": device, "status": "bad_request"})
+                continue
+            devs = list(r.get("devices", {}))
+            devices[r["name"]] = devs
+            if device not in devs:
+                results.append({"to": to, "device": device, "status": "no_device"})
+                continue
+            payload = {"kind": "sealed-g", "hdr": hdr, "body": body}
+            conn = self.online.get(ct, {}).get(device)
+            if conn is not None:
+                try:
+                    await conn.send(json.dumps({"type": "deliver", "from": None, "payload": payload}))
+                    results.append({"to": to, "device": device, "status": "delivered"})
+                    continue
+                except ConnectionClosed:
+                    pass
+            self._enqueue(f"{ct}|{device}", {"from": None, "payload": payload, "at": now})
+            results.append({"to": to, "device": device, "status": "queued"})
+            if not msg.get("silent") and not self.online.get(ct) and r.get("push"):
+                to_push.add(ct)
+        for ct in to_push:
+            asyncio.get_running_loop().create_task(self._push(ct))
+        await _send(ws, type="ack", id=rid, status="ok", results=results, devices=devices)
 
     async def _preview(self, ws: ServerConnection, msg: dict) -> None:
         """Vista previa de un enlace (en otro hilo, para no frenar al resto)."""

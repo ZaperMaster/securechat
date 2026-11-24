@@ -207,7 +207,7 @@
         <div class="step"><h3>Identidad propia</h3><p>Una clave Ed25519 por cuenta, que nunca sale de tus dispositivos sin cifrar con tu contraseña (Argon2id).</p></div>
         <div class="step"><h3>X3DH + PQXDH</h3><p>El primer mensaje mezcla 4 intercambios X25519 y un secreto ML-KEM-768 (FIPS 203).</p></div>
         <div class="step"><h3>Double Ratchet</h3><p>Una clave nueva por mensaje (XChaCha20-Poly1305): robar una no abre las demás.</p></div>
-        <div class="step"><h3>Sobre sellado</h3><p>Entre contactos, el mensaje viaja sin remitente por una conexión anónima.</p></div>
+        <div class="step"><h3>Sobre sellado</h3><p>Entre contactos, y también en los grupos, el mensaje viaja sin remitente por una conexión anónima.</p></div>
       </div>
       <div style="height:34px"></div>
       <div class="tablebox">
@@ -216,11 +216,11 @@
           <tbody>
             <tr><td>Leer los mensajes en el servidor</td><td><span class="yes">✓</span> Se cifran en tu dispositivo; el servidor no tiene ninguna clave</td></tr>
             <tr><td>Grabar hoy y descifrar con un ordenador cuántico</td><td><span class="yes">✓</span> PQXDH con ML-KEM-768 al empezar cada sesión</td></tr>
-            <tr><td>Saber quién escribe a quién</td><td><span class="yes">✓</span> Remitente oculto (sealed sender) en los chats entre contactos</td></tr>
+            <tr><td>Saber quién escribe a quién</td><td><span class="yes">✓</span> Remitente oculto (sealed sender) en chats y grupos entre contactos</td></tr>
             <tr><td>Suplantar a un contacto</td><td><span class="yes">✓</span> Claves fijadas, aviso si cambian y números de seguridad para comparar</td></tr>
             <tr><td>Robar una clave y leer lo anterior</td><td><span class="yes">✓</span> Secreto hacia adelante y «curación» del ratchet</td></tr>
             <tr><td>Deducir el mensaje por su tamaño</td><td><span class="yes">✓</span> Relleno a tamaños fijos (256 B, 1 KB, 4 KB…)</td></tr>
-            <tr><td>Servidor que cambia el código de la app</td><td><span class="yes">✓</span> En Windows el código va dentro del programa, y sus actualizaciones van firmadas</td></tr>
+            <tr><td>Servidor que cambia el código de la app</td><td><span class="yes">✓</span> En Windows y Android el código va dentro de la app, y las actualizaciones van firmadas</td></tr>
           </tbody>
         </table>
       </div>
@@ -240,7 +240,7 @@
         </div>
         <div class="mode">
           <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>Android</h3>
-          <p>App firmada (<code>.apk</code>). Ábrela en el móvil y permite instalar apps de este origen cuando te lo pida.</p>
+          <p>App firmada (<code>.apk</code>) con el código dentro y avisos aunque esté cerrada. Ábrela en el móvil y permite instalar apps de este origen cuando te lo pida.</p>
           <a class="btn btn-primary" href="https://github.com/ZaperMaster/securechat/releases/latest">Descargar para Android</a>
         </div>
         <div class="mode">
