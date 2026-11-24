@@ -34,6 +34,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY AUTOINCREMENT, qk TEXT NOT NULL, item TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS queue_qk ON queue (qk);
             CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+            CREATE TABLE IF NOT EXISTS cloud (canon TEXT PRIMARY KEY, data TEXT NOT NULL, at INTEGER NOT NULL);
         """)
         self._written: dict[str, str] = {}
 
@@ -79,6 +80,22 @@ class Store:
 
     def queued_count(self, prefix: str = "") -> int:
         return self.db.execute("SELECT COUNT(*) FROM queue WHERE qk LIKE ?", (prefix + "%",)).fetchone()[0]
+
+    # ------------------------------------------------------------ copia cifrada de cada cuenta
+
+    def cloud_get(self, canon: str) -> tuple[str, int] | None:
+        with self._lock:
+            row = self.db.execute("SELECT data, at FROM cloud WHERE canon = ?", (canon,)).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def cloud_put(self, canon: str, data: str, at: int) -> None:
+        with self._tx():
+            self.db.execute("INSERT INTO cloud (canon, data, at) VALUES (?, ?, ?) "
+                            "ON CONFLICT(canon) DO UPDATE SET data = excluded.data, at = excluded.at", (canon, data, at))
+
+    def cloud_delete(self, canon: str) -> None:
+        with self._tx():
+            self.db.execute("DELETE FROM cloud WHERE canon = ?", (canon,))
 
     # ------------------------------------------------------------ varios
 

@@ -256,6 +256,7 @@ function saveDeviceData(username, data) {
 async function startApp(username, { mustConnect = false, email = null, blob = null, isNew = false } = {}) {
   const contacts = new Contacts(store.get(`sc:contacts:${username.toLowerCase()}`) || {}, (data) => {
     store.set(`sc:contacts:${(me || username).toLowerCase()}`, data);
+    markCloudDirty();
     renderContacts();
     renderHeader();
   });
@@ -296,6 +297,7 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   if (isNew) seclog("Has creado tu cuenta en este dispositivo.");
   else if (blob) seclog("Has iniciado sesión en este dispositivo.");
   sweepExpired();
+  startCloudBackups();
   checkInvite();
   runScheduled();
   setTimeout(maybeRemindBackup, 20000);
@@ -339,7 +341,14 @@ function onConnected() {
   // Dispositivo nuevo sin chats: los pedimos a los otros dispositivos de la cuenta
   if (histLoginHere && ![...chats.values()].some((ch) => ch.messages.some((m) => !m.sys))) {
     histLoginHere = false;
-    setTimeout(() => requestHistory({ quiet: true }), 1500);
+    setTimeout(async () => {
+      const n = prefs().cloudBackup ? await restoreCloud() : 0;
+      if (n) {
+        toast(`Se han recuperado ${n} mensajes, tus grupos y tus contactos.`);
+        seclog("Has recuperado tus chats desde la copia cifrada del servidor.");
+      }
+      requestHistory({ quiet: true }); // las fotos y lo más reciente, si otro dispositivo está abierto
+    }, 800);
   }
   // Copia de la clave cifrada con tu contraseña: permite iniciar sesión desde otro dispositivo
   const blob = store.get(idKey(me));
@@ -490,7 +499,7 @@ const same = (a, b) => a?.toLowerCase() === b?.toLowerCase();
 let groups = new Map(); // gid -> {id, name, members, admin, v, avatar, left}
 
 function loadGroups() { groups = new Map(Object.entries(store.get(`sc:groups:${me.toLowerCase()}`) || {})); }
-function saveGroups() { store.set(`sc:groups:${me.toLowerCase()}`, Object.fromEntries(groups)); }
+function saveGroups() { store.set(`sc:groups:${me.toLowerCase()}`, Object.fromEntries(groups)); markCloudDirty(); }
 
 function chat(conv) {
   if (!chats.has(conv)) chats.set(conv, { messages: [], online: null, lastSeen: null, typing: new Map() });
@@ -509,6 +518,7 @@ function setMeta(conv, patch) {
   for (const k of Object.keys(next)) if (next[k] == null || next[k] === false) delete next[k];
   if (Object.keys(next).length) chatMeta[conv] = next; else delete chatMeta[conv];
   store.set(metaKey(), chatMeta);
+  markCloudDirty();
 }
 
 const unreadOf = (conv) => chats.get(conv)?.messages.filter((m) => m.from === "them" && !m.read && !m.deleted).length || 0;
@@ -528,6 +538,7 @@ function addMsg(conv, entry, { persist = true } = {}) {
   if (entry.from === "me" && !isGroup(conv) && !meta(conv).accepted) setMeta(conv, { accepted: true, request: null });
   if (!entry.sys && meta(conv).hidden) setMeta(conv, { hidden: null });
   chat(conv).messages.push(m);
+  markCloudDirty();
   if (conv === active) appendMessage(m);
   renderContacts();
   updateTitle();
@@ -739,7 +750,16 @@ async function onIncoming(ev) {
   if (isBlocked(sender) && c.t !== "group" && c.t !== "group-leave") return;
   // Alguien que no conoces: llega como solicitud (sin llamadas, ni "escribiendo", ni confirmaciones)
   if (!c.g && c.t !== "join" && wouldBeRequest(sender)) {
-    if (!prefs().strangers || c.t === "call") return;
+    if (!prefs().strangers) return;
+    if (c.t === "call") {
+      // No suena (podría ser cualquiera), pero no se pierde: aparece en su solicitud
+      if (c.kind === "offer") {
+        if (!meta(sender).request) setMeta(sender, { request: true });
+        addMsg(sender, { sys: `${c.video ? "Videollamada" : "Llamada"} perdida de @${sender}. Acepta su solicitud para que sus llamadas suenen.` });
+        notify(sender, sender, { t: "text", body: `${c.video ? "Videollamada" : "Llamada"} perdida` });
+      }
+      return;
+    }
     if (["typing", "receipt", "react", "edit", "delete", "vote", "timer"].includes(c.t)) return;
     if (!meta(sender).request) setMeta(sender, { request: true });
   }
@@ -3072,6 +3092,14 @@ const BACKUP_MAGIC = "securechat-backup-v1";
 const backupKey = () => `sc:lastbackup:${me.toLowerCase()}`;
 
 async function exportBackup({ media = true } = {}) {
+  const { bytes, count } = await buildBackup({ media });
+  saveFile(new Blob([bytes], { type: "application/octet-stream" }), `securechat-${me}-${new Date().toISOString().slice(0, 10)}.scbackup`);
+  store.set(backupKey(), Date.now());
+  return count;
+}
+
+/** La copia cifrada (con la clave que sale de la identidad). label separa la del fichero y la del servidor. */
+async function buildBackup({ media = true, label = "sc-backup", gzip = false } = {}) {
   const convs = [];
   for (const [conv, ch] of chats) {
     const msgs = [];
@@ -3092,14 +3120,76 @@ async function exportBackup({ media = true } = {}) {
     // También los ajustes de cada chat (fijado, archivado, silenciado…), los programados y las preferencias
     meta: chatMeta, scheduled: store.get(schedKey()) || [], prefs: prefs(), theme: store.get("sc:theme") || null,
   };
-  const key = P.kdf(identity.seed, "sc-backup");
+  const key = P.kdf(identity.seed, label);
+  let plain = new TextEncoder().encode(JSON.stringify(data));
+  if (gzip) plain = await gzipBytes(plain); // se comprime ANTES de cifrar
   const nonce = sodium.randombytes_buf(24);
-  const ct = sodium.crypto_secretbox_easy(new TextEncoder().encode(JSON.stringify(data)), nonce, key);
+  const ct = sodium.crypto_secretbox_easy(plain, nonce, key);
   const out = new Uint8Array(24 + ct.length);
   out.set(nonce); out.set(ct, 24);
-  saveFile(new Blob([out], { type: "application/octet-stream" }), `securechat-${me}-${new Date().toISOString().slice(0, 10)}.scbackup`);
-  store.set(backupKey(), Date.now());
-  return convs.reduce((n, [, l]) => n + l.length, 0);
+  return { bytes: out, count: convs.reduce((n, [, l]) => n + l.length, 0) };
+}
+
+async function gzipBytes(u8, inflate = false) {
+  const stream = new Blob([u8]).stream().pipeThrough(inflate ? new DecompressionStream("gzip") : new CompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+// ------------------------------------------------- copia automática en el servidor
+// Chats (sin fotos ni vídeos), grupos, contactos y ajustes, cifrados en el dispositivo con una
+// clave que sale de tu identidad: el servidor guarda algo que no puede leer. Al iniciar sesión
+// en un dispositivo nuevo se baja y se restaura sola.
+
+const CLOUD_EVERY = 5 * 60000;
+const cloudKey = () => `sc:cloud:${me.toLowerCase()}`;
+let cloudDirty = false, cloudBusy = false, cloudLast = 0, cloudTimer = null;
+const markCloudDirty = () => { cloudDirty = true; };
+
+async function uploadCloud(force = false) {
+  if (!prefs().cloudBackup || !connected || !client || !identity || !history || cloudBusy) return;
+  if (!force && (!cloudDirty || Date.now() - cloudLast < 30000)) return;
+  cloudBusy = true;
+  cloudDirty = false;
+  try {
+    const { bytes } = await buildBackup({ media: false, label: "sc-cloud-backup", gzip: true });
+    if (bytes.length > 8 * 1024 * 1024) return; // demasiado grande para el servidor: queda la copia en fichero
+    const r = await client.request({ type: "backup-put", data: P.b64e(bytes) }, 60000);
+    cloudLast = Date.now();
+    store.set(cloudKey(), (r.at || 0) * 1000 || Date.now());
+  } catch { cloudDirty = true; } finally { cloudBusy = false; }
+}
+
+/** Baja la copia del servidor y la junta con lo que haya. Devuelve cuántos mensajes se han añadido. */
+async function restoreCloud() {
+  let r;
+  try { r = await client.request({ type: "backup-get" }, 60000); } catch { return 0; }
+  if (!r?.data) return 0;
+  let data;
+  try {
+    const raw = P.b64d(r.data);
+    const pt = sodium.crypto_secretbox_open_easy(raw.subarray(24), raw.subarray(0, 24), P.kdf(identity.seed, "sc-cloud-backup"));
+    data = JSON.parse(new TextDecoder().decode(await gzipBytes(pt, true)));
+  } catch { return 0; }
+  if (data.magic !== BACKUP_MAGIC) return 0;
+  const added = await mergeMessages(data.convs);
+  mergeAccountData(data);
+  // Perfil: si aquí está sin tocar, el de la copia
+  if (data.profile && !store.get(`sc:profile:${me.toLowerCase()}`)) {
+    profile = data.profile;
+    store.set(`sc:profile:${me.toLowerCase()}`, profile);
+    client.profile = profile;
+    renderMe();
+  }
+  renderContacts();
+  renderChat();
+  updateTitle();
+  return added;
+}
+
+function startCloudBackups() {
+  clearInterval(cloudTimer);
+  cloudTimer = setInterval(() => uploadCloud(), CLOUD_EVERY);
+  setTimeout(() => uploadCloud(), 60000);
 }
 
 async function importBackup(file) {
@@ -3212,10 +3302,34 @@ function showBackup(back = false) {
   const imp = withIcon("upload", "Restaurar una copia", "button", "chip");
   imp.type = "button";
   imp.onclick = () => fileIn.click();
+  const cloudL = text("", "label", "switch");
+  const cloudCb = document.createElement("input");
+  cloudCb.type = "checkbox";
+  cloudCb.checked = !!prefs().cloudBackup;
+  const cloudT = text("", "span");
+  const cloudWhen = () => {
+    const t = store.get(cloudKey());
+    return t ? `Última copia en el servidor: ${new Date(t).toLocaleString()}.` : "Todavía no hay copia en el servidor.";
+  };
+  const cloudInfo = text(cloudWhen(), "small");
+  cloudT.append(text("Copia automática cifrada en el servidor", "strong"),
+    text("Tus chats (sin fotos ni vídeos), grupos, contactos y ajustes, cifrados en este dispositivo: el servidor no puede leerlos. Al iniciar sesión en un móvil u ordenador nuevo se recuperan solos.", "small"),
+    cloudInfo);
+  cloudL.append(cloudCb, cloudT);
+  cloudCb.onchange = async () => {
+    window.SC_SET_PREFS({ ...prefs(), cloudBackup: cloudCb.checked });
+    if (cloudCb.checked) { await uploadCloud(true); cloudInfo.textContent = cloudWhen(); }
+    else {
+      try { await client.request({ type: "backup-delete" }); store.del(cloudKey()); cloudInfo.textContent = "Copia del servidor borrada."; }
+      catch (e) { cloudInfo.textContent = `No se pudo borrar: ${e.message}.`; }
+    }
+  };
   const fromOther = withIcon("laptop", "Traer mis chats de otro dispositivo", "button", "chip");
   fromOther.type = "button";
   fromOther.onclick = () => { $("dialog").close(); requestHistory(); };
   dialog("Copia de seguridad", [
+    cloudL,
+    text("Copia en un fichero", "h3", "settings-h"),
     text("Guarda todo tu historial (mensajes, fotos, notas de voz, grupos y contactos) en un fichero cifrado.", "p"),
     text("Solo tu cuenta puede abrirlo: la clave sale de tu identidad. Sirve para pasar tu historial a otro móvil u ordenador: inicia sesión allí y restaura la copia.", "p", "hint"),
     text("Ten en cuenta que si borras tu cuenta, la copia ya no se podrá abrir.", "p", "hint"),
@@ -5038,7 +5152,7 @@ async function main() {
   };
   $("messages").addEventListener("scroll", closeMsgMenu, { passive: true });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) { pauseInBackground(); return; }
+    if (document.hidden) { uploadCloud(); pauseInBackground(); return; }
     clearTimeout(bgTimer);
     if (bgPaused) { bgPaused = false; reconnect(); }
     wakeUp();

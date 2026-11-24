@@ -52,6 +52,7 @@ const DEFAULT_PREFS = {
   enterSends: true,
   linkPreviews: true,  // vista previa de los enlaces que envías
   strangers: true,     // recibir mensajes de desconocidos (como solicitud)
+  cloudBackup: true,   // copia cifrada de chats, grupos y contactos en el servidor (para dispositivos nuevos)
   defaultTimer: 0,     // mensajes temporales en los chats nuevos (0 = no; solo si lo eliges tú)
 };
 

@@ -242,3 +242,24 @@ def test_database_works_from_another_thread(tmp_path):
     assert not errors
     relay.store.close()
     assert RelayServer(tmp_path / "users.json").registry["ana"]["name"] == "ana"
+
+
+# ---------------------------------------------------------------- copia cifrada en el servidor
+
+def test_cloud_backup_only_for_its_own_account(tmp_path):
+    async def main():
+        srv, url, relay = await start_server(RelayServer(tmp_path / "users.json"))
+        ana, luis = await new_client(url, "ana"), await new_client(url, "luis")
+        await ana._send(type="backup-put", id=1, data=base64.b64encode(b"cifrado-de-ana").decode())
+        await asyncio.sleep(0.2)
+        assert relay.store.cloud_get("ana")[0] == base64.b64encode(b"cifrado-de-ana").decode()
+        assert relay.store.cloud_get("luis") is None  # cada cuenta solo ve (y pide) la suya
+        # Demasiado seguido: se rechaza
+        await ana._send(type="backup-put", id=2, data=base64.b64encode(b"otra").decode())
+        await asyncio.sleep(0.2)
+        assert relay.store.cloud_get("ana")[0] == base64.b64encode(b"cifrado-de-ana").decode()
+        # Al borrar la cuenta, la copia también
+        await relay._delete_account("ana")
+        assert relay.store.cloud_get("ana") is None
+        await luis.close(); srv.close()
+    run(main())

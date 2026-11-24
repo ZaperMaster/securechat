@@ -227,3 +227,41 @@ def test_logout_without_service_worker(server, browser):
     page.click("[data-action=logout]")
     page.wait_for_selector("#login:not([hidden])", timeout=8000)
     ctx.close()
+
+
+def test_new_device_gets_chats_from_encrypted_server_backup(server, browser):
+    """Al iniciar sesión en un dispositivo nuevo se recuperan solos los chats (copia cifrada del servidor)."""
+    marta, juan = Person(browser, server), Person(browser, server)
+    marta.register("marta")
+    juan.register("juan")
+    marta.open_chat("juan")
+    marta.send("mensaje que debe volver")
+    juan.row("marta").wait_for()
+    juan.row("marta").locator("button").click()
+    juan.page.click("#request-bar button:has-text('Aceptar')")
+    juan.send("y este también")
+    marta.bubble("y este también").wait_for()
+    # Fuerza la copia en el servidor (desactivar y activar el ajuste la sube al momento)
+    p = marta.page
+    p.click("#menu-btn")
+    p.click("[data-action=options]")
+    p.locator(".option-row", has_text="Copia de seguridad").click()
+    sw = p.locator("#dlg-body label.switch", has_text="Copia automática").locator("input")
+    sw.click()
+    sw.click()
+    p.locator("#dlg-body small", has_text="Última copia en el servidor").wait_for()
+    marta.ctx.close()
+    # Otro dispositivo, sin nada guardado: entra con la contraseña
+    nuevo = Person(browser, server)
+    q = nuevo.page
+    q.fill("#login-name", "marta")
+    q.fill("#login-pass", PASSWORD)
+    q.click("#login-btn")
+    q.wait_for_selector("#app:not([hidden])")
+    nuevo.row("juan").wait_for(timeout=15000)
+    nuevo.row("juan").locator("button").click()
+    nuevo.bubble("mensaje que debe volver").wait_for()
+    nuevo.bubble("y este también").wait_for()
+    # Y sigue pudiendo hablar con juan (no es una solicitud)
+    assert nuevo.page.locator("#request-bar").is_hidden()
+    nuevo.ctx.close(); juan.ctx.close()

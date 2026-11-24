@@ -86,6 +86,8 @@ SECURITY_HEADERS = {
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",
 }
+CLOUD_MAX = 12 * 1024 * 1024  # copia cifrada de la cuenta (en base64)
+CLOUD_INTERVAL = 20            # segundos mínimos entre copias de una cuenta
 SEALED_LIMIT = 600          # envíos anónimos por minuto e IP
 MAX_BLOCKED = 1000          # usuarios bloqueados por cuenta
 REPORTS_PER_DAY = 10        # denuncias por cuenta y día
@@ -194,6 +196,8 @@ class RelayServer:
         self._lookups: dict[str, list[float]] = {}  # búsquedas de usuarios por cuenta
         self._reports: dict[str, list[float]] = {}  # denuncias por cuenta (límite diario)
         self._sealed_hits: dict[str, list[float]] = {}  # envíos anónimos por IP
+        self._cloud_mem: dict[str, tuple[str, int]] = {}  # copias en memoria (servidor sin base de datos)
+        self._cloud_last: dict[str, float] = {}
         self.reports_path = db_path.with_name(db_path.stem + "_denuncias.jsonl") if db_path else None
         # Relé de llamadas (TURN): direcciones que se dan a los navegadores y secreto de sus credenciales
         self.turn_urls: list[str] = []
@@ -535,6 +539,8 @@ class RelayServer:
                                 await _send(conn, type="uak", epoch=epoch)
                     else:
                         await _send(ws, type="error", id=msg.get("id"), code="bad_request", message="clave de entrega inválida")
+                elif t in ("backup-put", "backup-get", "backup-delete"):
+                    await self._cloud(ws, c, msg)
                 elif t == "block":
                     await self._set_block(ws, c, msg)
                 elif t == "report":
@@ -592,6 +598,38 @@ class RelayServer:
                             self.registry[c]["last_seen"] = int(time.time())
                             self._save()
                             await self._presence(c, False)
+
+    async def _cloud(self, ws: ServerConnection, c: str, msg: dict) -> None:
+        """Copia de la cuenta (chats, grupos, contactos y ajustes) CIFRADA en el dispositivo con una
+        clave que sale de la identidad. El servidor la guarda y la devuelve a la propia cuenta, nada más:
+        no puede leerla. Sirve para que un dispositivo nuevo recupere todo al iniciar sesión."""
+        t, rid = msg["type"], msg.get("id")
+        if t == "backup-get":
+            got = self.store.cloud_get(c) if self.store else self._cloud_mem.get(c)
+            await _send(ws, type="backup", id=rid, data=got[0] if got else None, at=got[1] if got else None)
+            return
+        if t == "backup-delete":
+            if self.store:
+                self.store.cloud_delete(c)
+            self._cloud_mem.pop(c, None)
+            await _send(ws, type="ack", id=rid, status="ok")
+            return
+        data = msg.get("data")
+        if not isinstance(data, str) or not data or len(data) > CLOUD_MAX:
+            await _send(ws, type="error", id=rid, code="too_big", message="la copia es demasiado grande")
+            return
+        b64d(data)  # tiene que ser base64 válido (si no, CryptoError -> petición inválida)
+        now = time.monotonic()
+        if now - self._cloud_last.get(c, 0) < CLOUD_INTERVAL:
+            await _send(ws, type="error", id=rid, code="rate_limited", message="espera un poco antes de otra copia")
+            return
+        self._cloud_last[c] = now
+        at = int(time.time())
+        if self.store:
+            self.store.cloud_put(c, data, at)
+        else:
+            self._cloud_mem[c] = (data, at)
+        await _send(ws, type="ack", id=rid, status="ok", at=at)
 
     def blocks(self, owner: str, other: str) -> bool:
         """¿`owner` ha bloqueado a `other`? (los dos en canon)"""
@@ -789,6 +827,9 @@ class RelayServer:
             await self._presence(c, False)
         for d in list(r.get("devices", {})):
             self._forget_device(c, d)
+        if self.store:
+            self.store.cloud_delete(c)
+        self._cloud_mem.pop(c, None)
         conns = list(self.online.pop(c, {}).values())
         del self.registry[c]
         for other in self.registry.values():
