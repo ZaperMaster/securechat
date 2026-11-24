@@ -1754,14 +1754,26 @@ function callSignal(peer, content, queue = false) {
 // Si contestas o rechazas en la pantalla de llamada del sistema (con la app cerrada), la app lo
 // hace al recibir la llamada cifrada. En Windows, la ventana salta al frente con un título "📞".
 let nativeAnswerUntil = 0, nativeDeclineUntil = 0, nativeFinTimer = null;
+function nativeAction(accion) {
+  if (accion === "contestar") nativeAnswerUntil = Date.now() + 60000;
+  if (accion === "rechazar") {
+    nativeDeclineUntil = Date.now() + 60000;
+    // Si la llamada ya no llega (o ya se colgó), la app vuelve a esconderse igualmente
+    setTimeout(() => { if (Date.now() < nativeDeclineUntil) { nativeDeclineUntil = 0; plugin("Llamadas")?.minimizar().catch(() => {}); } }, 15000);
+  }
+  applyNativeCall();
+}
 async function checkNativeCall() {
   const L = plugin("Llamadas");
   if (!L) return;
+  if (!checkNativeCall.listening) {
+    checkNativeCall.listening = true;
+    // Lo que se pulse en la pantalla de llamada con la app ya en marcha llega al momento
+    L.addListener("llamada", ({ accion }) => nativeAction(accion)).catch(() => {});
+  }
   try {
     const r = await L.pendiente();
-    if (r?.accion === "contestar") nativeAnswerUntil = Date.now() + 60000;
-    if (r?.accion === "rechazar") nativeDeclineUntil = Date.now() + 60000;
-    applyNativeCall();
+    if (r?.accion) nativeAction(r.accion);
   } catch { /* */ }
   // Si se abrió desde la pantalla de llamada pero ya no hay llamada, deja de verse sobre el bloqueo
   clearTimeout(nativeFinTimer);
@@ -1770,7 +1782,11 @@ async function checkNativeCall() {
 function applyNativeCall() {
   if (!call || call.role !== "in" || call.state !== "incoming") return;
   if (Date.now() < nativeAnswerUntil) { nativeAnswerUntil = 0; acceptCall(); }
-  else if (Date.now() < nativeDeclineUntil) { nativeDeclineUntil = 0; rejectCall(); }
+  else if (Date.now() < nativeDeclineUntil) {
+    nativeDeclineUntil = 0;
+    rejectCall();
+    plugin("Llamadas")?.minimizar().catch(() => {});
+  }
 }
 
 /**
@@ -1900,7 +1916,7 @@ function onCallSignal(sender, c, queuedAt) {
   } else if (c.kind === "taken" && cur.role === "in" && cur.state === "incoming" && c.dev !== client.device) {
     endCall(null); // he contestado desde otro dispositivo
   } else if (c.kind === "reject" && cur.role === "out") {
-    callSignal(sender, { kind: "end", id: cur.id });
+    callSignal(sender, { kind: "end", id: cur.id }, "stop"); // sus otros dispositivos dejan de sonar
     endCall("Llamada rechazada");
   } else if (c.kind === "busy" && cur.role === "out" && cur.state === "calling") {
     endCall(`${displayName(sender)} está en otra llamada`);

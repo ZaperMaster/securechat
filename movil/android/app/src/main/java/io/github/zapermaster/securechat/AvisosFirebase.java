@@ -18,7 +18,8 @@ public class AvisosFirebase extends MessagingService {
         Map<String, String> datos = mensaje.getData();
         String tipo = datos.get("kind");
         if ("call".equals(tipo)) {
-            LlamadaEntrante.mostrar(this, datos);
+            // Con la app abierta y a la vista, la llamada suena dentro de la app: no se duplica
+            if (!MainActivity.aLaVista) LlamadaEntrante.mostrar(this, datos);
             return;
         }
         if ("call-stop".equals(tipo)) {

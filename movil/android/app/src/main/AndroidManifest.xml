@@ -40,7 +40,6 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
-        <receiver android:name=".RechazarLlamada" android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

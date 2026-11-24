@@ -8,6 +8,19 @@ import android.view.WindowManager;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+    static volatile boolean aLaVista = false;
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        aLaVista = true;
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        aLaVista = false;
+    }
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         registerPlugin(LlamadasPlugin.class);
@@ -31,9 +44,10 @@ public class MainActivity extends BridgeActivity {
         if (accion == null) return;
         intent.removeExtra(LlamadaEntrante.EXTRA);
         sobreBloqueo(true);
-        if ("contestar".equals(accion)) {
+        if ("contestar".equals(accion) || "rechazar".equals(accion)) {
             LlamadaEntrante.quitar(this);
-            LlamadasPlugin.pendiente("contestar");
+            LlamadasPlugin.pendiente(accion); // por si la web aún está arrancando
+            LlamadasPlugin.avisar(accion);    // y si ya está en marcha, al momento
         }
     }
 

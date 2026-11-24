@@ -41,9 +41,9 @@ public final class LlamadaEntrante {
 
         PendingIntent abrir = abrirApp(ctx, "abrir", 1);
         PendingIntent descolgar = abrirApp(ctx, "contestar", 2);
-        Intent colgar = new Intent(ctx, RechazarLlamada.class);
-        PendingIntent colgarPi = PendingIntent.getBroadcast(ctx, 3, colgar,
-            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        // Rechazar también abre la app un instante: tiene que avisar (cifrado) a quien llama
+        // para que le salga «Llamada rechazada»; después vuelve a esconderse sola.
+        PendingIntent colgarPi = abrirApp(ctx, "rechazar", 3);
 
         Person quien = new Person.Builder().setName("SecureChat").setImportant(true).build();
         NotificationCompat.Builder b = new NotificationCompat.Builder(ctx, CANAL)
