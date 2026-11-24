@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 
@@ -21,7 +22,10 @@ class Store:
     def __init__(self, path: Path):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(path), isolation_level=None)  # transacciones a mano
+        # El servidor de la bandeja la abre en un hilo y atiende las conexiones en otro:
+        # se permite usarla desde cualquier hilo, pero nunca desde dos a la vez (candado).
+        self.db = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)  # transacciones a mano
+        self._lock = threading.RLock()
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute("PRAGMA foreign_keys=ON")
@@ -81,12 +85,22 @@ class Store:
     def _tx(self):
         db = self.db
 
+        lock = self._lock
+
         class Tx:
             def __enter__(self):
-                db.execute("BEGIN IMMEDIATE")
+                lock.acquire()
+                try:
+                    db.execute("BEGIN IMMEDIATE")
+                except BaseException:
+                    lock.release()
+                    raise
 
             def __exit__(self, exc, *_):
-                db.execute("ROLLBACK" if exc else "COMMIT")
+                try:
+                    db.execute("ROLLBACK" if exc else "COMMIT")
+                finally:
+                    lock.release()
                 return False
         return Tx()
 

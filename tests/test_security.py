@@ -219,3 +219,26 @@ def test_old_json_database_is_migrated_to_sqlite(tmp_path):
     relay.store.close()
     again = RelayServer(tmp_path / "users.json", q)
     assert again.registry["ana"]["status"] == "away" and "ana|dev123456" in again.queues
+
+
+def test_database_works_from_another_thread(tmp_path):
+    """El servidor de la bandeja crea el servidor en un hilo y lo ejecuta en otro."""
+    import threading
+    key = SigningKey.generate()
+    relay = RelayServer(tmp_path / "users.json")
+    errors = []
+
+    def worker():
+        try:
+            relay.registry["ana"] = {"name": "ana", "key": bytes(key.verify_key), "devices": {}}
+            relay._save()
+            relay.queues["ana|dev123456"] = [{"from": None, "payload": {}, "at": 1}]
+            relay._save_queue("ana|dev123456")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert not errors
+    relay.store.close()
+    assert RelayServer(tmp_path / "users.json").registry["ana"]["name"] == "ana"
