@@ -739,7 +739,7 @@ class RelayServer:
             await _send(ws, type="error", code="no_device", to=to, id=rid, devices=devices, message="ese dispositivo ya no existe")
             return
         if msg.get("urgent") and r.get("push"):
-            asyncio.get_running_loop().create_task(self._push(ct, call=True))
+            asyncio.get_running_loop().create_task(self._push(ct, call=True, stop=msg.get("urgent") == "stop"))
         target = self.online.get(ct, {}).get(device)
         if target is not None:
             try:
@@ -1065,8 +1065,9 @@ class RelayServer:
         # Llamada entrante (el cliente marca la oferta como urgente): avisamos al móvil SIEMPRE,
         # porque Android congela la app en segundo plano sin cerrar la conexión y el servidor
         # la ve "conectada" aunque no pueda sonar. Si la app está a la vista, el aviso no se muestra.
+        # urgent="stop": quien llamaba ha colgado (o otro dispositivo contestó): que deje de sonar
         if msg.get("urgent") and ct != cs and self.registry[ct].get("push"):
-            asyncio.get_running_loop().create_task(self._push(ct, call=True))
+            asyncio.get_running_loop().create_task(self._push(ct, call=True, stop=msg.get("urgent") == "stop"))
         target = self.online.get(ct, {}).get(device)
         if target is not None:
             try:
@@ -1129,11 +1130,11 @@ class RelayServer:
             asyncio.get_running_loop().create_task(self._push(ct))
         await _send(ws, type="ack", id=rid, status="ok", results=results, devices=devices)
 
-    async def _push(self, c: str, call: bool = False) -> None:
+    async def _push(self, c: str, call: bool = False, stop: bool = False) -> None:
         r = self.registry.get(c)
         if not r:
             return
-        alive = await self.pusher.notify(c, r.get("push", []), call=call)
+        alive = await self.pusher.notify(c, r.get("push", []), call=call, stop=stop)
         if len(alive) != len(r.get("push", [])):
             r["push"] = alive
             self._save()

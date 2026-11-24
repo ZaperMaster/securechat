@@ -142,6 +142,14 @@ function createWindow() {
   wc.on("will-navigate", (e, url) => { if (new URL(url).origin !== ORIGIN) { e.preventDefault(); external(url); } });
   wc.on("will-attach-webview", (e) => e.preventDefault());
   wc.on("dom-ready", () => wc.insertCSS(TITLEBAR_CSS).catch(() => {}));
+  // Llamada entrante con la ventana escondida en la bandeja: la web pone "📞" en el título
+  wc.on("page-title-updated", (_e, title) => {
+    if (!title.startsWith("📞")) return;
+    showWindow();
+    win.flashFrame(true);
+    win.setAlwaysOnTop(true);
+    setTimeout(() => { if (!win.isDestroyed()) win.setAlwaysOnTop(false); }, 3000);
+  });
   // La web pone en <meta name="theme-color"> el fondo del tema: la barra lo copia
   wc.on("did-change-theme-color", (_e, color) => {
     if (!color || !/^#[0-9a-f]{6}$/i.test(color)) return;

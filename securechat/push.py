@@ -95,10 +95,14 @@ class Pusher:
         raw = self.vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
         self.public_key = base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    def _send_sync(self, sub: dict, call: bool = False) -> bool:
+    def _send_sync(self, sub: dict, call: bool = False, stop: bool = False) -> bool:
         """Devuelve False si la suscripción ya no vale (hay que borrarla)."""
         if "fcm" in sub:
-            return self.fcm.send(sub["fcm"], call, sub.get("lang", "es")) if self.fcm else True
+            if not self.fcm:
+                return True
+            return self.fcm.send_stop(sub["fcm"]) if stop else self.fcm.send(sub["fcm"], call, sub.get("lang", "es"))
+        if stop:
+            return True  # en la web el aviso de llamada se quita al abrir la app
         if not self.enabled:
             return True
         body = {"title": "SecureChat", "kind": "call", "body": "📞 Te están llamando"} if call \
@@ -119,12 +123,17 @@ class Pusher:
             log.warning("aviso push fallido", exc_info=True)
             return True
 
-    async def notify(self, account: str, subs: list[dict], call: bool = False) -> list[dict]:
+    async def notify(self, account: str, subs: list[dict], call: bool = False, stop: bool = False) -> list[dict]:
         """Envía el aviso a todos los dispositivos. Devuelve las suscripciones que siguen vivas.
         call=True: aviso de llamada entrante (prioridad alta y caduca en un minuto)."""
         if not subs or (not self.enabled and not self.fcm):
             return subs
         now = time.monotonic()
+        if stop:  # "deja de sonar": solo a la app de Android y sin esperar
+            subs_fcm = [s for s in subs if "fcm" in s]
+            alive = await asyncio.gather(*(asyncio.to_thread(self._send_sync, s, True, True) for s in subs_fcm))
+            dead = {id(s) for s, ok in zip(subs_fcm, alive) if not ok}
+            return [s for s in subs if id(s) not in dead]
         last, gap = (self._last_call, CALL_INTERVAL) if call else (self._last, MIN_INTERVAL)
         if now - last.get(account, 0) < gap:
             return subs

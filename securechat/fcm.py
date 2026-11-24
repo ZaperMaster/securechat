@@ -26,8 +26,12 @@ SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 TOKEN_RE_MAX = 4096
 
 TEXTS = {
-    "es": {"msg": "Tienes un mensaje nuevo 🔒", "call": "📞 Te están llamando. Toca para abrir y contestar."},
-    "en": {"msg": "You have a new message 🔒", "call": "📞 Someone is calling you. Tap to open and answer."},
+    "es": {"msg": "Tienes un mensaje nuevo 🔒", "call": "📞 Te están llamando. Toca para abrir y contestar.",
+           "call_title": "Llamada entrante", "call_body": "SecureChat · cifrada de extremo a extremo",
+           "answer": "Contestar", "decline": "Rechazar"},
+    "en": {"msg": "You have a new message 🔒", "call": "📞 Someone is calling you. Tap to open and answer.",
+           "call_title": "Incoming call", "call_body": "SecureChat · end-to-end encrypted",
+           "answer": "Answer", "decline": "Decline"},
 }
 
 
@@ -75,8 +79,16 @@ class Fcm:
             return self._access[0]
 
     def send(self, token: str, call: bool = False, lang: str = "es") -> bool:
-        """Manda el aviso. Devuelve False si el token ya no vale (hay que olvidarlo)."""
+        """Manda el aviso. Devuelve False si el token ya no vale (hay que olvidarlo).
+
+        Las llamadas van como mensaje de DATOS (sin notificación): así la app, aunque esté cerrada,
+        las recibe en su servicio nativo y enseña la pantalla de llamada entrante del sistema."""
         t = TEXTS.get(lang, TEXTS["es"])
+        if call:
+            return self._post({"message": {"token": token, "android": {
+                "priority": "HIGH", "ttl": "60s", "collapse_key": "call",
+                "data": {"kind": "call", "title": t["call_title"], "body": t["call_body"],
+                         "answer": t["answer"], "decline": t["decline"]}}}})
         message = {"message": {"token": token, "android": {
             "priority": "HIGH",
             "ttl": "60s" if call else "86400s",
@@ -88,6 +100,14 @@ class Fcm:
                 "notification_priority": "PRIORITY_MAX" if call else "PRIORITY_HIGH",
                 "default_sound": True, "default_vibrate_timings": True,
             }}}}
+        return self._post(message)
+
+    def send_stop(self, token: str) -> bool:
+        """Quien llamaba ha colgado: la pantalla de llamada del móvil deja de sonar."""
+        return self._post({"message": {"token": token, "android": {
+            "priority": "HIGH", "ttl": "60s", "data": {"kind": "call-stop"}}}})
+
+    def _post(self, message: dict) -> bool:
         try:
             req = urllib.request.Request(
                 f"https://fcm.googleapis.com/v1/projects/{self.project}/messages:send",

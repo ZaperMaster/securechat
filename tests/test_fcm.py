@@ -69,7 +69,9 @@ def test_fcm_message_has_no_content_and_jwt_is_signed(account, monkeypatch):
     assert sends[0].headers["Authorization"] == "Bearer tok-123"
     msg, call = json.loads(sends[0].data)["message"], json.loads(sends[1].data)["message"]
     assert msg["android"]["notification"]["body"] == "You have a new message 🔒"
-    assert call["android"]["notification"]["channel_id"] == "llamadas" and call["android"]["ttl"] == "60s"
+    # La llamada va como DATOS (la app enseña la pantalla de llamada) y caduca en un minuto
+    assert call["android"]["data"]["kind"] == "call" and call["android"]["ttl"] == "60s"
+    assert "notification" not in call["android"]
     # Nada del mensaje ni de quién lo envía
     assert set(msg) == {"token", "android"} and "data" not in msg
 
@@ -89,3 +91,12 @@ def test_pusher_uses_fcm_for_android_and_drops_dead_tokens(account, monkeypatch,
     pusher = Pusher(tmp_path / "v.pem", fcm_path=path)
     sub = {"fcm": TOKEN, "endpoint": f"fcm:{TOKEN}", "lang": "es"}
     assert asyncio.run(pusher.notify("ana", [sub])) == []
+
+
+def test_call_stop_is_a_data_message(account, monkeypatch):
+    path, _ = account
+    google = FakeGoogle()
+    monkeypatch.setattr(fcm_mod.urllib.request, "urlopen", google)
+    assert fcm_mod.Fcm(path).send_stop(TOKEN) is True
+    msg = json.loads([r for r in google.requests if "fcm.googleapis.com" in r.full_url][0].data)["message"]
+    assert msg["android"]["data"] == {"kind": "call-stop"}

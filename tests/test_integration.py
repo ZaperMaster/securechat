@@ -288,7 +288,7 @@ def test_urgent_call_offer_wakes_the_phone_even_if_connected():
         alice, bob = await new_client(url, "alice"), await new_client(url, "bob")
         calls = []
 
-        async def fake_notify(account, subs, call=False):
+        async def fake_notify(account, subs, call=False, stop=False):
             calls.append((account, call))
             return subs
         relay.pusher.notify = fake_notify

@@ -298,6 +298,7 @@ async function startApp(username, { mustConnect = false, email = null, blob = nu
   else if (blob) seclog("Has iniciado sesión en este dispositivo.");
   sweepExpired();
   startCloudBackups();
+  if (NATIVE) checkNativeCall();
   checkInvite();
   runScheduled();
   setTimeout(maybeRemindBackup, 20000);
@@ -1745,7 +1746,31 @@ async function iceServersNow() {
 function callSignal(peer, content, queue = false) {
   // Las que se guardan en cola son las que hacen sonar (oferta o aviso de llamada de grupo):
   // van marcadas como urgentes para que el servidor despierte al móvil aunque parezca conectado.
-  return client.sendContent(peer, { t: "call", ...content }, queue ? { sync: false, urgent: true } : { ephemeral: true, sync: false }).catch(() => {});
+  // queue = "stop": colgar antes de que contesten (o contestado en otro sitio): el móvil deja de sonar.
+  return client.sendContent(peer, { t: "call", ...content }, queue ? { sync: false, urgent: queue === "stop" ? "stop" : true } : { ephemeral: true, sync: false }).catch(() => {});
+}
+
+// ------------------------------------------------- pantalla de llamada de Android
+// Si contestas o rechazas en la pantalla de llamada del sistema (con la app cerrada), la app lo
+// hace al recibir la llamada cifrada. En Windows, la ventana salta al frente con un título "📞".
+let nativeAnswerUntil = 0, nativeDeclineUntil = 0, nativeFinTimer = null;
+async function checkNativeCall() {
+  const L = plugin("Llamadas");
+  if (!L) return;
+  try {
+    const r = await L.pendiente();
+    if (r?.accion === "contestar") nativeAnswerUntil = Date.now() + 60000;
+    if (r?.accion === "rechazar") nativeDeclineUntil = Date.now() + 60000;
+    applyNativeCall();
+  } catch { /* */ }
+  // Si se abrió desde la pantalla de llamada pero ya no hay llamada, deja de verse sobre el bloqueo
+  clearTimeout(nativeFinTimer);
+  nativeFinTimer = setTimeout(() => { if (!call) L.fin().catch(() => {}); }, 60000);
+}
+function applyNativeCall() {
+  if (!call || call.role !== "in" || call.state !== "incoming") return;
+  if (Date.now() < nativeAnswerUntil) { nativeAnswerUntil = 0; acceptCall(); }
+  else if (Date.now() < nativeDeclineUntil) { nativeDeclineUntil = 0; rejectCall(); }
 }
 
 /**
@@ -1851,6 +1876,9 @@ function onCallSignal(sender, c, queuedAt) {
     call = inc;
     renderCall();
     startRing("in");
+    if (document.hidden) document.title = `📞 ${displayName(sender)}`; // la app de Windows trae la ventana
+    if (NATIVE && !document.hidden) plugin("Llamadas")?.quitar().catch(() => {}); // ya suena dentro de la app
+    applyNativeCall();
     if (document.hidden) callNotification(`${c.video ? "Videollamada" : "Llamada"} de ${displayName(sender)}`, "Toca para contestar");
     inc.timeout = setTimeout(() => {
       if (call === inc && inc.state === "incoming") endCall(`${c.video ? "Videollamada perdida" : "Llamada perdida"} de ${displayName(sender)}`);
@@ -1864,7 +1892,7 @@ function onCallSignal(sender, c, queuedAt) {
     stopRing();
     clearTimeout(cur.timeout);
     cur.pc.setRemoteDescription({ type: "answer", sdp: c.sdp }).catch(() => endCall("No se pudo conectar la llamada."));
-    callSignal(sender, { kind: "taken", id: c.id, dev: c.dev }); // sus otros dispositivos dejan de sonar
+    callSignal(sender, { kind: "taken", id: c.id, dev: c.dev }, "stop"); // sus otros dispositivos dejan de sonar
     cur.timeout = setTimeout(() => {
       if (call === cur && cur.state === "connecting") { callSignal(sender, { kind: "end", id: cur.id }); endCall("No se pudo conectar la llamada."); }
     }, 25000);
@@ -1918,7 +1946,8 @@ function rejectCall() {
 
 function hangUp() {
   if (!call) return;
-  callSignal(call.peer, { kind: "end", id: call.id });
+  // Si aún no ha contestado, que deje de sonar también la pantalla de llamada de su móvil
+  callSignal(call.peer, { kind: "end", id: call.id }, call.role === "out" && call.state === "calling" ? "stop" : false);
   endCall(call.startedAt ? null : "Llamada cancelada");
 }
 
@@ -1934,6 +1963,8 @@ function endCall(notice = null) {
   const line = c.startedAt ? `${c.video ? "Videollamada" : "Llamada de voz"} · ${fmtDur(Math.round((Date.now() - c.startedAt) / 1000))}` : notice;
   if (line) addMsg(c.peer, { sys: line });
   $("call-screen")?.remove();
+  updateTitle();
+  if (NATIVE) { plugin("Llamadas")?.quitar().catch(() => {}); plugin("Llamadas")?.fin().catch(() => {}); }
 }
 
 function renderCall() {
@@ -5154,6 +5185,7 @@ async function main() {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) { uploadCloud(); pauseInBackground(); return; }
     clearTimeout(bgTimer);
+    if (NATIVE) checkNativeCall();
     if (bgPaused) { bgPaused = false; reconnect(); }
     wakeUp();
     if (active) markRead(active);

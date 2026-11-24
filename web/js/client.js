@@ -496,7 +496,7 @@ export class ChatClient {
       }
       const payload = encryptFor(this.device, r, plaintext);
       this.keys.store(user, dev, r);
-      const flags = { ...(silent ? { silent: true } : {}), ...(ephemeral ? { ephemeral: true } : {}), ...(urgent ? { urgent: true } : {}) };
+      const flags = { ...(silent ? { silent: true } : {}), ...(ephemeral ? { ephemeral: true } : {}), ...(urgent ? { urgent: urgent === "stop" ? "stop" : true } : {}) };
       let ack = null;
       // Remitente oculto: si tengo su clave de entrega, el servidor no sabe que el mensaje es mío
       const ak = mine ? null : this.contacts.get(user)?.ak;

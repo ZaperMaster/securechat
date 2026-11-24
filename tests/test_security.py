@@ -263,3 +263,22 @@ def test_cloud_backup_only_for_its_own_account(tmp_path):
         assert relay.store.cloud_get("ana") is None
         await luis.close(); srv.close()
     run(main())
+
+
+def test_call_stop_push_reaches_the_phone():
+    async def main():
+        srv, url, relay = await start_server()
+        calls = []
+
+        async def fake_push(c, call=False, stop=False):
+            calls.append((c, call, stop))
+        relay._push = fake_push
+        ana, luis = await new_client(url, "ana"), await new_client(url, "luis")
+        relay.registry["luis"]["push"] = [{"fcm": "x" * 30, "endpoint": "fcm:" + "x" * 30}]
+        dev = next(iter(relay.registry["luis"]["devices"]))
+        await ana._send(type="send", to="luis", device=dev, payload={"kind": "dr"}, urgent=True)
+        await ana._send(type="send", to="luis", device=dev, payload={"kind": "dr"}, urgent="stop")
+        await asyncio.sleep(0.2)
+        assert calls == [("luis", True, False), ("luis", True, True)]
+        await ana.close(); await luis.close(); srv.close()
+    run(main())
