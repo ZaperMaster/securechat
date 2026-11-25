@@ -23,6 +23,14 @@ ROOT = Path(__file__).resolve().parent.parent
 PASSWORD = "Caballo-Bateria-Grapa-77"
 
 
+_DB: dict = {}
+
+
+def server_db_path(url):
+    """Base de datos (SQLite) del servidor de pruebas."""
+    return _DB[url]
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -43,7 +51,9 @@ def server(tmp_path_factory):
             break
         except OSError:
             time.sleep(0.2)
-    yield f"http://127.0.0.1:{port}"
+    url = f"http://127.0.0.1:{port}"
+    _DB[url] = tmp / "users.db"
+    yield url
     proc.terminate()
     proc.wait(10)
 

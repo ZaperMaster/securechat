@@ -8,7 +8,7 @@ const { signedMessage } = require("../actualizaciones-firma.js");
 
 const KEY = process.env.SECURECHAT_UPDATE_KEY || path.join(__dirname, "..", "..", "privado", "actualizaciones", "clave-privada.pem");
 const { version } = require("../package.json");
-const file = path.join(__dirname, "..", "dist", `SecureChat-Setup-${version}.exe`);
+const file = path.join(__dirname, "..", "dist", "SecureChat-Windows-Instalador.exe");
 
 if (!fs.existsSync(KEY)) {
   console.warn(`Sin clave de firma (${KEY}): el instalador NO se podrá usar como actualización automática.`);

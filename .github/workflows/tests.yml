@@ -47,10 +47,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-e2e.txt
 
+      - uses: actions/setup-node@v7
+        with: { node-version: "22" }
+
       - name: Instalar dependencias y Chromium
         run: |
           pip install -r requirements-e2e.txt
           python -m playwright install --with-deps chromium
+          (cd movil && npm ci)   # la parte JavaScript de Capacitor, para probar la web tal como va en el APK
 
       - name: Pruebas en el navegador
         run: python -m pytest -q tests/test_browser.py tests/test_calls.py

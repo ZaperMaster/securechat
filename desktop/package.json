@@ -1,7 +1,7 @@
 {
   "name": "securechat-desktop",
   "productName": "SecureChat",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "SecureChat para Windows: mensajería con cifrado de extremo a extremo",
   "author": "Alejandro Zapata",
   "license": "MIT",
@@ -38,7 +38,7 @@
     "afterPack": "scripts/fusibles.js",
     "win": {
       "icon": "icon.png",
-      "artifactName": "SecureChat-${version}-${arch}-${target}.${ext}"
+      "artifactName": "SecureChat-Windows-${target}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -46,10 +46,10 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "shortcutName": "SecureChat",
-      "artifactName": "SecureChat-Setup-${version}.${ext}"
+      "artifactName": "SecureChat-Windows-Instalador.${ext}"
     },
     "portable": {
-      "artifactName": "SecureChat-${version}-portable.${ext}"
+      "artifactName": "SecureChat-Windows-Portable.${ext}"
     },
     "publish": [
       {
@@ -71,14 +71,14 @@
           ]
         }
       ],
-      "artifactName": "SecureChat-${version}-mac-${arch}.${ext}",
+      "artifactName": "SecureChat-Mac-${arch}.${ext}",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "SecureChat usa el micrófono para las llamadas y las notas de voz.",
         "NSCameraUsageDescription": "SecureChat usa la cámara para las videollamadas."
       }
     },
     "dmg": {
-      "artifactName": "SecureChat-${version}-mac-${arch}.${ext}"
+      "artifactName": "SecureChat-Mac-${arch}.${ext}"
     },
     "linux": {
       "icon": "icon.png",
@@ -89,7 +89,7 @@
       ],
       "maintainer": "ZaperMaster <197987728+ZaperMaster@users.noreply.github.com>",
       "synopsis": "Mensajería cifrada de extremo a extremo",
-      "artifactName": "SecureChat-${version}-linux-${arch}.${ext}"
+      "artifactName": "SecureChat-Linux.${ext}"
     }
   },
   "dependencies": {

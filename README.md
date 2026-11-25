@@ -161,6 +161,18 @@ pasa paquetes).
   tiene que ponerlo en marcha") y se reconecta sola cuando vuelve.
 - Protección contra **repetición, reordenación, manipulación** y claves de orden bajo.
 
+## Descargas
+
+Siempre la última versión (todas las plataformas tienen el mismo número de versión):
+
+| Sistema | Descarga |
+|---|---|
+| Windows | [Instalador](https://github.com/ZaperMaster/securechat/releases/latest/download/SecureChat-Windows-Instalador.exe) · [Portable](https://github.com/ZaperMaster/securechat/releases/latest/download/SecureChat-Windows-Portable.exe) |
+| Mac | [Apple Silicon](https://github.com/ZaperMaster/securechat/releases/latest/download/SecureChat-Mac-arm64.dmg) · [Intel](https://github.com/ZaperMaster/securechat/releases/latest/download/SecureChat-Mac-x64.dmg) |
+| Linux | [AppImage](https://github.com/ZaperMaster/securechat/releases/latest/download/SecureChat-Linux.AppImage) · [.deb](https://github.com/ZaperMaster/securechat/releases/latest/download/SecureChat-Linux.deb) |
+| Android | [APK](https://github.com/ZaperMaster/securechat/releases/latest/download/SecureChat-Android.apk) |
+| Navegador | <https://securechat.dojo-massometer.ts.net> |
+
 ## Uso rápido
 
 ```bash
@@ -275,7 +287,7 @@ seguridad conocidos en las librerías.
 
 ### Windows (`desktop/`, Electron)
 
-Instalador `SecureChat-Setup-1.1.1.exe` y versión portable. Se abre maximizada, al cerrarla
+Instalador `SecureChat-Windows-Instalador.exe` y versión portable. Se abre maximizada, al cerrarla
 se queda en la bandeja (siguen llegando mensajes y llamadas) y puede iniciarse con Windows.
 
 - **Se actualiza sola**: cada 6 horas mira si hay una versión nueva en las
@@ -312,7 +324,7 @@ y las sube a la release. Sin certificado de Apple, en Mac hay que abrirla la pri
 
 ### Android (`movil/`, Capacitor)
 
-**Descarga:** [SecureChat-Android-2.3.0.apk](https://github.com/ZaperMaster/securechat/releases/download/v1.2.1/SecureChat-Android-2.3.0.apk).
+**Descarga:** [SecureChat-Android.apk](https://github.com/ZaperMaster/securechat/releases/latest/download/SecureChat-Android.apk) (siempre la última versión).
 Ábrelo en el móvil y permite instalar apps de este origen cuando te lo pida. Se instala encima de
 la versión anterior (misma firma), pero los chats de la app vieja no pasan solos: entra con tu
 contraseña y usa *Opciones → Copia de seguridad → Traer mis chats de otro dispositivo*.

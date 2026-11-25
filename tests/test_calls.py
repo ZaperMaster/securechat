@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from test_browser import PASSWORD, browser, free_port, server, sync_api  # noqa: F401 (fixtures)
+from test_browser import PASSWORD, browser, free_port, server, server_db_path, sync_api  # noqa: F401 (fixtures)
 
 CORS = {"access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "GET"}
 _n = iter(range(10_000))
@@ -28,21 +28,20 @@ def uniq(base):
     return f"{base}{next(_n)}"
 
 
+ROOT_DIR = __import__("pathlib").Path(__file__).resolve().parent.parent
+
+
 @pytest.fixture(scope="module")
 def app_url(server, tmp_path_factory):
-    """La web empaquetada como en el APK (lo que hace movil/scripts/copiar-web.js), servida aparte."""
-    root = tmp_path_factory.mktemp("apk")
-    www = root / "www"
-    web = __import__("pathlib").Path(__file__).resolve().parent.parent / "web"
-    shutil.copytree(web, www, ignore=shutil.ignore_patterns("sw.js", ".well-known"))
-    (www / "js" / "movil-config.js").write_text(f'window.SC_SERVER = "{server}";\n', encoding="utf-8")
-    ws = server.replace("http", "ws")
-    csp = (f"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' {server} {ws}; "
-           "img-src 'self' data: blob:; media-src 'self' blob:")
-    html = (www / "index.html").read_text(encoding="utf-8")
-    html = html.replace('<meta charset="utf-8">', f'<meta charset="utf-8">\n<meta http-equiv="Content-Security-Policy" content="{csp}">')
-    html = html.replace('<script src="js/theme.js"></script>', '<script src="js/movil-config.js"></script>\n<script src="js/theme.js"></script>')
-    (www / "index.html").write_text(html, encoding="utf-8")
+    """La web empaquetada EXACTAMENTE como en el APK (movil/scripts/copiar-web.js), servida aparte.
+    Necesita las dependencias de movil/ (npm ci): ahí viene la parte JavaScript de Capacitor."""
+    if not (ROOT_DIR / "movil" / "node_modules" / "@capacitor" / "core").is_dir():
+        pytest.skip("falta npm ci en movil/ (parte JavaScript de Capacitor)")
+    www = tmp_path_factory.mktemp("apk") / "www"
+    import os
+    import subprocess
+    subprocess.run(["node", str(ROOT_DIR / "movil" / "scripts" / "copiar-web.js")], check=True, capture_output=True,
+                   env={**os.environ, "SECURECHAT_SERVER": server, "SECURECHAT_WWW": str(www)})
     port = free_port()
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(www))
     handler.log_message = lambda *a: None
@@ -50,6 +49,43 @@ def app_url(server, tmp_path_factory):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{port}/index.html"
     httpd.shutdown()
+
+
+# Puente nativo de Capacitor simulado: lo que inyecta Android en la página. Los complementos
+# responden como en un móvil y apuntan cada llamada en window.__nativo; los eventos nativos
+# (token de Firebase, botones de la pantalla de llamada) se lanzan con window.__evento().
+NATIVE_BRIDGE = """
+window.__nativo = []; window.__oyentes = {};
+window.androidBridge = { postMessage() {} };
+const M = (n, extra = []) => ({ name: n, methods: [...extra.map((m) => ({ name: m, rtype: "promise" })), { name: "addListener", rtype: "callback" }, { name: "removeListener", rtype: "promise" }] });
+window.Capacitor = {
+  Plugins: {},
+  PluginHeaders: [
+    M("PushNotifications", ["checkPermissions", "requestPermissions", "register", "unregister", "createChannel"]),
+    M("Llamadas", ["pendiente", "quitar", "fin", "minimizar"]),
+    M("Huella", ["disponible", "verificar"]),
+    M("Filesystem", ["writeFile"]),
+    M("Share", ["share"]),
+  ],
+  nativePromise(plugin, method, opts) {
+    window.__nativo.push(plugin + "." + method);
+    if (plugin === "PushNotifications" && method === "checkPermissions") return Promise.resolve({ receive: "granted" });
+    if (plugin === "PushNotifications" && method === "register") {
+      setTimeout(() => window.__evento("PushNotifications", "registration", { value: "tokenFirebaseDePrueba1234567890" }), 50);
+    }
+    if (plugin === "Huella" && method === "disponible") return Promise.resolve({ disponible: true });
+    if (plugin === "Huella" && method === "verificar") return Promise.resolve({ ok: true });
+    if (plugin === "Filesystem") return Promise.resolve({ uri: "file:///cache/x" });
+    return Promise.resolve({});
+  },
+  nativeCallback(plugin, method, opts, cb) {
+    window.__nativo.push(plugin + ".addListener:" + opts.eventName);
+    window.__oyentes[plugin + ":" + opts.eventName] = cb;
+    return Promise.resolve("oyente");
+  },
+};
+window.__evento = (plugin, name, data) => window.__oyentes[plugin + ":" + name]?.(data);
+"""
 
 
 class Device:
@@ -60,7 +96,7 @@ class Device:
         self.ctx = browser.new_context(locale="es-ES", permissions=["microphone", "camera"])
         if kind == "app":
             # Como en Capacitor: es una app nativa y sus peticiones al servidor no tienen CORS
-            self.ctx.add_init_script("window.Capacitor = { isNativePlatform: () => true, Plugins: {} };")
+            self.ctx.add_init_script(NATIVE_BRIDGE)
 
             def handle(route):
                 if route.request.method == "OPTIONS":
@@ -327,3 +363,40 @@ def test_group_call_web_and_app(browser, server, app_url):
         d.page.wait_for_selector("#call-screen[data-state='active']", timeout=30000)
     a.page.click("#call-buttons button[aria-label='Colgar']")
     close(a, b, c)
+
+
+def test_app_uses_native_plugins(browser, server, app_url):
+    """El APK tiene que usar de verdad sus complementos nativos (antes no los veía y no había avisos)."""
+    a, b = friends(browser, server, app_url, "web", "app")
+    calls = b.page.evaluate("() => window.__nativo")
+    # Se apunta a los avisos de Firebase (canales, permiso, registro) y escucha la pantalla de llamada
+    for c in ("PushNotifications.createChannel", "PushNotifications.register",
+              "PushNotifications.addListener:registration", "Llamadas.pendiente", "Llamadas.addListener:llamada"):
+        assert c in calls, f"falta {c}: {calls}"
+    # El servidor tiene el token de Firebase de este móvil
+    import sqlite3
+    import json as _json
+    db = sqlite3.connect(server_db_path(server))
+    row = db.execute("SELECT data FROM accounts WHERE canon = ?", (b.name.lower(),)).fetchone()
+    assert any(s.get("fcm") == "tokenFirebaseDePrueba1234567890" for s in _json.loads(row[0])["push"])
+    close(a, b)
+
+
+def test_answer_from_native_call_screen(browser, server, app_url):
+    """Contestar en la pantalla de llamada de Android (evento nativo) descuelga la llamada en la app."""
+    a, b = friends(browser, server, app_url, "web", "app")
+    a.call()
+    b.rings()
+    b.page.evaluate("() => window.__evento('Llamadas', 'llamada', { accion: 'contestar' })")
+    b.in_call()
+    a.in_call()
+    a.hang_up()
+    b.no_call()
+    # Y Rechazar: a quien llama le sale «Llamada rechazada» y la app vuelve a segundo plano
+    a.call()
+    b.rings()
+    b.page.evaluate("() => window.__evento('Llamadas', 'llamada', { accion: 'rechazar' })")
+    a.no_call()
+    a.sees("Llamada rechazada")
+    assert "Llamadas.minimizar" in b.page.evaluate("() => window.__nativo")
+    close(a, b)

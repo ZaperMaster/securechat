@@ -32,4 +32,5 @@ cp android/app/build/outputs/bundle/release/app-release.aab "salida/SecureChat-$
 "$JAVA_HOME/bin/jarsigner.exe" -keystore "$KS" -storepass:env KP -keypass:env KP -sigalg SHA256withRSA -digestalg SHA-256 \
   "salida/SecureChat-$VER.aab" securechat > /dev/null
 "$JAVA_HOME/bin/java.exe" -jar "$BT/lib/apksigner.jar" verify --print-certs "salida/SecureChat-$VER.apk" | grep -i "SHA-256 digest"
+cp "salida/SecureChat-$VER.apk" salida/SecureChat-Android.apk   # nombre fijo para publicar
 echo "listo: movil/salida/SecureChat-$VER.apk y .aab"
