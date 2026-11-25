@@ -470,13 +470,22 @@ const displayName = (peer) => {
 };
 const avatarOf = (peer) => client?.contacts.get(peer)?.avatar || null;
 
+// Imágenes que llegan como base64 (fotos de perfil, stickers, vistas previas): solo tipos de imagen
+// conocidos y base64 limpio. Se codifica para la URL, así nada de lo recibido puede salirse del data:.
+const IMG_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+function imageSrc(b64, mime = "image/jpeg") {
+  if (typeof b64 !== "string" || !B64_RE.test(b64) || !IMG_MIMES.has(mime)) return "";
+  return `data:${mime};base64,${encodeURIComponent(b64)}`;
+}
+
 /** Avatar: la foto si la hay; si no, la inicial con un color estable según el nombre. */
 function setAvatar(el, name, photo) {
   el.replaceChildren();
   el.classList.toggle("has-photo", !!photo);
   if (photo) {
     const img = document.createElement("img");
-    img.src = `data:image/jpeg;base64,${photo}`;
+    img.src = imageSrc(photo);
     img.alt = "";
     el.append(img);
   } else {
@@ -3675,7 +3684,7 @@ function showSettings(section = "appearance", back = true) {
   wallFile.onchange = async () => {
     try {
       const img = await resizeImage(wallFile.files[0], 1280, false);
-      setPref({ wall: "image", wallImage: `data:image/jpeg;base64,${img}` });
+      setPref({ wall: "image", wallImage: imageSrc(img) });
       for (const x of walls.querySelectorAll(".wall")) x.setAttribute("aria-pressed", String(x.dataset.wall === "image"));
     } catch { /* imagen no válida */ }
   };
@@ -4888,7 +4897,7 @@ function linkCard(body, lp = null) {
     a.classList.add("rich");
     if (typeof lp.img === "string" && /^[A-Za-z0-9+/=]+$/.test(lp.img)) {
       const img = document.createElement("img");
-      img.src = `data:image/jpeg;base64,${lp.img}`;
+      img.src = imageSrc(lp.img);
       img.alt = "";
       img.loading = "lazy";
       a.append(img);
@@ -5563,7 +5572,7 @@ function renderMyStickers(body) {
     b.type = "button";
     b.title = "Enviar sticker (mantén pulsado o clic derecho para borrarlo)";
     const img = document.createElement("img");
-    img.src = `data:${st.mime};base64,${st.data}`;
+    img.src = imageSrc(st.data, st.mime);
     img.alt = "Sticker";
     b.append(img);
     b.onclick = () => { closePicker(); sendMySticker(st); };

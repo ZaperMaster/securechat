@@ -9,6 +9,8 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from urllib.parse import urlsplit
+
 from securechat import fcm as fcm_mod
 from securechat.push import Pusher, valid_subscription
 
@@ -27,6 +29,10 @@ def account(tmp_path):
     return path, key.public_key()
 
 
+def host(req):
+    return urlsplit(req.full_url).hostname
+
+
 class FakeGoogle:
     def __init__(self, fail=None):
         self.requests = []
@@ -34,7 +40,7 @@ class FakeGoogle:
 
     def __call__(self, req, timeout=10):
         self.requests.append(req)
-        if "oauth2" in req.full_url:
+        if host(req) == "oauth2.googleapis.com":
             return io.BytesIO(json.dumps({"access_token": "tok-123", "expires_in": 3600}).encode())
         if self.fail:
             raise urllib.error.HTTPError(req.full_url, self.fail[0], "x", {}, io.BytesIO(self.fail[1].encode()))
@@ -57,14 +63,14 @@ def test_fcm_message_has_no_content_and_jwt_is_signed(account, monkeypatch):
     assert f.send(TOKEN, call=False, lang="en") is True
     assert f.send(TOKEN, call=True) is True
     # Un solo token OAuth para los dos avisos
-    oauth = [r for r in google.requests if "oauth2" in r.full_url]
+    oauth = [r for r in google.requests if host(r) == "oauth2.googleapis.com"]
     assert len(oauth) == 1
     assertion = dict(x.split("=", 1) for x in oauth[0].data.decode().split("&"))["assertion"]
     head, claims, sig = assertion.split(".")
     pad = lambda s: base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))  # noqa: E731
     public.verify(pad(sig), f"{head}.{claims}".encode(), padding.PKCS1v15(), hashes.SHA256())
     assert json.loads(pad(claims))["scope"].endswith("firebase.messaging")
-    sends = [r for r in google.requests if "fcm.googleapis.com" in r.full_url]
+    sends = [r for r in google.requests if host(r) == "fcm.googleapis.com"]
     assert sends[0].full_url.endswith("/projects/securechat-prueba/messages:send")
     assert sends[0].headers["Authorization"] == "Bearer tok-123"
     msg, call = json.loads(sends[0].data)["message"], json.loads(sends[1].data)["message"]
@@ -98,5 +104,5 @@ def test_call_stop_is_a_data_message(account, monkeypatch):
     google = FakeGoogle()
     monkeypatch.setattr(fcm_mod.urllib.request, "urlopen", google)
     assert fcm_mod.Fcm(path).send_stop(TOKEN) is True
-    msg = json.loads([r for r in google.requests if "fcm.googleapis.com" in r.full_url][0].data)["message"]
+    msg = json.loads([r for r in google.requests if host(r) == "fcm.googleapis.com"][0].data)["message"]
     assert msg["android"]["data"] == {"kind": "call-stop"}
