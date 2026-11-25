@@ -1,0 +1,56 @@
+# Vigila que el servidor público responda. Cada 15 minutos lo comprueba (3 intentos, para no
+# avisar por un corte de un segundo). Si no responde, abre un aviso (issue) en el repositorio,
+# que GitHub te manda por correo; cuando vuelve a responder, lo cierra solo con un comentario.
+name: Vigilancia del servidor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+concurrency:
+  group: vigilancia
+  cancel-in-progress: false
+
+env:
+  SERVIDOR: https://securechat.dojo-massometer.ts.net
+  ETIQUETA: servidor-caido
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ¿Responde el servidor?
+        id: estado
+        run: |
+          for i in 1 2 3; do
+            if curl -fsS --max-time 20 "$SERVIDOR/config.json" -o /dev/null; then
+              echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            sleep 60
+          done
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+
+      - name: Avisar o cerrar el aviso
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OK: ${{ steps.estado.outputs.ok }}
+        run: |
+          gh label create "$ETIQUETA" --repo "$GITHUB_REPOSITORY" --color B60205 \
+            --description "El servidor público no responde" 2>/dev/null || true
+          abierto=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "$ETIQUETA" --state open --json number -q '.[0].number')
+          ahora=$(date -u +"%Y-%m-%d %H:%M UTC")
+          if [ "$OK" = "true" ]; then
+            if [ -n "$abierto" ]; then
+              gh issue close "$abierto" --repo "$GITHUB_REPOSITORY" --comment "✅ El servidor vuelve a responder ($ahora)."
+            fi
+          elif [ -z "$abierto" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --label "$ETIQUETA" \
+              --title "🔴 El servidor de SecureChat no responde" \
+              --body "Desde $ahora, $SERVIDOR no responde (3 intentos en 3 minutos).
+
+          Mira que el equipo del servidor esté encendido y con Internet, y el icono de SecureChat en la bandeja (o el servicio en la nube). Este aviso se cerrará solo cuando vuelva."
+          fi

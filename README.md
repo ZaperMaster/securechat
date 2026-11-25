@@ -4,11 +4,15 @@
 [![Web](https://img.shields.io/badge/Web-SecureChat-3ddc97?logo=googlechrome&logoColor=white&labelColor=0b1813)](https://zapermaster.github.io/securechat/)
 [![Descargar](https://img.shields.io/github/v/release/ZaperMaster/securechat?label=Descargar&color=2f9e6e)](https://github.com/ZaperMaster/securechat/releases/latest)
 
-Mensajería 1 a 1 con cifrado extremo a extremo (E2E) sobre
-[libsodium](https://doc.libsodium.org/). Tiene dos clientes que se entienden entre sí:
+Mensajería con cifrado extremo a extremo (E2E) sobre [libsodium](https://doc.libsodium.org/):
+chats, grupos, llamadas y videollamadas, fotos y notas de voz.
 
-- **Web / app instalable (PWA)**: el cifrado ocurre en el navegador con libsodium.js.
-- **Terminal**: Python con PyNaCl.
+- **Web / app instalable (PWA)**, **Windows**, **Mac**, **Linux** y **Android**: el mismo cliente
+  (el cifrado ocurre en el dispositivo con libsodium.js). Las apps llevan el código dentro.
+- **Terminal** (Python con PyNaCl): cliente **básico** de mensajes 1 a 1. Sirve sobre todo para
+  comprobar que el protocolo es correcto implementado en dos lenguajes (las pruebas los hacen
+  hablar entre sí). No tiene grupos, llamadas, fotos, cifrado poscuántico, remitente oculto ni
+  copia en el servidor.
 
 El servidor solo reenvía bytes cifrados: nunca ve el texto ni tiene claves para descifrarlo.
 
@@ -111,6 +115,15 @@ pasa paquetes).
 - **Mensajes temporales por defecto** para los chats nuevos, si lo activas.
 - **Notificaciones con la app cerrada** (Web Push): el aviso no lleva el contenido
   ni el remitente, solo "tienes un mensaje nuevo".
+- **Copia automática cifrada en el servidor**: chats, fotos, vídeos, notas de voz, grupos,
+  contactos y ajustes, cifrados en tu dispositivo con una clave que sale de tu identidad (el
+  servidor no puede leerlos; los archivos, uno a uno y con un identificador opaco, hasta 500 MB).
+  Al iniciar sesión en un dispositivo nuevo todo vuelve solo.
+- **Nombre para cada contacto** (solo lo ves tú): al empezar un chat o desde los tres puntos.
+- **Buscar en todos los chats** a la vez (sin distinguir tildes ni mayúsculas).
+- **Llamadas como llamada de verdad**: en Android, pantalla de llamada del sistema aunque la app
+  esté cerrada; en el ordenador, la ventana salta al frente. Con varios dispositivos, el primero
+  que contesta se queda la llamada y los demás dejan de sonar.
 - **Copia de seguridad cifrada** del historial, ajustes de los chats y mensajes
   programados (*Opciones → Copia de seguridad*), que solo tu cuenta puede abrir. Puedes
   hacerla con o sin fotos; la app te recuerda hacerla si pasa más de un mes.
@@ -219,6 +232,7 @@ red; no lo es para un despliegue real.
 
 ### Terminal
 
+Cliente **básico** (solo mensajes de texto 1 a 1; para todo lo demás usa la web o las apps).
 Dos usuarios en dos terminales (pueden hablar también con usuarios de la web).
 Añade `--code` con el código del servidor a `chat`:
 
@@ -251,7 +265,9 @@ pytest -q tests/test_browser.py    # la app en un navegador de verdad (registro,
                                    # bloquear, recuperar la cuenta y una llamada de voz)
 ```
 
-GitHub Actions ejecuta todo en cada push. Además, **Dependabot** propone actualizar las
+GitHub Actions ejecuta todo en cada push, incluido el instalador del servidor para la nube en un
+Ubuntu de verdad. Además, cada 15 minutos **vigila que el servidor público responda** y, si no,
+abre un aviso (issue) que te llega por correo (`.github/workflows/vigilancia.yml`). Además, **Dependabot** propone actualizar las
 dependencias cada semana y una **auditoría** (`pip-audit`, `npm audit`) avisa de fallos de
 seguridad conocidos en las librerías.
 
@@ -287,6 +303,13 @@ cd desktop && npm install && npm run build      # -> desktop/dist/ (y firma la a
 Para publicar una versión: sube a una release `vX.Y.Z` de GitHub el instalador, su
 `.blockmap`, su `.sig` y `latest.yml` (todo sale en `desktop/dist/`).
 
+### Mac y Linux (`desktop/`, Electron)
+
+La misma app de escritorio, para **Mac** (`.dmg`, Intel y Apple Silicon) y **Linux** (`.AppImage`
+y `.deb`). Las compila GitHub Actions al publicar cada versión (`.github/workflows/escritorio.yml`)
+y las sube a la release. Sin certificado de Apple, en Mac hay que abrirla la primera vez con
+**clic derecho → Abrir**. No se actualizan solas: avisan cuando hay versión nueva.
+
 ### Android (`movil/`, Capacitor)
 
 **Descarga:** [SecureChat-Android-2.1.1.apk](https://github.com/ZaperMaster/securechat/releases/download/v1.1.4/SecureChat-Android-2.1.1.apk).
@@ -314,6 +337,12 @@ Necesita JDK 21 y el SDK de Android. La clave de firma y `google-services.json` 
 **no están en git** (`privado/android/`): sin la clave no se pueden publicar actualizaciones.
 En el servidor, la cuenta de servicio de Firebase va junto a la base de datos como
 `<base>_fcm.json` (por ejemplo `usuarios_fcm.json`); sin ella simplemente no hay avisos en Android.
+
+## Servidor en la nube
+
+Para que funcione con tu PC apagado: `nube/LEEME.md` explica cómo montarlo gratis en Oracle Cloud
+(o cualquier Linux) **sin cambiar la dirección**, con `nube/instalar.sh` (servicio de systemd
+endurecido, copia diaria de la base de datos y Tailscale Funnel) y `nube/copiar-datos.ps1`.
 
 ## Arquitectura
 

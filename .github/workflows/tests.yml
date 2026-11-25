@@ -54,3 +54,21 @@ jobs:
 
       - name: Pruebas en el navegador
         run: python -m pytest -q tests/test_browser.py tests/test_calls.py
+
+  # El instalador del servidor para la nube (nube/instalar.sh) en un Ubuntu de verdad:
+  # tiene que dejar el servicio en marcha, respondiendo, y con la copia diaria funcionando.
+  nube:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Instalar como en la nube
+        run: sudo SECURECHAT_CODIGO="$GITHUB_WORKSPACE" bash nube/instalar.sh
+      - name: Arrancar y comprobar
+        run: |
+          sudo systemctl start securechat
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8765/config.json && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8765/config.json
+          systemctl is-active securechat
+          sudo systemctl show securechat -p ExecStart --no-pager | grep -o "turns:[^ ]*"
+          sudo systemd-analyze security securechat | tail -1
+          sudo /etc/cron.daily/securechat-copia && sudo ls /var/lib/securechat/copias

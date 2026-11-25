@@ -149,6 +149,7 @@ async def _chat(args, identity: SigningKey) -> None:
                         prekeys_path=profile_dir(args) / "device.keys", code=args.code)
     await client.connect(args.server)
     print(f"Conectado a {args.server} como {args.name}.")
+    print("Cliente básico de terminal: solo mensajes de texto 1 a 1 (para grupos, llamadas y fotos usa la web o las apps).")
     events = asyncio.create_task(_show_events(client))
     repl = asyncio.create_task(_repl(client))
     await asyncio.wait({events, repl}, return_when=asyncio.FIRST_COMPLETED)

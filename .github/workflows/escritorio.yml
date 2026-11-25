@@ -1,0 +1,51 @@
+# Apps de escritorio para Mac y Linux. Las de Mac solo se pueden compilar en un Mac, así que
+# las hace GitHub en sus máquinas y las sube a la versión publicada (la de Windows se compila y
+# firma en el equipo de quien publica, porque la clave de las actualizaciones no sale de allí).
+name: Apps de Mac y Linux
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Etiqueta de la versión (por ejemplo v1.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  compilar:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: --mac
+            files: "dist/*.dmg"
+          - os: ubuntu-latest
+            target: --linux
+            files: "dist/*.AppImage dist/*.deb"
+    runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    defaults: { run: { working-directory: desktop } }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v7
+        with: { node-version: "22" }
+      - run: npm ci
+      - run: node node_modules/electron/install.js
+      - run: npm run copiar-web
+      - name: Compilar
+        run: npx electron-builder ${{ matrix.target }} --publish never
+        env:
+          # Sin certificado de Apple: firma "ad hoc" (hay que abrirla con clic derecho → Abrir la primera vez)
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Subir a la versión
+        run: gh release upload "$TAG" ${{ matrix.files }} --clobber --repo "$GITHUB_REPOSITORY"

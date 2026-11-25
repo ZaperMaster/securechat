@@ -88,6 +88,9 @@ SECURITY_HEADERS = {
 }
 CLOUD_MAX = 12 * 1024 * 1024  # copia cifrada de la cuenta (en base64)
 CLOUD_INTERVAL = 20            # segundos mínimos entre copias de una cuenta
+MEDIA_MAX = 12 * 1024 * 1024   # una foto/vídeo cifrado (en base64)
+MEDIA_QUOTA = 500 * 1024 * 1024  # fotos y vídeos por cuenta en el servidor (se borran los más antiguos)
+MEDIA_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 SEALED_LIMIT = 600          # envíos anónimos por minuto e IP
 MAX_BLOCKED = 1000          # usuarios bloqueados por cuenta
 REPORTS_PER_DAY = 10        # denuncias por cuenta y día
@@ -541,6 +544,8 @@ class RelayServer:
                         await _send(ws, type="error", id=msg.get("id"), code="bad_request", message="clave de entrega inválida")
                 elif t in ("backup-put", "backup-get", "backup-delete"):
                     await self._cloud(ws, c, msg)
+                elif t in ("media-put", "media-get", "media-del"):
+                    await self._cloud_media(ws, c, msg)
                 elif t == "block":
                     await self._set_block(ws, c, msg)
                 elif t == "report":
@@ -630,6 +635,33 @@ class RelayServer:
         else:
             self._cloud_mem[c] = (data, at)
         await _send(ws, type="ack", id=rid, status="ok", at=at)
+
+    async def _cloud_media(self, ws: ServerConnection, c: str, msg: dict) -> None:
+        """Fotos y vídeos de la copia, cifrados uno a uno en el dispositivo. El identificador es
+        opaco (sale de la identidad): el servidor no sabe de qué chat ni de qué mensaje son."""
+        t, rid = msg["type"], msg.get("id")
+        if not self.store:
+            await _send(ws, type="error", id=rid, code="no_storage", message="este servidor no guarda fotos")
+            return
+        if t == "media-del":
+            ids = [i for i in (msg.get("ids") or [])[:500] if isinstance(i, str) and MEDIA_ID_RE.match(i)]
+            self.store.media_delete(c, ids)
+            await _send(ws, type="ack", id=rid, status="ok")
+            return
+        mid = msg.get("mid")
+        if not isinstance(mid, str) or not MEDIA_ID_RE.match(mid):
+            await _send(ws, type="error", id=rid, code="bad_request", message="identificador inválido")
+            return
+        if t == "media-get":
+            await _send(ws, type="media", id=rid, data=self.store.media_get(c, mid))
+            return
+        data = msg.get("data")
+        if not isinstance(data, str) or not data or len(data) > MEDIA_MAX:
+            await _send(ws, type="error", id=rid, code="too_big", message="archivo demasiado grande")
+            return
+        b64d(data)
+        await asyncio.to_thread(self.store.media_put, c, mid, data, int(time.time()), MEDIA_QUOTA)
+        await _send(ws, type="ack", id=rid, status="ok")
 
     def blocks(self, owner: str, other: str) -> bool:
         """¿`owner` ha bloqueado a `other`? (los dos en canon)"""
@@ -1216,6 +1248,10 @@ def main() -> None:
                    help="verificación por correo, pero el código se muestra en esta consola")
     p.add_argument("--turn", type=int, metavar="PUERTO",
                    help="arranca el relé de llamadas (TURN por TCP) en este puerto, solo para este equipo")
+    p.add_argument("--correo-json", type=Path, metavar="FICHERO",
+                   help="verificación por correo con la configuración SMTP de este JSON (como correo.json de la bandeja)")
+    p.add_argument("--turn-publico", metavar="URL",
+                   help="dirección pública del relé de llamadas que se da a las apps (p. ej. turns:host:10000?transport=tcp)")
     p.add_argument("--denuncias", action="store_true", help="muestra las denuncias recibidas y sale")
     p.add_argument("--cert", type=Path, help="certificado TLS (PEM) para servir por HTTPS")
     p.add_argument("--key", type=Path, help="clave privada TLS (PEM)")
@@ -1235,6 +1271,11 @@ def main() -> None:
     if args.email_pruebas:
         from .email_verify import ConsoleSender
         sender = ConsoleSender()
+    elif args.correo_json:
+        from .email_verify import SmtpSender
+        sender = SmtpSender.from_file(args.correo_json)
+        if sender is None:
+            p.error(f"{args.correo_json} no tiene una configuración SMTP válida")
     elif args.email:
         from .email_verify import SmtpSender
         sender = SmtpSender.from_env()
@@ -1243,7 +1284,7 @@ def main() -> None:
     relay = RelayServer(args.db, args.queue, code, sender)
     if args.turn:
         relay.turn_port = args.turn
-        relay.turn_urls = [f"turn:127.0.0.1:{args.turn}?transport=tcp"]
+        relay.turn_urls = [args.turn_publico or f"turn:127.0.0.1:{args.turn}?transport=tcp"]
     try:
         asyncio.run(run(host, args.port, relay=relay, tls=tls))
     except KeyboardInterrupt:

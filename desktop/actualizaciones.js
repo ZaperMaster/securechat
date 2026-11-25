@@ -47,6 +47,9 @@ async function verifyInstaller(file, info) {
  */
 function setupUpdates({ onReady, L = (es) => es }) {
   if (!app.isPackaged) return;
+  // Mac y Linux: sin certificado de Apple no se pueden actualizar solas (ni con nuestra firma, que
+  // solo se comprueba en el instalador de Windows). Avisan de la versión nueva y abren la descarga.
+  if (process.platform !== "win32") return avisarVersionNueva(L);
   const { autoUpdater } = require("electron-updater");
   const portable = !!process.env.PORTABLE_EXECUTABLE_DIR; // la portable no se puede actualizar sola
   autoUpdater.autoDownload = false;
@@ -78,6 +81,31 @@ function setupUpdates({ onReady, L = (es) => es }) {
   autoUpdater.on("error", () => {}); // sin conexión, GitHub caído, firma mala…: se reintenta más tarde
 
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  setTimeout(check, 30 * 1000);
+  setInterval(check, CHECK_EVERY);
+}
+
+/** Compara "1.2.3" con "1.10.0". */
+function nuevaQue(a, b) {
+  const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  return false;
+}
+
+function avisarVersionNueva(L) {
+  let avisada = null;
+  const check = async () => {
+    try {
+      const r = await net.fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { Accept: "application/vnd.github+json" } });
+      if (!r.ok) return;
+      const tag = String((await r.json()).tag_name || "").replace(/^v/, "");
+      if (!/^\d+\.\d+\.\d+$/.test(tag) || !nuevaQue(tag, app.getVersion()) || avisada === tag) return;
+      avisada = tag;
+      const n = new Notification({ title: "SecureChat", body: L(`Hay una versión nueva (${tag}). Pulsa para descargarla.`, `A new version (${tag}) is available. Click to download it.`) });
+      n.on("click", () => shell.openExternal(`${RELEASES}/latest`));
+      n.show();
+    } catch { /* sin conexión: se reintenta */ }
+  };
   setTimeout(check, 30 * 1000);
   setInterval(check, CHECK_EVERY);
 }

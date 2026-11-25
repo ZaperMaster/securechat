@@ -92,10 +92,18 @@ class Person:
         p.wait_for_selector("#app:not([hidden])")
         return code
 
-    def open_chat(self, peer):
+    def open_chat(self, peer, nickname=None):
         self.page.fill("#new-chat-name", peer)
         self.page.press("#new-chat-name", "Enter")
         self.page.wait_for_selector("#peer-name", state="visible")
+        # Chat nuevo: pregunta con qué nombre guardarle
+        ask = self.page.locator("#dlg-actions button:has-text('Omitir')")
+        ask.wait_for(timeout=5000)
+        if nickname:
+            self.page.fill("#dlg-body input", nickname)
+            self.page.click("#dlg-actions button:has-text('Guardar')")
+        else:
+            ask.click()
 
     def send(self, text):
         self.page.fill("#text", text)
@@ -236,6 +244,10 @@ def test_new_device_gets_chats_from_encrypted_server_backup(server, browser):
     juan.register("juan")
     marta.open_chat("juan")
     marta.send("mensaje que debe volver")
+    # Una foto: también tiene que volver (cifrada aparte en el servidor)
+    marta.page.set_input_files("#file-input", str(ROOT / "web" / "icon-192.png"))
+    marta.page.click("#dlg-actions button:has-text('Enviar')")
+    marta.page.locator("#messages li.msg.media img").first.wait_for()
     juan.row("marta").wait_for()
     juan.row("marta").locator("button").click()
     juan.page.click("#request-bar button:has-text('Aceptar')")
@@ -262,6 +274,50 @@ def test_new_device_gets_chats_from_encrypted_server_backup(server, browser):
     nuevo.row("juan").locator("button").click()
     nuevo.bubble("mensaje que debe volver").wait_for()
     nuevo.bubble("y este también").wait_for()
+    foto = nuevo.page.locator("#messages li.msg.media img").first
+    foto.wait_for()
+    nuevo.page.wait_for_function("(el) => el.naturalWidth > 0", arg=foto.element_handle(), timeout=20000)
     # Y sigue pudiendo hablar con juan (no es una solicitud)
     assert nuevo.page.locator("#request-bar").is_hidden()
     nuevo.ctx.close(); juan.ctx.close()
+
+
+def test_contact_nickname_on_new_chat_and_from_menu(server, browser):
+    eli, raul = Person(browser, server), Person(browser, server)
+    eli.register("eli")
+    raul.register("raul")
+    eli.open_chat("raul", nickname="Mi primo")
+    assert "Mi primo" in eli.page.inner_text("#peer-name")
+    eli.send("hola")
+    assert "Mi primo" in eli.row("raul").inner_text()
+    # Desde los tres puntos del chat
+    eli.page.click("#chat-menu-btn")
+    eli.page.click(".msg-menu button:has-text('Cambiar nombre')")
+    eli.page.fill("#dlg-body input", "Raúl del gym")
+    eli.page.press("#dlg-body input", "Enter")
+    eli.page.locator("#peer-name", has_text="Raúl del gym").wait_for()
+    assert "Raúl del gym" in eli.row("raul").inner_text()
+    eli.ctx.close(); raul.ctx.close()
+
+
+def test_search_in_all_chats(server, browser):
+    sara, tomas, unai = Person(browser, server), Person(browser, server), Person(browser, server)
+    sara.register("sara")
+    tomas.register("tomas")
+    unai.register("unai")
+    sara.open_chat("tomas")
+    sara.send("La reunión es el jueves en la biblioteca")
+    sara.page.fill("#new-chat-name", "unai")
+    sara.page.press("#new-chat-name", "Enter")
+    sara.page.click("#dlg-actions button:has-text('Omitir')")
+    sara.send("Nos vemos en la BIBLIOTECA central")
+    sara.send("otra cosa")
+    sara.page.click("#search-all-btn")
+    sara.page.fill("#dlg-body input", "biblioteca")  # sin tilde ni mayúsculas, encuentra las dos
+    hits = sara.page.locator(".search-all-hit")
+    hits.nth(1).wait_for()
+    assert hits.count() == 2
+    hits.filter(has_text="tomas").click()
+    sara.page.locator("#peer-name", has_text="tomas").wait_for()
+    for ctx in (sara, tomas, unai):
+        ctx.ctx.close()

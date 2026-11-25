@@ -100,6 +100,7 @@ class Device:
         self.page.fill("#new-chat-name", peer)
         self.page.press("#new-chat-name", "Enter")
         self.page.wait_for_selector("#peer-name", state="visible")
+        self.page.locator("#dlg-actions button:has-text('Omitir')").click(timeout=5000)
 
     def open(self, peer):
         self.page.locator(f"#contacts li[data-conv='{peer}'] button").click()

@@ -1489,3 +1489,13 @@ details.advanced > .switch { margin-top: 10px; }
 .profile-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .request-actions .chip.danger, .profile-actions .chip.danger { margin-top: 0; }
 .profile-actions { margin-top: 14px; }
+
+/* Buscar en todos los chats */
+.search-all-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; max-height: min(60vh, 520px); overflow-y: auto; }
+.search-all-hit { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; padding: 8px; border-radius: 12px; }
+.search-all-hit:hover, .search-all-hit:focus-visible { background: var(--hover); }
+.search-all-hit > span:last-child { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.search-all-head { display: flex; justify-content: space-between; gap: 8px; }
+.search-all-head time { color: var(--muted); font-size: .8em; flex: none; }
+.search-all-snip { color: var(--muted); font-size: .9em; overflow-wrap: anywhere; }
+.search-all-snip mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: inherit; border-radius: 3px; }

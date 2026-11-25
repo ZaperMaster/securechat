@@ -55,7 +55,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", () => showWindow());
 }
 
-app.setAppUserModelId("es.securechat.desktop"); // notificaciones de Windows con el nombre de la app
+if (process.platform === "win32") app.setAppUserModelId("es.securechat.desktop"); // notificaciones con el nombre de la app
 
 /** Fichero empaquetado para esta ruta (o null si no es de la app). */
 function bundledFile(pathname) {
@@ -185,11 +185,12 @@ function createTray() {
   const build = () => Menu.buildFromTemplate([
     { label: L("Abrir SecureChat", "Open SecureChat"), click: showWindow },
     ...(update ? [{ label: L(`Reiniciar para actualizar (${update.version})`, `Restart to update (${update.version})`), click: () => { quitting = true; update.install(); } }] : []),
-    { type: "separator" },
-    {
-      label: L("Iniciar con Windows", "Start with Windows"), type: "checkbox", checked: autostart(),
+    // Iniciar con el sistema: Windows y Mac (en Linux depende del escritorio, no se ofrece)
+    ...(process.platform === "linux" ? [] : [{ type: "separator" }, {
+      label: process.platform === "darwin" ? L("Abrir al iniciar sesión", "Open at login") : L("Iniciar con Windows", "Start with Windows"),
+      type: "checkbox", checked: autostart(),
       click: (item) => { app.setLoginItemSettings({ openAtLogin: item.checked, args: ["--oculto"] }); tray.setContextMenu(build()); },
-    },
+    }]),
     { type: "separator" },
     { label: L("Salir", "Quit"), click: () => { quitting = true; app.quit(); } },
   ]);

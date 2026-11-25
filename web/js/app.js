@@ -466,8 +466,30 @@ async function logout({ keepSession = false } = {}) {
 
 const displayName = (peer) => {
   const c = client?.contacts.get(peer);
-  return c?.nick || c?.displayName || peer;
+  return meta(peer).nick || c?.nick || c?.displayName || peer;
 };
+
+/** Nombre que tú le pones a alguien (solo lo ves tú). Va en los ajustes del chat, así viaja con tus copias. */
+function setNickname(peer, nick) {
+  nick = String(nick || "").trim().slice(0, 64);
+  setMeta(peer, { nick: nick || null });
+  client?.contacts.setNick(peer, nick);
+  renderContacts();
+  if (peer === active) renderHeader();
+}
+
+function askNickname(peer, { first = false } = {}) {
+  const c = client.contacts.get(peer);
+  const inp = input(meta(peer).nick || c?.nick || "", { max: 64, placeholder: c?.displayName || peer });
+  const save = () => setNickname(peer, inp.value);
+  dialog(first ? `Nuevo chat con @${peer}` : "Cambiar nombre", [
+    text(first ? "¿Con qué nombre quieres guardarle? Solo lo ves tú; puedes cambiarlo cuando quieras desde los tres puntos del chat."
+      : "Es el nombre con el que te aparece en tus chats. Solo lo ves tú.", "p", "hint"),
+    field("Nombre", inp),
+  ], [[first ? "Omitir" : "Cancelar"], ["Guardar", save]]);
+  inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); save(); $("dialog").close(); } };
+  inp.focus();
+}
 const avatarOf = (peer) => client?.contacts.get(peer)?.avatar || null;
 
 // Imágenes que llegan como base64 (fotos de perfil, stickers, vistas previas): solo tipos de imagen
@@ -873,6 +895,7 @@ function applyAction(conv, sender, c, queuedAt = null) {
 
 function deleteLocal(conv, m) {
   if (m.url) URL.revokeObjectURL(m.url);
+  if (m.hasMedia && client && connected && identity) client.request({ type: "media-del", ids: [cloudMediaId(conv, m.id)] }).catch(() => {});
   m.deleted = true;
   m.content = { t: "deleted", mid: m.content?.mid };
   m.reactions = {};
@@ -1159,6 +1182,7 @@ async function onNewChat(ev) {
     const isNewChat = !chat(info.user).messages.some((m) => !m.sys);
     openChat(info.user);
     applyDefaultTimer(info.user, isNewChat);
+    if (isNewChat && !meta(info.user).nick && !client.contacts.get(info.user)?.nick) askNickname(info.user, { first: true });
   } catch (e) {
     showNewChatError(e.message);
   } finally {
@@ -3155,13 +3179,13 @@ async function exportBackup({ media = true } = {}) {
 }
 
 /** La copia cifrada (con la clave que sale de la identidad). label separa la del fichero y la del servidor. */
-async function buildBackup({ media = true, label = "sc-backup", gzip = false } = {}) {
+async function buildBackup({ media = true, label = "sc-backup", gzip = false, keepMediaFlag = false } = {}) {
   const convs = [];
   for (const [conv, ch] of chats) {
     const msgs = [];
     for (const m of ch.messages) {
       const { el, url, ...plain } = m;
-      if (m.hasMedia && !media) plain.hasMedia = false;
+      if (m.hasMedia && !media) plain.hasMedia = keepMediaFlag && !m.content?.once && !m.expires;
       else if (m.hasMedia) {
         const bytes = await history.getMedia(conv, m.id);
         if (bytes) plain.media = sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL);
@@ -3207,12 +3231,59 @@ async function uploadCloud(force = false) {
   cloudBusy = true;
   cloudDirty = false;
   try {
-    const { bytes } = await buildBackup({ media: false, label: "sc-cloud-backup", gzip: true });
+    const { bytes } = await buildBackup({ media: false, label: "sc-cloud-backup", gzip: true, keepMediaFlag: true });
     if (bytes.length > 8 * 1024 * 1024) return; // demasiado grande para el servidor: queda la copia en fichero
     const r = await client.request({ type: "backup-put", data: P.b64e(bytes) }, 60000);
     cloudLast = Date.now();
     store.set(cloudKey(), (r.at || 0) * 1000 || Date.now());
+    await uploadCloudMedia();
   } catch { cloudDirty = true; } finally { cloudBusy = false; }
+}
+
+// Fotos, vídeos, notas de voz y documentos: cada uno cifrado aparte y con un identificador opaco
+const cloudMediaKey = () => `sc:cloudmedia:${me.toLowerCase()}`;
+const cloudMediaId = (conv, mid) => sodium.to_hex(P.kdf(identity.seed, "sc-cloud-media-id", P.utf8(`${conv}|${mid}`), 16));
+
+async function uploadCloudMedia(maxItems = 20, maxBytes = 40 * 1024 * 1024) {
+  const sent = new Set(store.get(cloudMediaKey()) || []);
+  let n = 0, bytesSent = 0;
+  const key = P.kdf(identity.seed, "sc-cloud-media");
+  for (const [conv, ch] of chats) {
+    for (const m of ch.messages) {
+      if (!m.hasMedia || m.deleted || m.content?.once || m.expires) continue;
+      const id = cloudMediaId(conv, m.id);
+      if (sent.has(id)) continue;
+      const bytes = await history.getMedia(conv, m.id);
+      if (!bytes || bytes.length > 8 * 1024 * 1024) { sent.add(id); continue; }
+      const nonce = sodium.randombytes_buf(24);
+      const ct = sodium.crypto_secretbox_easy(bytes, nonce, key);
+      const out = new Uint8Array(24 + ct.length);
+      out.set(nonce); out.set(ct, 24);
+      try { await client.request({ type: "media-put", mid: id, data: P.b64e(out) }, 120000); }
+      catch { store.set(cloudMediaKey(), [...sent]); return; }
+      sent.add(id);
+      n++;
+      bytesSent += out.length;
+      if (n >= maxItems || bytesSent >= maxBytes) { store.set(cloudMediaKey(), [...sent]); markCloudDirty(); return; }
+    }
+  }
+  store.set(cloudMediaKey(), [...sent]);
+}
+
+/** Baja del servidor una foto que aquí no está (dispositivo nuevo). */
+async function fetchCloudMedia(conv, m) {
+  if (!prefs().cloudBackup || !connected || !client || m.content?.once) return null;
+  try {
+    const r = await client.request({ type: "media-get", mid: cloudMediaId(conv, m.id) }, 120000);
+    if (!r?.data) return null;
+    const raw = P.b64d(r.data);
+    const bytes = sodium.crypto_secretbox_open_easy(raw.subarray(24), raw.subarray(0, 24), P.kdf(identity.seed, "sc-cloud-media"));
+    await history.putMedia(conv, m.id, bytes);
+    const sent = new Set(store.get(cloudMediaKey()) || []);
+    sent.add(cloudMediaId(conv, m.id));
+    store.set(cloudMediaKey(), [...sent]);
+    return bytes;
+  } catch { return null; }
 }
 
 /** Baja la copia del servidor y la junta con lo que haya. Devuelve cuántos mensajes se han añadido. */
@@ -3369,7 +3440,7 @@ function showBackup(back = false) {
   };
   const cloudInfo = text(cloudWhen(), "small");
   cloudT.append(text("Copia automática cifrada en el servidor", "strong"),
-    text("Tus chats (sin fotos ni vídeos), grupos, contactos y ajustes, cifrados en este dispositivo: el servidor no puede leerlos. Al iniciar sesión en un móvil u ordenador nuevo se recuperan solos.", "small"),
+    text("Tus chats, fotos, vídeos, notas de voz, grupos, contactos y ajustes, cifrados en este dispositivo: el servidor no puede leerlos. Al iniciar sesión en un móvil u ordenador nuevo se recuperan solos (las fotos, al abrir cada chat). Hasta 500 MB de archivos: si se llena, se quitan los más antiguos.", "small"),
     cloudInfo);
   cloudL.append(cloudCb, cloudT);
   cloudCb.onchange = async () => {
@@ -3527,7 +3598,7 @@ function showPeerProfile(peer) {
   const body = [head];
   let nickIn = null;
   if (c) {
-    nickIn = input(c.nick, { placeholder: c.displayName || peer });
+    nickIn = input(meta(peer).nick || c.nick, { placeholder: c.displayName || peer });
     body.push(field("Apodo", nickIn, "Solo lo ves tú. Sustituye a su nombre en tu lista de chats."));
     const d = document.createElement("details");
     d.className = "advanced";
@@ -3561,7 +3632,7 @@ function showPeerProfile(peer) {
   const acts = text("", "div", "profile-actions");
   acts.append(clear, blk, rep);
   body.push(acts);
-  dialog("Perfil", body, [["Cerrar", () => { if (nickIn) client.contacts.setNick(peer, nickIn.value); }]]);
+  dialog("Perfil", body, [["Cerrar", () => { if (nickIn) setNickname(peer, nickIn.value); }]]);
 }
 
 // ------------------------------------------------------------- personalizar
@@ -3985,6 +4056,7 @@ function openChatMenu(conv, x, y) {
   item("star", "Mensajes destacados", () => showStarred(conv));
   item("image", "Fotos, documentos y enlaces", () => showGallery(conv));
   if (!isGroup(conv)) {
+    item("edit", "Cambiar nombre", () => askNickname(conv));
     item("ban", isBlocked(conv) ? "Desbloquear" : "Bloquear", () => setBlocked(conv, !isBlocked(conv)), isBlocked(conv) ? "" : "danger");
     item("alert", "Denunciar", () => showReport(conv), "danger");
   }
@@ -4207,7 +4279,7 @@ function isJumboEmoji(s) {
 
 async function mediaUrl(conv, m) {
   if (m.url) return m.url;
-  const bytes = await history?.getMedia(conv, m.id);
+  const bytes = (await history?.getMedia(conv, m.id)) || (await fetchCloudMedia(conv, m));
   if (!bytes) return null;
   m.url = URL.createObjectURL(new Blob([bytes], { type: m.content.mime }));
   return m.url;
@@ -4916,6 +4988,73 @@ function linkCard(body, lp = null) {
   return a;
 }
 
+// ------------------------------------------------- buscar en todos los chats
+
+const fold = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+/** Texto buscable de un mensaje: el texto, el nombre del archivo, la pregunta de una encuesta… */
+function searchableText(m) {
+  const c = m.content;
+  if (!c || m.deleted || m.sys) return "";
+  if (c.t === "text") return c.body;
+  if (c.t === "file") return c.name;
+  if (c.t === "poll") return `${c.q} ${c.opts.join(" ")}`;
+  return c.name || "";
+}
+
+function searchAll(query, limit = 80) {
+  const q = fold(query.trim());
+  if (q.length < 2) return [];
+  const hits = [];
+  for (const [conv, ch] of chats) {
+    if (isGroup(conv) ? !groups.has(gidOf(conv)) : same(conv, me)) continue;
+    for (const m of ch.messages) {
+      const t = searchableText(m);
+      if (t && fold(t).includes(q)) hits.push({ conv, m, t });
+    }
+  }
+  return hits.sort((a, b) => b.m.time - a.m.time).slice(0, limit);
+}
+
+function showSearchAll() {
+  const inp = input("", { max: 100, placeholder: "Buscar mensajes, archivos, encuestas…" });
+  inp.type = "search";
+  const list = text("", "ul", "search-all-list");
+  const info = text("Escribe al menos dos letras.", "p", "hint");
+  const paint = () => {
+    const hits = searchAll(inp.value);
+    info.textContent = inp.value.trim().length < 2 ? "Escribe al menos dos letras." : hits.length ? `${hits.length === 80 ? "Más de 80" : hits.length} resultados` : "Sin resultados";
+    list.replaceChildren(...hits.map(({ conv, m, t }) => {
+      const li = text("", "li");
+      const b = text("", "button", "search-all-hit");
+      b.type = "button";
+      const head = text("", "span", "search-all-head");
+      const who = isGroup(conv) ? `${convName(conv)} · ${m.from === "me" ? "Tú" : displayName(m.sender)}` : m.from === "me" ? `Tú → ${convName(conv)}` : convName(conv);
+      head.append(text(who, "strong"), text(shortTime(m.time), "time"));
+      // El trozo del mensaje alrededor de lo encontrado, con la coincidencia resaltada
+      const i = fold(t).indexOf(fold(inp.value.trim()));
+      const from = Math.max(0, i - 40), to = Math.min(t.length, i + inp.value.trim().length + 60);
+      const snip = text("", "span", "search-all-snip no-i18n");
+      snip.append((from ? "…" : "") + t.slice(from, i));
+      const mark = document.createElement("mark");
+      mark.textContent = t.slice(i, i + inp.value.trim().length);
+      snip.append(mark, t.slice(i + inp.value.trim().length, to) + (to < t.length ? "…" : ""));
+      b.append(setAvatar(text("", "span", "avatar"), convName(conv), convAvatar(conv)), text("", "span"));
+      b.lastChild.append(head, snip);
+      b.onclick = async () => {
+        $("dialog").close();
+        if (active !== conv) await openChat(conv);
+        setTimeout(() => jumpTo(m.id), 150);
+      };
+      li.append(b);
+      return li;
+    }));
+  };
+  inp.oninput = paint;
+  dialog("Buscar en todos los chats", [inp, info, list]);
+  inp.focus();
+}
+
 function jumpTo(mid) {
   const m = chat(active).messages.find((x) => x.id === mid);
   if (!m?.el) return;
@@ -5184,6 +5323,7 @@ async function main() {
   recStop.onclick = () => stopRecording(false, true);
   $("rec-send").before(recStop);
   $("new-group-btn").onclick = showNewGroup;
+  $("search-all-btn").onclick = showSearchAll;
   // Menú de hamburguesa
   const menu = $("app-menu"), menuBtn = $("menu-btn");
   const closeMenu = () => { menu.hidden = true; menuBtn.setAttribute("aria-expanded", "false"); };

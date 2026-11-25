@@ -6,10 +6,16 @@ const path = require("node:path");
 const { flipFuses, FuseVersion, FuseV1Options } = require("@electron/fuses");
 
 exports.default = async function afterPack(context) {
-  const exe = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`);
+  const name = context.packager.appInfo.productFilename;
+  const platform = context.electronPlatformName;
+  // El ejecutable de Electron en cada sistema
+  const exe = platform === "darwin" ? path.join(context.appOutDir, `${name}.app`)
+    : platform === "linux" ? path.join(context.appOutDir, context.packager.executableName)
+    : path.join(context.appOutDir, `${name}.exe`);
   await flipFuses(exe, {
     version: FuseVersion.V1,
-    resetAdHocDarwinSignature: false,
+    // En Mac la firma "ad hoc" deja de valer al tocar el binario: se rehace (si no, no arranca en Apple Silicon)
+    resetAdHocDarwinSignature: platform === "darwin",
     [FuseV1Options.RunAsNode]: false,
     [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
     [FuseV1Options.EnableNodeCliInspectArguments]: false,

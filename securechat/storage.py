@@ -35,6 +35,8 @@ class Store:
             CREATE INDEX IF NOT EXISTS queue_qk ON queue (qk);
             CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
             CREATE TABLE IF NOT EXISTS cloud (canon TEXT PRIMARY KEY, data TEXT NOT NULL, at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS cloud_media (canon TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL,
+                                                    size INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (canon, id));
         """)
         self._written: dict[str, str] = {}
 
@@ -96,6 +98,34 @@ class Store:
     def cloud_delete(self, canon: str) -> None:
         with self._tx():
             self.db.execute("DELETE FROM cloud WHERE canon = ?", (canon,))
+            self.db.execute("DELETE FROM cloud_media WHERE canon = ?", (canon,))
+
+    # Fotos y vídeos cifrados (uno por fila). Con cuota por cuenta: se borran los más antiguos.
+    def media_put(self, canon: str, mid: str, data: str, at: int, quota: int) -> None:
+        with self._tx():
+            self.db.execute("INSERT INTO cloud_media (canon, id, data, size, at) VALUES (?, ?, ?, ?, ?) "
+                            "ON CONFLICT(canon, id) DO UPDATE SET data = excluded.data, size = excluded.size, at = excluded.at",
+                            (canon, mid, data, len(data), at))
+            used = self.db.execute("SELECT COALESCE(SUM(size), 0) FROM cloud_media WHERE canon = ?", (canon,)).fetchone()[0]
+            for old_id, size in self.db.execute("SELECT id, size FROM cloud_media WHERE canon = ? AND id != ? ORDER BY at",
+                                                (canon, mid)).fetchall():
+                if used <= quota:
+                    break
+                self.db.execute("DELETE FROM cloud_media WHERE canon = ? AND id = ?", (canon, old_id))
+                used -= size
+
+    def media_get(self, canon: str, mid: str) -> str | None:
+        with self._lock:
+            row = self.db.execute("SELECT data FROM cloud_media WHERE canon = ? AND id = ?", (canon, mid)).fetchone()
+        return row[0] if row else None
+
+    def media_delete(self, canon: str, ids: list[str]) -> None:
+        with self._tx():
+            self.db.executemany("DELETE FROM cloud_media WHERE canon = ? AND id = ?", [(canon, i) for i in ids])
+
+    def media_usage(self, canon: str) -> int:
+        with self._lock:
+            return self.db.execute("SELECT COALESCE(SUM(size), 0) FROM cloud_media WHERE canon = ?", (canon,)).fetchone()[0]
 
     # ------------------------------------------------------------ varios
 

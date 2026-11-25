@@ -1,0 +1,36 @@
+# Servicio de systemd del servidor de SecureChat (lo instala nube/instalar.sh).
+# Escucha solo en esta máquina (127.0.0.1); Tailscale Funnel lo publica en internet con HTTPS.
+[Unit]
+Description=SecureChat (servidor de mensajería cifrada)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=securechat
+Group=securechat
+WorkingDirectory=/var/lib/securechat
+# El nombre DNS de Tailscale se usa para la dirección pública del relé de llamadas
+# ($$ = el shell ve un $: así systemd no intenta sustituir esas variables)
+EnvironmentFile=-/var/lib/securechat/servidor.env
+ExecStart=/bin/sh -c 'exec /opt/securechat/venv/bin/python -m securechat.server \
+  --port 8765 --no-code \
+  --db /var/lib/securechat/usuarios.json --queue /var/lib/securechat/cola \
+  --turn 3478 --turn-publico "turns:$${SERVIDOR_DNS:-securechat.dojo-massometer.ts.net}:10000?transport=tcp" \
+  $$( [ -f /var/lib/securechat/correo.json ] && echo --correo-json /var/lib/securechat/correo.json )'
+Environment=PYTHONPATH=/opt/securechat/app
+Restart=always
+RestartSec=5
+
+# Endurecimiento: solo puede escribir en sus datos
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/securechat
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

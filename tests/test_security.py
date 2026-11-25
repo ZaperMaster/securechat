@@ -282,3 +282,26 @@ def test_call_stop_push_reaches_the_phone():
         assert calls == [("luis", True, False), ("luis", True, True)]
         await ana.close(); await luis.close(); srv.close()
     run(main())
+
+
+def test_cloud_media_quota_and_isolation(tmp_path, monkeypatch):
+    import securechat.server as srvmod
+
+    async def main():
+        monkeypatch.setattr(srvmod, "MEDIA_QUOTA", 30)
+        srv, url, relay = await start_server(RelayServer(tmp_path / "users.json"))
+        ana, luis = await new_client(url, "ana"), await new_client(url, "luis")
+        blob = lambda b: base64.b64encode(b).decode()  # noqa: E731
+        for i, mid in enumerate(["a" * 32, "b" * 32, "c" * 32]):
+            await ana._send(type="media-put", id=i, mid=mid, data=blob(b"x" * 9))  # 12 caracteres cada una
+            await asyncio.sleep(0.1)
+        # Cuota de 30: con la tercera se borra la más antigua
+        assert relay.store.media_get("ana", "a" * 32) is None
+        assert relay.store.media_get("ana", "c" * 32) == blob(b"x" * 9)
+        assert relay.store.media_get("luis", "c" * 32) is None  # otra cuenta no ve nada
+        await ana._send(type="media-put", id=9, mid="../../etc", data=blob(b"x"))  # identificador raro: rechazado
+        await ana._send(type="media-del", id=10, ids=["c" * 32])
+        await asyncio.sleep(0.2)
+        assert relay.store.media_get("ana", "c" * 32) is None
+        await ana.close(); await luis.close(); srv.close()
+    run(main())
