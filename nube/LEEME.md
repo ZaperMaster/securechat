@@ -19,6 +19,12 @@ al mes). Pide una tarjeta al darte de alta, solo para verificar.
    - Claves SSH: **Generate a key pair** y descarga la clave privada (guárdala en `privado/`).
 3. Crea la instancia y apunta su **IP pública**. No hace falta abrir ningún puerto: Tailscale
    conecta hacia fuera.
+4. **Importante: pasa la cuenta a "Pay As You Go"** (menú ☰ → *Billing & Cost Management* →
+   *Upgrade and Manage Payment*). Sigue siendo **gratis** mientras no salgas de los límites
+   "Always Free" (y no te sales con esto), pero Oracle **deja de reclamar** las máquinas que ve
+   "inactivas". En la cuenta gratuita, si durante 7 días apenas usa procesador, red y memoria (y un
+   servidor de chat pequeño gasta poquísimo), te la pueden apagar. Para no llevarte sorpresas,
+   crea también un aviso de gasto: *Billing → Budgets → Create Budget* de 1 € con aviso por correo.
 
 ## 2. Instalar SecureChat en la máquina
 

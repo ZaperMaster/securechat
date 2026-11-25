@@ -1813,6 +1813,16 @@ async function checkNativeCall() {
   nativeFinTimer = setTimeout(() => { if (!call) L.fin().catch(() => {}); }, 60000);
 }
 function applyNativeCall() {
+  // Llamada de grupo: Contestar = unirme, Rechazar = no unirme
+  if (gcall?.state === "incoming") {
+    if (Date.now() < nativeAnswerUntil) { nativeAnswerUntil = 0; acceptGroupCall(); }
+    else if (Date.now() < nativeDeclineUntil) {
+      nativeDeclineUntil = 0;
+      hangUpGroup();
+      plugin("Llamadas")?.minimizar().catch(() => {});
+    }
+    return;
+  }
   if (!call || call.role !== "in" || call.state !== "incoming") return;
   if (Date.now() < nativeAnswerUntil) { nativeAnswerUntil = 0; acceptCall(); }
   else if (Date.now() < nativeDeclineUntil) {
@@ -2135,6 +2145,9 @@ function onGroupCallSignal(sender, c, queuedAt) {
     const inc = gcall;
     renderGroupCall();
     startRing("in");
+    if (document.hidden) document.title = `📞 ${convName(conv)}`; // la app de Windows trae la ventana
+    if (NATIVE && !document.hidden) plugin("Llamadas")?.quitar().catch(() => {});
+    applyNativeCall();
     if (document.hidden && prefs().notifications && "Notification" in window && Notification.permission === "granted") {
       callNotification(`${c.video ? "Videollamada" : "Llamada"} en ${convName(conv)}`, `${displayName(sender)} te está llamando`);
     }
@@ -2260,6 +2273,8 @@ function endGroupCall(notice = null) {
   const line = c.startedAt ? `${c.video ? "Videollamada" : "Llamada"} de grupo · ${fmtDur(Math.round((Date.now() - c.startedAt) / 1000))}` : notice;
   if (line) addMsg(`#${c.g}`, { sys: line });
   $("call-screen")?.remove();
+  updateTitle();
+  if (NATIVE) { plugin("Llamadas")?.quitar().catch(() => {}); plugin("Llamadas")?.fin().catch(() => {}); }
 }
 
 function renderGroupCall() {
@@ -5429,10 +5444,19 @@ function checkPin(pin) {
   return sodium.memcmp(hashPin(pin, P.b64d(c.salt)), P.b64d(c.hash));
 }
 
-const canBio = () => !!(window.PublicKeyCredential && window.isSecureContext && navigator.credentials);
+// En la app de Android la huella va por el diálogo biométrico del sistema (plugin "Huella"):
+// el visor web de una app no admite WebAuthn como Chrome.
+const canBio = () => (NATIVE ? !!plugin("Huella") : !!(window.PublicKeyCredential && window.isSecureContext && navigator.credentials));
+const nativeBio = (titulo) => plugin("Huella").verificar({ titulo: t(titulo), cancelar: t("Usar el PIN") }).then((r) => !!r?.ok).catch(() => false);
 
 /** Registra la huella/cara del dispositivo (autenticador de la plataforma). */
 async function registerBio() {
+  if (NATIVE) {
+    const d = await plugin("Huella").disponible();
+    if (!d?.disponible) throw new Error("sin huella");
+    if (!(await nativeBio("Confirma tu huella o tu cara"))) throw new Error("cancelado");
+    return "android";
+  }
   const cred = await navigator.credentials.create({ publicKey: {
     challenge: sodium.randombytes_buf(32),
     rp: { name: "SecureChat" },
@@ -5447,6 +5471,7 @@ async function registerBio() {
 async function verifyBio() {
   const c = lockConf();
   if (!c?.bio) return false;
+  if (NATIVE) return c.bio === "android" && nativeBio("Desbloquear SecureChat");
   try {
     const a = await navigator.credentials.get({ publicKey: {
       challenge: sodium.randombytes_buf(32),

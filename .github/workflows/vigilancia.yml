@@ -1,6 +1,8 @@
 # Vigila que el servidor público responda. Cada 15 minutos lo comprueba (3 intentos, para no
 # avisar por un corte de un segundo). Si no responde, abre un aviso (issue) en el repositorio,
 # que GitHub te manda por correo; cuando vuelve a responder, lo cierra solo con un comentario.
+# GitHub apaga las tareas programadas tras 60 días sin cambios en el repositorio: una vez al día
+# esta se "reactiva" a sí misma, lo que reinicia esa cuenta (sin hacer commits).
 name: Vigilancia del servidor
 
 on:
@@ -10,6 +12,7 @@ on:
 
 permissions:
   issues: write
+  actions: write
 
 concurrency:
   group: vigilancia
@@ -53,4 +56,14 @@ jobs:
               --body "Desde $ahora, $SERVIDOR no responde (3 intentos en 3 minutos).
 
           Mira que el equipo del servidor esté encendido y con Internet, y el icono de SecureChat en la bandeja (o el servicio en la nube). Este aviso se cerrará solo cuando vuelva."
+          fi
+
+      - name: Seguir activa (GitHub las apaga tras 60 días sin cambios)
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/15 * * * *'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Basta con las comprobaciones de la medianoche (UTC); las programadas a veces se retrasan
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$(date -u +%H)" = "00" ]; then
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/vigilancia.yml/enable" && echo "reactivada"
           fi

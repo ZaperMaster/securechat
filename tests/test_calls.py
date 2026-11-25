@@ -291,3 +291,39 @@ def test_busy_when_already_in_a_call(browser, server, app_url):
     assert b.status() == "active"  # a Beto no le corta la llamada que tiene
     a.hang_up()
     close(a, b, c)
+
+
+def test_group_call_web_and_app(browser, server, app_url):
+    """Llamada de grupo: Ana (web) llama al grupo; Beto (app) y Carla (web) suenan y se unen."""
+    a, b = friends(browser, server, app_url, "web", "app")
+    nc = uniq("carla")
+    c = Device(browser, server, app_url, "web").register(nc)
+    c.name = nc
+    a.page.fill("#new-chat-name", nc)
+    a.page.press("#new-chat-name", "Enter")
+    a.page.click("#dlg-actions button:has-text('Omitir')")
+    a.say("hola carla")
+    c.open(a.name)
+    c.page.click("#request-bar button:has-text('Aceptar')")
+    c.say("hola ana")
+    a.sees("hola ana")
+    # Ana crea el grupo con los dos
+    a.close_dialog()
+    a.page.click("#menu-btn")
+    a.page.click("[data-action=group]")
+    a.page.fill("#dlg-body input[placeholder='Amigos de clase']", "Llamada de prueba")
+    for n in (b.name, nc):
+        a.page.locator(".pick-row", has_text=n).locator("input").check()
+    a.page.click("#dlg-actions button:has-text('Crear grupo')")
+    for d in (b, c):
+        d.page.locator("#contacts li", has_text="Llamada de prueba").first.wait_for(timeout=20000)
+    a.page.locator("#contacts li", has_text="Llamada de prueba").first.locator("button").click()
+    a.page.click("#call-btn")
+    for d in (b, c):
+        d.page.wait_for_selector("#call-buttons button[aria-label='Unirme']", timeout=20000)
+    b.page.click("#call-buttons button[aria-label='Unirme']")
+    c.page.click("#call-buttons button[aria-label='Unirme']")
+    for d in (a, b, c):
+        d.page.wait_for_selector("#call-screen[data-state='active']", timeout=30000)
+    a.page.click("#call-buttons button[aria-label='Colgar']")
+    close(a, b, c)
