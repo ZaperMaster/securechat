@@ -32,6 +32,13 @@ window.applyTheme = function (id) {
   // El color de fondo real del tema (la app de Windows lo usa para su barra de título)
   const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
   if (meta) meta.content = bg || (t.id === "system" ? (dark ? "#0f1220" : "#f6f7fb") : t.swatch[0]);
+  // En el APK: hora e iconos de la barra de estado en claro u oscuro según el fondo del tema
+  const bars = window.capacitorExports && window.capacitorExports.SystemBars;
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(bg || t.swatch[0]);
+  if (bars && m) {
+    const lum = (0.299 * parseInt(m[1], 16) + 0.587 * parseInt(m[2], 16) + 0.114 * parseInt(m[3], 16)) / 255;
+    bars.setStyle({ style: lum < 0.5 ? "DARK" : "LIGHT" }).catch(() => {});
+  }
   return t.id;
 };
 

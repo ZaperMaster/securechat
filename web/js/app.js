@@ -5366,6 +5366,10 @@ async function main() {
     if (document.hidden) { uploadCloud(); pauseInBackground(); return; }
     clearTimeout(bgTimer);
     if (NATIVE) checkNativeCall();
+    // Si ya suena dentro de la app, que no siga sonando también la pantalla de llamada del sistema
+    if (NATIVE && (call?.state === "incoming" || gcall?.state === "incoming")) plugin("Llamadas")?.quitar().catch(() => {});
+    // Bloqueada con huella: al volver, pedirla (sin tener que tocar el botón)
+    if (locked && lockConf()?.bio && canBio() && !call && !gcall) verifyBio().then((ok) => { if (ok) unlock(); });
     if (bgPaused) { bgPaused = false; reconnect(); }
     wakeUp();
     if (active) markRead(active);

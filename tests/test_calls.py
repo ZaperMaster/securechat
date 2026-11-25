@@ -66,6 +66,7 @@ window.Capacitor = {
     M("Huella", ["disponible", "verificar"]),
     M("Filesystem", ["writeFile"]),
     M("Share", ["share"]),
+    M("SystemBars", ["setStyle", "show", "hide", "setAnimation"]),
   ],
   nativePromise(plugin, method, opts) {
     window.__nativo.push(plugin + "." + method);
@@ -399,4 +400,25 @@ def test_answer_from_native_call_screen(browser, server, app_url):
     a.no_call()
     a.sees("Llamada rechazada")
     assert "Llamadas.minimizar" in b.page.evaluate("() => window.__nativo")
+    close(a, b)
+
+
+def test_app_respects_status_bar(browser, server, app_url):
+    """En Android la app ocupa también la zona de la hora y las notificaciones: la cabecera, tu foto
+    y la del chat tienen que quedar por debajo (Capacitor da su alto en --safe-area-inset-top)."""
+    a, b = friends(browser, server, app_url, "web", "app")
+    p = b.page
+    p.set_viewport_size({"width": 390, "height": 800})
+    p.evaluate("""() => { const r = document.documentElement.style;
+      r.setProperty('--safe-area-inset-top', '36px'); r.setProperty('--safe-area-inset-bottom', '24px'); }""")
+    p.locator("#app .back").first.click() if p.locator(".app.in-chat").count() else None
+    top = p.evaluate("() => document.querySelector('.me .avatar, .me img, .me button').getBoundingClientRect().top")
+    assert top >= 36, f"tu foto queda debajo de la barra de estado ({top}px)"
+    b.open(a.name)
+    head = p.evaluate("() => document.querySelector('#peer-name').getBoundingClientRect().top")
+    assert head >= 36, f"la cabecera del chat queda debajo de la barra de estado ({head}px)"
+    gap = p.evaluate("() => innerHeight - document.querySelector('.composer').getBoundingClientRect().bottom")
+    assert gap >= 24, f"la caja de escribir queda debajo de la barra de navegación ({gap}px)"
+    # Hora e iconos de la barra de estado según el tema
+    assert "SystemBars.setStyle" in p.evaluate("() => window.__nativo")
     close(a, b)
